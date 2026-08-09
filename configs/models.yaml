@@ -1,0 +1,50 @@
+schema_version: "1.0"
+last_verified_utc: "2026-08-09"
+
+policy:
+  immutable_revision_required: true
+  trust_remote_code_default: false
+  cache_root_env: AIC_CACHE_ROOT
+  offline_snapshot_checksum_required: true
+
+models:
+  region_proposal:
+    role: refine organizer bounding boxes into DAM-compatible masks
+    provider: huggingface
+    model_id: facebook/sam-vit-base
+    revision: 70c1a07f894ebb5b307fd9eaaee97b9dfc16068f
+    license: Apache-2.0
+    license_url: https://huggingface.co/facebook/sam-vit-base/tree/70c1a07f894ebb5b307fd9eaaee97b9dfc16068f
+    trust_remote_code: false
+    status: locked
+
+  region_caption:
+    role: English detailed localized captioning for each retained region
+    provider: huggingface
+    model_id: nvidia/DAM-3B
+    revision: 0797bedd98d645cd021379a4661ee233da279bba
+    code_repository: https://github.com/NVlabs/describe-anything
+    code_revision: 153ad3d33c29324e9197f565547c6bc8500da02d
+    code_license: Apache-2.0
+    weights_license: NVIDIA Noncommercial License
+    license_url: https://huggingface.co/nvidia/DAM-3B/blob/0797bedd98d645cd021379a4661ee233da279bba/LICENSE
+    trust_remote_code: false
+    status: locked
+    approval_note: Confirm competition eligibility before a production run.
+
+planned_models:
+  scene_embedding:
+    family: SigLIP2
+    model_id: google/siglip2-base-patch16-224
+    revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
+    license: Apache-2.0
+    status: architecture_locked_not_implemented
+  vietnamese_ocr:
+    family: owner_selected
+    status: owner_must_lock_id_revision_and_license
+  vietnamese_asr:
+    family: PhoWhisper
+    status: owner_must_lock_id_revision_and_license
+  query_parser_and_qa:
+    family: owner_selected
+    status: owner_must_lock_model_or_api_version_and_terms

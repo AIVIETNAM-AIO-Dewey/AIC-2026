@@ -1,0 +1,25 @@
+name: Experiment
+description: Đề xuất hoặc ghi nhận một thí nghiệm có thể tái lập
+title: "[Experiment]: "
+labels: ["experiment"]
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Giả thuyết
+      description: Thay đổi nào được kỳ vọng cải thiện metric nào?
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol
+      description: Dataset/split, baseline, config, seed, metric và budget.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Điều kiện chấp nhận
+    validations:
+      required: true

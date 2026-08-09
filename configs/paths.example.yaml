@@ -1,0 +1,14 @@
+schema_version: "1.0"
+
+# This file documents the portable path contract. Runtime code reads the named
+# environment variables; it must not interpolate this example as a real config.
+environment:
+  data_root: AIC_DATA_ROOT
+  artifact_root: AIC_ARTIFACT_ROOT
+  cache_root: AIC_CACHE_ROOT
+
+layout:
+  source_videos: videos
+  frame_manifest: manifests/frames.jsonl
+  object_regions: offline/object_regions.jsonl
+  run_manifests: runs
