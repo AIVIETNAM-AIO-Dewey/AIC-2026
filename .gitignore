@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Notebook/editor state
+.ipynb_checkpoints/
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+*credentials*.json
+
+# Competition data: keep only the policy files
+data/**
+!data/README.md
+artifacts/**
+!artifacts/README.md
+runs/**
+!runs/README.md
+
+# Model and framework caches
+.cache/
+cache/
+models/
+checkpoints/
+huggingface/
+wandb/
+mlruns/
+lightning_logs/
+
+# Large/generated ML payloads
+*.ckpt
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.tflite
+*.engine
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.feather
+*.mp4
+*.mkv
+*.avi
+*.wav
+*.flac
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Submission/output files
+submissions/
+outputs/
+
+# Tiny, licensed test fixtures are explicitly allowed.
+!tests/fixtures/**
