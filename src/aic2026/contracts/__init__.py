@@ -1,5 +1,6 @@
 """Versioned cross-team data contracts."""
 
+from .asr import AsrKeyframeRef, AsrSegmentRecord, AsrVideoManifest
 from .models import (
     CaptionResult,
     DetectorMetadata,
@@ -14,6 +15,9 @@ from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperat
 
 __all__ = [
     "AnswerSource",
+    "AsrKeyframeRef",
+    "AsrSegmentRecord",
+    "AsrVideoManifest",
     "CaptionResult",
     "DetectorMetadata",
     "FrameRef",
