@@ -11,8 +11,10 @@ from .models import (
     SegmentationResult,
 )
 from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperator
+from .scene_embedding import SCENE_EMBEDDING_SCHEMA, SceneEmbeddingRecord
 
 __all__ = [
+    "SCENE_EMBEDDING_SCHEMA",
     "AnswerSource",
     "CaptionResult",
     "DetectorMetadata",
@@ -23,6 +25,7 @@ __all__ = [
     "QueryEvent",
     "QuerySpec",
     "RunManifest",
+    "SceneEmbeddingRecord",
     "SegmentationResult",
     "TaskType",
     "TemporalOperator",
