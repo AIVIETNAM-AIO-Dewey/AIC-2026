@@ -135,6 +135,13 @@ class AsrVideoManifest(StrictModel):
     ended_at: datetime | None = None
     error_message: str | None = None
 
+    @field_validator("started_at", "ended_at", mode="before")
+    @classmethod
+    def accept_iso_datetime(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
     @model_validator(mode="after")
     def validate_completion(self) -> AsrVideoManifest:
         if self.status in {"completed", "failed"} and self.ended_at is None:
