@@ -78,8 +78,14 @@ def rclone_sync_file(local_path: Path, rclone_dest: str) -> bool:
 def find_video_files(video_dir: Path, explicit_video_id: str | None = None) -> list[tuple[str, Path]]:
     """Discover video files (video_id, video_path) under video_dir."""
     videos: list[tuple[str, Path]] = []
+
+    # If video_dir (e.g. /kaggle/input/aic2026-data/videos) does not exist, fallback to parent or /kaggle/input
     if not video_dir.exists():
-        raise FileNotFoundError(f"Video directory not found: {video_dir}")
+        if video_dir.parent.exists():
+            logger.info("Video directory %s not found, falling back to parent %s", video_dir, video_dir.parent)
+            video_dir = video_dir.parent
+        else:
+            raise FileNotFoundError(f"Video directory not found: {video_dir}")
 
     # Case 1: video_dir contains .mp4 files directly or nested
     for p in sorted(video_dir.glob("**/*.mp4")):
