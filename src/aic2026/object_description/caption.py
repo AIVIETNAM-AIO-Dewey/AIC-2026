@@ -7,8 +7,8 @@ import re
 from aic2026.contracts import CaptionResult
 
 DAM_PROMPT = """<image>
-Describe only the masked region in one English sentence of at most 20 words.
-State the visible object or person, attributes, and action. Do not infer hidden facts."""
+Describe only the masked region in one concise English sentence of at most 20 words.
+State the object or person, exact colors, visual attributes, and visible action. Do not infer hidden facts."""
 
 
 def normalize_caption(text: str, maximum_words: int = 20) -> CaptionResult:
