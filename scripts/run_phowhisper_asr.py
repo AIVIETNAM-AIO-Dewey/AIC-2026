@@ -19,9 +19,18 @@ from _common import add_common_arguments, read_config, resolve_device  # noqa: E
 from aic2026.asr.backend import create_asr_backend  # noqa: E402
 from aic2026.asr.pipeline import process_video  # noqa: E402
 
+class FlushStreamHandler(logging.StreamHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+handler = FlushStreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[handler],
+    force=True,
 )
 logger = logging.getLogger("run_phowhisper_asr")
 
