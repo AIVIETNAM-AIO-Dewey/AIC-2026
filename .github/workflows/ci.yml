@@ -25,7 +25,7 @@ jobs:
       - name: Install CPU test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev]" -e "./backend[dev]"
       - name: Validate repository files
         run: |
           python -m json.tool notebooks/colab_object_description.ipynb > /dev/null
@@ -33,7 +33,24 @@ jobs:
           python -c "import yaml; yaml.safe_load(open('configs/models.yaml', encoding='utf-8')); yaml.safe_load(open('configs/offline/object_description.yaml', encoding='utf-8'))"
       - name: Ruff
         run: |
-          ruff check .
-          ruff format --check .
+          ruff check src tests scripts backend/src backend/tests
+          ruff format --check src tests scripts backend/src backend/tests
       - name: CPU tests
-        run: pytest -m "not gpu and not slow"
+        run: pytest tests backend/tests -m "not gpu and not slow"
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build and test web client
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          npm test

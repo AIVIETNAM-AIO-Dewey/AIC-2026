@@ -1,0 +1,7 @@
+schema_version: "1.0"
+run:
+  run_id: dense-frames-5fps-v1
+seed: 2026
+device: auto
+sampling_fps: 5.0
+thumbnail_jpeg_quality: 90

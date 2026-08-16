@@ -11,6 +11,8 @@ build/
 dist/
 .venv/
 venv/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
 
 # Notebook/editor state
 .ipynb_checkpoints/

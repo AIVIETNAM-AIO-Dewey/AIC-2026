@@ -64,7 +64,7 @@ def validate_jsonl(jsonl_path: str | Path) -> ValidationResult:
         result.add_error(0, f"File not found: {jsonl_path}")
         return result
 
-    with open(jsonl_path, "r", encoding="utf-8") as f:
+    with open(jsonl_path, encoding="utf-8") as f:
         for line_num, line in enumerate(f, start=1):
             result.total_lines += 1
             line = line.strip()
@@ -110,18 +110,17 @@ def validate_manifest(
         return [f"Manifest not found: {manifest_path}"]
 
     try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             data = json.loads(f.read())
         manifest = AsrVideoManifest.model_validate(data)
     except (json.JSONDecodeError, ValidationError) as exc:
         return [f"Invalid manifest: {exc}"]
 
     # Cross-check with JSONL if provided
-    if jsonl_result is not None:
-        if manifest.segment_count != jsonl_result.valid_records:
-            errors.append(
-                f"Manifest claims {manifest.segment_count} segments "
-                f"but JSONL has {jsonl_result.valid_records} valid records"
-            )
+    if jsonl_result is not None and manifest.segment_count != jsonl_result.valid_records:
+        errors.append(
+            f"Manifest claims {manifest.segment_count} segments "
+            f"but JSONL has {jsonl_result.valid_records} valid records"
+        )
 
     return errors

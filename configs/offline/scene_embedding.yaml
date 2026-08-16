@@ -2,8 +2,7 @@ schema_version: "1.0"
 run:
   run_id: scene-embedding-v1
 seed: 2026
-# "auto" has no MPS branch and silently resolves to cpu on Apple Silicon.
-device: mps
+device: auto
 
 siglip_model_id: google/siglip2-base-patch16-224
 siglip_revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2

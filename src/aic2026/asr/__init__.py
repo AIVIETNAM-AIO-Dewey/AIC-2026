@@ -7,11 +7,9 @@ deduplication, keyframe pre-indexing, and text normalization.
 from .audio import extract_audio_pcm
 from .backend import create_asr_backend
 from .normalizer import normalize_transcript
-from .pipeline import process_video
 
 __all__ = [
     "create_asr_backend",
     "extract_audio_pcm",
     "normalize_transcript",
-    "process_video",
 ]

@@ -15,8 +15,8 @@ sampling_rate: 16000
 audio_channels: 1
 
 # Sliding window segmentation
-window_size_s: 15.0
-stride_s: 7.5
+window_size_s: 30.0
+stride_s: 15.0
 
 # PhoWhisper decoding
 language: vi
@@ -29,6 +29,4 @@ dedup_time_overlap_threshold: 0.80
 dedup_text_similarity_threshold: 0.85
 merge_gap_ms: 500
 
-# Resume & sync
-rclone_dest: "gdrive:AIC_HCM/artifacts/asr_segments/"
-atomic_sync_after_each_video: true
+# Storage is mounted/attached by Colab or Kaggle; core never invokes rclone.

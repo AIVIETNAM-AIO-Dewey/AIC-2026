@@ -49,7 +49,10 @@ def main(argv: list[str] | None = None) -> int:
             artifacts.extend(sorted(art_dir.glob("*.jsonl")))
 
     if not artifacts:
-        print("Error: No JSONL artifacts specified. Use --artifact or --artifact-dir.", file=sys.stderr)
+        print(
+            "Error: No JSONL artifacts specified. Use --artifact or --artifact-dir.",
+            file=sys.stderr,
+        )
         return 1
 
     total_valid = 0
@@ -74,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
             total_invalid += 1
 
     print("-" * 50)
-    print(f"Validation summary: {total_valid} PASSED, {total_invalid} FAILED out of {len(artifacts)} artifacts.")
+    print(
+        f"Validation summary: {total_valid} PASSED, {total_invalid} FAILED out of {len(artifacts)} artifacts."
+    )
     return 0 if total_invalid == 0 else 1
 
 

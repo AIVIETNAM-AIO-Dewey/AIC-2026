@@ -6,19 +6,16 @@ Processes one video at a time for resumability on Kaggle.
 
 from __future__ import annotations
 
-import json
+import csv
 import logging
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-
 from aic2026.contracts.asr import AsrKeyframeRef, AsrSegmentRecord, AsrVideoManifest
 
 from .audio import AudioExtractionError, extract_audio_pcm, get_audio_duration_s
-from .backend import AsrBackend, AsrSegmentRaw
+from .backend import AsrBackend
 from .normalizer import normalize_transcript
 
 logger = logging.getLogger(__name__)
@@ -65,8 +62,10 @@ def _text_similarity(a: str, b: str) -> float:
 
 
 def _time_overlap_ratio(
-    s1_start: float, s1_end: float,
-    s2_start: float, s2_end: float,
+    s1_start: float,
+    s1_end: float,
+    s2_start: float,
+    s2_end: float,
 ) -> float:
     """Fraction of the shorter segment's duration that overlaps."""
     overlap_start = max(s1_start, s2_start)
@@ -118,20 +117,26 @@ def _deduplicate_segments(
     for seg in segments[1:]:
         prev = kept[-1]
         overlap = _time_overlap_ratio(
-            prev["start_ms"], prev["end_ms"],
-            seg["start_ms"], seg["end_ms"],
+            prev["start_ms"],
+            prev["end_ms"],
+            seg["start_ms"],
+            seg["end_ms"],
         )
         if overlap >= time_overlap_threshold:
             sim = _text_similarity(prev["text"], seg["text"])
             if sim >= text_similarity_threshold:
                 # Keep the one more centred in its window
                 prev_center = _center_score(
-                    prev["start_ms"], prev["end_ms"],
-                    prev["window_start_s"] * 1000, prev["window_end_s"] * 1000,
+                    prev["start_ms"],
+                    prev["end_ms"],
+                    prev["window_start_s"] * 1000,
+                    prev["window_end_s"] * 1000,
                 )
                 seg_center = _center_score(
-                    seg["start_ms"], seg["end_ms"],
-                    seg["window_start_s"] * 1000, seg["window_end_s"] * 1000,
+                    seg["start_ms"],
+                    seg["end_ms"],
+                    seg["window_start_s"] * 1000,
+                    seg["window_end_s"] * 1000,
                 )
                 if seg_center > prev_center:
                     kept[-1] = seg
@@ -159,35 +164,46 @@ def _deduplicate_segments(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_keyframes(csv_path: str | Path) -> pd.DataFrame:
-    """Load a map-keyframes CSV and return a sorted DataFrame."""
-    df = pd.read_csv(csv_path)
-    # Normalise column names (strip whitespace, handle BOM)
-    df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
-    required = {"n", "pts_time", "fps", "frame_idx"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Keyframe CSV missing columns: {missing}")
-    return df.sort_values("pts_time").reset_index(drop=True)
+def _load_keyframes(csv_path: str | Path) -> list[dict[str, float | int]]:
+    """Load a map-keyframes CSV without a heavyweight dataframe dependency."""
+    with Path(csv_path).open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = {name.strip() for name in reader.fieldnames or []}
+        required = {"n", "pts_time", "fps", "frame_idx"}
+        missing = required - fieldnames
+        if missing:
+            raise ValueError(f"Keyframe CSV missing columns: {missing}")
+        rows = [
+            {
+                "n": int(row["n"]),
+                "pts_time": float(row["pts_time"]),
+                "fps": float(row["fps"]),
+                "frame_idx": int(row["frame_idx"]),
+            }
+            for row in reader
+        ]
+    return sorted(rows, key=lambda row: float(row["pts_time"]))
 
 
 def _index_keyframes(
     video_id: str,
-    keyframe_df: pd.DataFrame,
+    keyframes: list[dict[str, float | int]],
     start_ms: int,
     end_ms: int,
 ) -> list[AsrKeyframeRef]:
     """Find all keyframes within ``[start_ms, end_ms]``."""
     refs: list[AsrKeyframeRef] = []
-    for row in keyframe_df.itertuples(index=False):
-        kf_ms = row.pts_time * 1000.0
+    for row in keyframes:
+        kf_ms = float(row["pts_time"]) * 1000.0
         if start_ms <= kf_ms <= end_ms:
-            refs.append(AsrKeyframeRef(
-                keyframe_n=int(row.n),
-                frame_idx=int(row.frame_idx),
-                pts_time_s=float(row.pts_time),
-                frame_uid=f"{video_id}:{int(row.frame_idx)}",
-            ))
+            refs.append(
+                AsrKeyframeRef(
+                    keyframe_n=int(row["n"]),
+                    frame_idx=int(row["frame_idx"]),
+                    pts_time_s=float(row["pts_time"]),
+                    frame_uid=f"{video_id}:{int(row['frame_idx'])}",
+                )
+            )
     return refs
 
 
@@ -315,7 +331,11 @@ def process_video(
     windows = _generate_windows(audio_duration_s, window_size_s, stride_s)
     logger.info(
         "%s: %.1fs audio → %d windows (%.0fs × %.0fs stride)",
-        video_id, audio_duration_s, len(windows), window_size_s, stride_s,
+        video_id,
+        audio_duration_s,
+        len(windows),
+        window_size_s,
+        stride_s,
     )
 
     # ── 3. Decode each window ──
@@ -338,17 +358,21 @@ def process_video(
             # Convert relative window timestamps to absolute video timestamps
             abs_start_ms = int((win_start + seg.start_s) * 1000)
             abs_end_ms = int((win_start + seg.end_s) * 1000)
-            raw_segments.append({
-                "start_ms": abs_start_ms,
-                "end_ms": abs_end_ms,
-                "text": seg.text,
-                "window_start_s": win_start,
-                "window_end_s": win_end,
-            })
+            raw_segments.append(
+                {
+                    "start_ms": abs_start_ms,
+                    "end_ms": abs_end_ms,
+                    "text": seg.text,
+                    "window_start_s": win_start,
+                    "window_end_s": win_end,
+                }
+            )
 
     logger.info(
         "%s: %d raw segments from %d windows",
-        video_id, len(raw_segments), len(windows),
+        video_id,
+        len(raw_segments),
+        len(windows),
     )
 
     # ── 4. Deduplicate overlapping windows ──
@@ -360,11 +384,13 @@ def process_video(
     )
     logger.info(
         "%s: %d segments after deduplication (from %d raw)",
-        video_id, len(deduped), len(raw_segments),
+        video_id,
+        len(deduped),
+        len(raw_segments),
     )
 
     # ── 5. Load keyframes and pre-index ──
-    keyframe_df = _load_keyframes(keyframe_csv_path)
+    frame_map = _load_keyframes(keyframe_csv_path)
     total_keyframes_indexed = 0
 
     records: list[AsrSegmentRecord] = []
@@ -372,7 +398,10 @@ def process_video(
         transcript_raw = seg["text"]
         transcript_norm = normalize_transcript(transcript_raw)
         keyframes = _index_keyframes(
-            video_id, keyframe_df, seg["start_ms"], seg["end_ms"],
+            video_id,
+            frame_map,
+            seg["start_ms"],
+            seg["end_ms"],
         )
         total_keyframes_indexed += len(keyframes)
 
@@ -409,7 +438,9 @@ def process_video(
 
     logger.info(
         "%s: completed — %d segments, %d keyframes indexed",
-        video_id, len(records), total_keyframes_indexed,
+        video_id,
+        len(records),
+        total_keyframes_indexed,
     )
 
     return manifest

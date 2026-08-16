@@ -12,23 +12,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, field_validator, model_validator
 
-
-class StrictModel(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        strict=True,
-        validate_assignment=True,
-        allow_inf_nan=False,
-    )
-
+from .models import StrictModel
 
 # ──────────────────────────────────────────────────────────────────────
 # Sub-models
@@ -87,9 +73,7 @@ class AsrSegmentRecord(StrictModel):
     @model_validator(mode="after")
     def validate_segment_id_prefix(self) -> AsrSegmentRecord:
         if not self.segment_id.startswith(self.video_id + ":"):
-            raise ValueError(
-                f"segment_id must be prefixed with '{self.video_id}:'"
-            )
+            raise ValueError(f"segment_id must be prefixed with '{self.video_id}:'")
         return self
 
     @model_validator(mode="after")
@@ -106,7 +90,8 @@ class AsrSegmentRecord(StrictModel):
     @field_validator("keyframes", mode="after")
     @classmethod
     def validate_keyframe_uniqueness(
-        cls, keyframes: list[AsrKeyframeRef],
+        cls,
+        keyframes: list[AsrKeyframeRef],
     ) -> list[AsrKeyframeRef]:
         uids = [kf.frame_uid for kf in keyframes]
         if len(uids) != len(set(uids)):

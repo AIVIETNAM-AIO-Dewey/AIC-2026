@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -19,10 +18,12 @@ from _common import add_common_arguments, read_config, resolve_device  # noqa: E
 from aic2026.asr.backend import create_asr_backend  # noqa: E402
 from aic2026.asr.pipeline import process_video  # noqa: E402
 
+
 class FlushStreamHandler(logging.StreamHandler):
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
         self.flush()
+
 
 handler = FlushStreamHandler(sys.stdout)
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -65,36 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="float16",
         help="CTranslate2 compute type: float16, int8, float32.",
     )
-    parser.add_argument(
-        "--rclone-dest",
-        help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/asr_segments/).",
-    )
     return parser
 
 
-def rclone_sync_file(local_path: Path, rclone_dest: str) -> bool:
-    """Sync a single completed file to rclone remote destination."""
-    cmd = ["rclone", "copy", str(local_path), rclone_dest]
-    try:
-        res = subprocess.run(cmd, capture_output=True, check=True)
-        logger.info("rclone synced %s -> %s", local_path.name, rclone_dest)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        logger.warning("rclone sync failed for %s: %s", local_path.name, exc)
-        return False
-
-
-def find_video_files(video_dir: Path, explicit_video_id: str | None = None) -> list[tuple[str, Path]]:
+def find_video_files(
+    video_dir: Path, explicit_video_id: str | None = None
+) -> list[tuple[str, Path]]:
     """Discover video files (video_id, video_path) under video_dir."""
     videos: list[tuple[str, Path]] = []
 
-    # If video_dir (e.g. /kaggle/input/aic2026-data/videos) does not exist, fallback to parent or /kaggle/input
     if not video_dir.exists():
-        if video_dir.parent.exists():
-            logger.info("Video directory %s not found, falling back to parent %s", video_dir, video_dir.parent)
-            video_dir = video_dir.parent
-        else:
-            raise FileNotFoundError(f"Video directory not found: {video_dir}")
+        raise FileNotFoundError(f"Video directory not found: {video_dir}")
 
     # Case 1: video_dir contains .mp4 files directly or nested
     for p in sorted(video_dir.glob("**/*.mp4")):
@@ -115,20 +97,22 @@ def main(argv: list[str] | None = None) -> int:
 
     device = resolve_device(args.device, config)
     engine = args.engine or config.get("engine", "faster_whisper")
-    model_id = args.model_id or (
-        config.get("ct2_model_id") if engine == "faster_whisper" else config.get("model_id")
-    ) or "vinai/PhoWhisper-large"
+    model_id = (
+        args.model_id
+        or (config.get("ct2_model_id") if engine == "faster_whisper" else config.get("model_id"))
+        or "vinai/PhoWhisper-large"
+    )
     compute_type = args.compute_type or config.get("compute_type", "float16")
 
-    output_root = args.output_root or Path(os.environ.get("AIC_ARTIFACT_ROOT", REPO_ROOT / "artifacts"))
+    output_root = args.output_root or Path(
+        os.environ.get("AIC_ARTIFACT_ROOT", REPO_ROOT / "artifacts")
+    )
     output_dir = output_root / "asr_segments"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data_root = args.data_root or Path(os.environ.get("AIC_DATA_ROOT", REPO_ROOT))
     video_dir = args.video_dir or (data_root / "videos")
     map_csv_dir = args.map_csv_dir or (data_root / "map-keyframes")
-
-    rclone_dest = args.rclone_dest or config.get("rclone_dest")
 
     logger.info("Initializing ASR backend engine=%s model=%s device=%s", engine, model_id, device)
     backend = create_asr_backend(
@@ -155,8 +139,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Found %d videos to process.", len(video_list))
 
-    window_size_s = float(config.get("window_size_s", 15.0))
-    stride_s = float(config.get("stride_s", 7.5))
+    window_size_s = float(config.get("window_size_s", 30.0))
+    stride_s = float(config.get("stride_s", 15.0))
     initial_prompt = config.get(
         "initial_prompt",
         "Bản tin thời sự, tin tức Việt Nam, YouTube, Facebook, iPhone, AI, video, online",
@@ -180,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         logger.info("Processing video: %s (%s)", video_id, video_path.name)
-        manifest = process_video(
+        process_video(
             video_id=video_id,
             video_path=video_path,
             keyframe_csv_path=csv_path,
@@ -192,15 +176,13 @@ def main(argv: list[str] | None = None) -> int:
             vad_filter=bool(config.get("vad_filter", True)),
             vad_min_silence_duration_ms=int(config.get("vad_min_silence_duration_ms", 500)),
             dedup_time_overlap_threshold=float(config.get("dedup_time_overlap_threshold", 0.80)),
-            dedup_text_similarity_threshold=float(config.get("dedup_text_similarity_threshold", 0.85)),
+            dedup_text_similarity_threshold=float(
+                config.get("dedup_text_similarity_threshold", 0.85)
+            ),
             merge_gap_ms=int(config.get("merge_gap_ms", 500)),
         )
 
         completed_count += 1
-
-        if rclone_dest and manifest.status in ("completed", "skipped"):
-            rclone_sync_file(jsonl_path, rclone_dest)
-            rclone_sync_file(manifest_path, rclone_dest)
 
     logger.info(
         "ASR processing finished: %d completed, %d skipped out of %d total.",

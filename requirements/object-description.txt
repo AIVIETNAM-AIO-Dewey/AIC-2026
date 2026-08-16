@@ -1,0 +1,2 @@
+-r runtime-base.txt
+git+https://github.com/NVlabs/describe-anything.git@153ad3d33c29324e9197f565547c6bc8500da02d

@@ -36,6 +36,12 @@ extend-exclude = ["notebooks"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/inspect_dam_results.py" = ["E501"]
+"scripts/run_phowhisper_asr.py" = ["E501"]
+"scripts/sample_dense_frames.py" = ["E501"]
+"scripts/validate_asr_artifacts.py" = ["E501"]
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]

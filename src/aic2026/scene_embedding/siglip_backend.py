@@ -44,6 +44,13 @@ class SiglipEncoder:
             raise RuntimeError(
                 "transformers with SigLIP2 support (>=4.49) and PyTorch are required"
             ) from error
+        if device == "auto":
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         if device.startswith("mps") and compute_dtype == "bfloat16":
             raise ValueError("MPS does not support bfloat16; use float32 or float16")
 
