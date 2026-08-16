@@ -177,16 +177,21 @@ def _index_keyframes(
     start_ms: int,
     end_ms: int,
 ) -> list[AsrKeyframeRef]:
-    """Find all keyframes within ``[start_ms, end_ms]``."""
+    """Find all unique keyframes within ``[start_ms, end_ms]``."""
     refs: list[AsrKeyframeRef] = []
+    seen_uids: set[str] = set()
     for row in keyframe_df.itertuples(index=False):
         kf_ms = row.pts_time * 1000.0
         if start_ms <= kf_ms <= end_ms:
+            uid = f"{video_id}:{int(row.frame_idx)}"
+            if uid in seen_uids:
+                continue
+            seen_uids.add(uid)
             refs.append(AsrKeyframeRef(
                 keyframe_n=int(row.n),
                 frame_idx=int(row.frame_idx),
                 pts_time_s=float(row.pts_time),
-                frame_uid=f"{video_id}:{int(row.frame_idx)}",
+                frame_uid=uid,
             ))
     return refs
 
