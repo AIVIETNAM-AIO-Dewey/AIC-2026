@@ -369,8 +369,11 @@ def process_video(
 
     records: list[AsrSegmentRecord] = []
     for i, seg in enumerate(deduped):
-        transcript_raw = seg["text"]
+        transcript_raw = seg["text"].strip()
         transcript_norm = normalize_transcript(transcript_raw)
+        if not transcript_raw or not transcript_norm:
+            logger.debug("%s: Skipping empty or punctuation-only segment %d", video_id, i)
+            continue
         keyframes = _index_keyframes(
             video_id, keyframe_df, seg["start_ms"], seg["end_ms"],
         )
