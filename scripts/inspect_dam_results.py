@@ -84,7 +84,7 @@ def inspect_descriptions(
             
             for region_idx, region in enumerate(record.regions, start=1):
                 detector = region.detector
-                bbox = (region.bbox.xmin, region.bbox.ymin, region.bbox.xmax, region.bbox.ymax)
+                bbox = region.bbox_xyxy_px
                 caption_info = region.caption
                 desc = caption_info.description_en or f"[{caption_info.status}: {caption_info.error}]"
                 
