@@ -12,11 +12,15 @@ organizer Objects (bbox/class/score)
   -> SAM bbox-to-mask refinement
   -> DAM localized English description
   -> versioned ObjectFrameRecord JSONL + RunManifest
+
+keyframes (frame manifest)
+  -> SigLIP2 whole-frame embedding
+  -> versioned SceneEmbeddingRecord JSONL + [N, D] matrix + RunManifest
 ```
 
-SigLIP, Vietnamese OCR, PhoWhisper, query parser, fusion, Q&A và TRAKE alignment là
-kiến trúc đã thống nhất nhưng chưa được coi là implemented cho đến khi subsystem
-owner thêm code, model pin, validator và test.
+Vietnamese OCR, PhoWhisper, query parser, fusion, Q&A và TRAKE alignment là kiến
+trúc đã thống nhất nhưng chưa được coi là implemented cho đến khi subsystem owner
+thêm code, model pin, validator và test.
 
 ### Ownership tạm thời
 
@@ -313,6 +317,50 @@ sang `/kaggle/working`. Không fallback sang `main`.
 Thin notebooks tương ứng: [`notebooks/colab_object_description.ipynb`](notebooks/colab_object_description.ipynb)
 và [`notebooks/kaggle_object_description.ipynb`](notebooks/kaggle_object_description.ipynb).
 
+### SigLIP2 scene embeddings (chạy local, Apple Silicon)
+
+Stage này không cần cloud GPU. Chỉ cần `keyframes/` và `map-keyframes/` dưới
+`AIC_DATA_ROOT`; không cần tải videos, objects hay CLIP features của ban tổ chức.
+
+```bash
+python -m pip install torch torchvision   # chỉ trong venv local, không thêm vào requirements/
+export AIC_DATA_ROOT=... AIC_ARTIFACT_ROOT=... AIC_CACHE_ROOT=... AIC_VIDEO_ID=L01_V001
+
+python scripts/build_frame_manifest.py \
+  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
+  --map-csv "$AIC_DATA_ROOT/map-keyframes/$AIC_VIDEO_ID.csv" \
+  --frames-dir "$AIC_DATA_ROOT/keyframes/$AIC_VIDEO_ID" --resume
+
+python scripts/run_scene_embeddings.py \
+  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
+  --frame-manifest "$AIC_ARTIFACT_ROOT/frame_manifests/$AIC_VIDEO_ID.jsonl" \
+  --device mps --resume
+```
+
+Dùng `--device mps` một cách tường minh: `device: auto` không có nhánh MPS và sẽ
+âm thầm rơi về `cpu`. Đo trên M4 Pro: ~105 ảnh/giây ở `batch_size: 32`.
+
+### Vector index (Qdrant)
+
+Scene embeddings được nạp vào một Qdrant collection để online query. Server là
+binary/container riêng, **không** phải Python dependency; repo chỉ pin client.
+
+```bash
+# Server local (Apple Silicon): tải binary từ github.com/qdrant/qdrant/releases
+qdrant --config-path config.yaml        # http://127.0.0.1:6333/dashboard
+
+python scripts/load_scene_embeddings_qdrant.py \
+  --embeddings-dir "$AIC_ARTIFACT_ROOT/scene_embeddings" \
+  --url http://127.0.0.1:6333 --collection aic26_scene_siglip2
+```
+
+Collection dùng distance `COSINE`, `size` đọc từ chính dữ liệu chứ không tin config.
+Point ID là UUIDv5 sinh từ `frame_uid` — Qdrant chỉ nhận uint64 hoặc UUID, và ID ổn
+định khiến nạp lại là upsert chứ không nhân bản. Payload giữ đủ `frame_uid`,
+`video_id`, `frame_idx`, `keyframe_n`, `pts_time_s`, `fps`, `frame_relpath`,
+`run_id`. Có payload index trên `video_id`, `frame_idx` và `run_id` vì TRAKE và
+full-FPS refinement đều lọc theo video trước khi chấm điểm.
+
 ## 4. Output và validation
 
 Với `VIDEO_ID`, outputs cố định:
@@ -321,6 +369,8 @@ Với `VIDEO_ID`, outputs cố định:
 frame_manifests/<VIDEO_ID>.jsonl
 object_description/masks/<VIDEO_ID>.jsonl
 object_description/descriptions/<VIDEO_ID>.jsonl
+scene_embeddings/<VIDEO_ID>.jsonl
+scene_embeddings/<VIDEO_ID>.f16.npy
 ```
 
 Mỗi stage manifest đổi suffix `.jsonl` thành `.manifest.json`. Description JSONL

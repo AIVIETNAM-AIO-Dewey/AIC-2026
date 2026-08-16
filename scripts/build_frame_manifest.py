@@ -21,7 +21,7 @@ from aic2026.common import (  # noqa: E402
     write_jsonl_atomic,
     write_manifest,
 )
-from aic2026.common.frame_manifest import build_frame_refs  # noqa: E402
+from aic2026.common.frame_manifest import build_frame_refs, read_frame_map  # noqa: E402
 from aic2026.common.io import iter_jsonl  # noqa: E402
 from aic2026.contracts import FrameRef  # noqa: E402
 
@@ -32,6 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--map-csv", type=Path)
     parser.add_argument("--frames-dir", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--drop-duplicate-frame-idx",
+        action="store_true",
+        help=(
+            "When several keyframes share one frame_idx, index only the middle one and "
+            "discard the rest. No frame_idx is ever rewritten, so every indexed frame "
+            "keeps the value the organizer shipped. The run manifest records the count."
+        ),
+    )
     return parser
 
 
@@ -68,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": config.get("schema_version", "1.0"),
         "video_id": video_id,
         "limit": args.limit,
+        "drop_duplicate_frame_idx": args.drop_duplicate_frame_idx,
     }
     run_id = str(config.get("run", {}).get("run_id", "object-description-v1"))
     manifest = create_manifest(
@@ -100,6 +110,13 @@ def main(argv: list[str] | None = None) -> int:
             frames_dir=frames_dir,
             data_root=roots["data_root"],
             limit=args.limit,
+            drop_duplicate_frame_idx=args.drop_duplicate_frame_idx,
+        )
+        discarded_keyframes = sum(
+            len(row.discarded_keyframe_ns)
+            for row in read_frame_map(
+                map_csv, drop_duplicate_frame_idx=args.drop_duplicate_frame_idx
+            )
         )
         recovered_final = output.exists()
         if recovered_final:
@@ -110,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         else:
             write_jsonl_atomic(output, refs)
-        counters = {"frames": len(refs)}
+        counters = {"frames": len(refs), "discarded_duplicate_keyframes": discarded_keyframes}
         if recovered_final:
             counters["recovered_final"] = 1
         manifest = complete_manifest(

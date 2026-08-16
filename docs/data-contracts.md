@@ -50,6 +50,32 @@ Mask size phải bằng frame size; bbox pixel phải khớp phép đổi determ
 normalized và không vượt frame. Duplicate `region_id` hoặc record frame trùng là
 hard failure trước publish.
 
+## `SceneEmbeddingRecord` - `aic26.scene_embeddings.v1`
+
+Một shard là một video và publish **hai** file phải đọc cùng nhau:
+
+```text
+scene_embeddings/<VIDEO_ID>.jsonl      index, mỗi dòng một record
+scene_embeddings/<VIDEO_ID>.f16.npy    ma trận [N, D] (hoặc .f32.npy)
+scene_embeddings/<VIDEO_ID>.manifest.json
+```
+
+Mỗi dòng kế thừa toàn bộ `FrameRef` và thêm `run_id`, `row`, `embedding_dim`,
+`dtype` và `l2_normalized`. Bất biến:
+
+- Thứ tự dòng của index **trùng chính xác** thứ tự dòng của frame manifest upstream,
+  và `row` của dòng thứ `i` phải bằng `i`. Row `i` của ma trận thuộc về dòng `i`.
+- Vector đã L2-normalize (chuẩn hóa ở float32 rồi mới cast xuống dtype lưu trữ), nên
+  online chỉ cần dot product. `l2_normalized=false` bị schema từ chối.
+- `embedding_dim` phải khớp chiều rộng ma trận, `dtype` phải khớp dtype ma trận.
+- Index không mang model identity; model ID/revision nằm trong `RunManifest` sidecar
+  cùng checksum của cả hai output.
+
+Ma trận được publish **trước** index: index là commit point, nên sự cố giữa hai lần
+ghi để lại một ma trận mồ côi mà runner phát hiện được, thay vì một index trỏ vào
+khoảng không. Stage này không giữ `.partial` trong shard vì một frame chỉ tốn vài
+mili-giây; resume ở mức video thông qua run manifest.
+
 ## `RunManifest` - `aic26.run_manifest.v1`
 
 Manifest lưu `run_id`, stage, status, Git SHA/dirty flag, platform, resolved config
@@ -70,6 +96,6 @@ query nêu rõ và không dịch.
 
 ## Planned modality contracts
 
-OCR, ASR, scene embeddings và online scores chưa được freeze trong v1. Owner phải
+OCR, ASR và online scores chưa được freeze trong v1. Owner phải
 thêm versioned schema, timestamp/coordinate convention, validator và migration
 note trước khi component khác tiêu thụ; không trao đổi ad-hoc dict giữa notebooks.
