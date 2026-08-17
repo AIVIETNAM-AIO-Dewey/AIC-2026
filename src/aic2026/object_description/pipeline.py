@@ -337,8 +337,8 @@ def validate_description_settings(
     maximum_consecutive_oom: int,
     maximum_consecutive_errors: int,
 ) -> None:
-    if not 1 <= maximum_words <= 20:
-        raise ValueError("maximum_words must be within [1, 20] for schema v1")
+    if not 1 <= maximum_words <= 50:
+        raise ValueError("maximum_words must be within [1, 50] for schema v1")
     if max_new_tokens < 1 or oom_retry_max_new_tokens < 1:
         raise ValueError("generation token limits must be positive")
     if oom_retry_max_new_tokens >= max_new_tokens:
@@ -355,9 +355,9 @@ def run_descriptions(
     caption_backend: CaptionBackend,
     resume: bool = False,
     limit: int | None = None,
-    max_new_tokens: int = 48,
-    oom_retry_max_new_tokens: int = 32,
-    maximum_words: int = 20,
+    max_new_tokens: int = 75,
+    oom_retry_max_new_tokens: int = 48,
+    maximum_words: int = 50,
     maximum_consecutive_oom: int = 3,
     maximum_consecutive_errors: int = 3,
 ) -> dict[str, int]:
