@@ -15,8 +15,8 @@ max_regions: 3
 dam_model_id: nvidia/DAM-3B
 dam_revision: 0797bedd98d645cd021379a4661ee233da279bba
 dam_code_revision: 153ad3d33c29324e9197f565547c6bc8500da02d
-max_words: 20
-max_new_tokens: 30
-oom_retry_max_new_tokens: 24
+max_words: 50
+max_new_tokens: 75
+oom_retry_max_new_tokens: 48
 maximum_consecutive_oom: 3
 maximum_consecutive_region_errors: 3

@@ -100,7 +100,7 @@ class CaptionError(StrictModel):
 class CaptionResult(StrictModel):
     status: Literal["pending", "ok", "error", "oom"] = "pending"
     description_en: str | None = None
-    word_count: int = Field(default=0, ge=0, le=20)
+    word_count: int = Field(default=0, ge=0, le=50)
     truncated: bool = False
     error: CaptionError | None = None
 
@@ -112,8 +112,8 @@ class CaptionResult(StrictModel):
             actual = len(self.description_en.split())
             if actual != self.word_count:
                 raise ValueError("word_count must match description_en")
-            if actual > 20:
-                raise ValueError("description_en must contain at most 20 words")
+            if actual > 50:
+                raise ValueError("description_en must contain at most 50 words")
             if self.error is not None:
                 raise ValueError("successful caption cannot contain error details")
         else:
