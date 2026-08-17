@@ -6,14 +6,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from aic2026.common.io import sha256_path
-from aic2026.contracts.query import QuerySpec
 from fastapi.testclient import TestClient
 from qdrant_client import QdrantClient
 
 from aic_backend.api.app import create_app
 from aic_backend.api.deps import (
     get_gpt,
-    get_parser,
     get_repository,
     get_search_service,
     get_trake_service,
@@ -33,11 +31,6 @@ class DenseEncoder:
     def encode(self, texts: list[str], *, query: bool) -> np.ndarray:
         del query
         return np.zeros((len(texts), 768), dtype=np.float32)
-
-
-class Parser:
-    def parse(self, *, task_type: str, raw_query_vi: str) -> QuerySpec:
-        return QuerySpec(task_type="kis", raw_query_vi=raw_query_vi, scene_en="scene")
 
 
 class Gpt:
@@ -97,13 +90,19 @@ def test_artifact_ingest_to_api_preserves_canonical_frame_id(tmp_path: Path) -> 
     app = create_app()
     app.dependency_overrides = {
         get_repository: lambda: repository,
-        get_parser: lambda: Parser(),
         get_search_service: lambda: service,
         get_trake_service: lambda: TrakeService(service),
         get_gpt: lambda: Gpt(),
     }
     response = TestClient(app).post(
-        "/api/v1/search", json={"task_type": "kis", "raw_query_vi": "tìm cảnh"}
+        "/api/v1/search",
+        json={
+            "query": {
+                "task_type": "kis",
+                "raw_query_vi": "tìm cảnh",
+                "scene_en": "scene",
+            }
+        },
     )
     assert response.status_code == 200
     hit = response.json()["results"][0]

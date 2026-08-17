@@ -36,7 +36,9 @@ với stable IDs để mọi thành viên có thể phát triển độc lập.
 
 ### Query decomposition
 
-Một prompt few-shot cố định chuyển câu truy vấn tiếng Việt thành schema versioned:
+Query được chuẩn bị ngoài backend: người thi dùng prompt few-shot cố định với GPT
+Web/Gemini, sau đó dán JSON versioned vào UI. FastAPI chỉ validate `QuerySpec` và
+chuyển các signal xuống retrieval; không gọi LLM để dịch hoặc phân rã query:
 
 - `scene_en`: đúng một mô tả cảnh tổng thể bằng tiếng Anh.
 - `objects_en`: danh sách phrase độc lập, mỗi phrase là một object/person cùng
@@ -47,7 +49,8 @@ Một prompt few-shot cố định chuyển câu truy vấn tiếng Việt thàn
 - `events`: sequence event có thứ tự cho TRAKE hoặc `null`.
 
 Không suy diễn `ocr_vi`/`audio_vi`, không dịch hai field này, và validate JSON trước
-khi retrieval. Prompt/model/API version phải được ghi vào query log.
+khi retrieval. `raw_query_vi` chỉ giữ provenance. Prompt/model bên ngoài nên được
+ghi cùng session thi nếu cần tái lập, nhưng backend không cần API key cho KIS/TRAKE.
 
 ### Retrieval và fusion
 

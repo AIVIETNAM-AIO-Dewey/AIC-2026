@@ -1,10 +1,8 @@
-from aic2026.contracts.query import QuerySpec
 from fastapi.testclient import TestClient
 
 from aic_backend.api.app import create_app
 from aic_backend.api.deps import (
     get_gpt,
-    get_parser,
     get_repository,
     get_search_service,
     get_trake_service,
@@ -48,11 +46,6 @@ class Repo:
         return []
 
 
-class Parser:
-    def parse(self, *, task_type, raw_query_vi):
-        return QuerySpec(task_type="kis", raw_query_vi=raw_query_vi, scene_en="scene")
-
-
 class Gpt:
     client = None
 
@@ -63,14 +56,40 @@ def test_kis_response_uses_video_id_and_frame_idx_without_filename_fallback():
     search = SearchService(repo)
     app.dependency_overrides = {
         get_repository: lambda: repo,
-        get_parser: lambda: Parser(),
         get_search_service: lambda: search,
         get_trake_service: lambda: TrakeService(search),
         get_gpt: lambda: Gpt(),
     }
     response = TestClient(app).post(
-        "/api/v1/search", json={"task_type": "kis", "raw_query_vi": "tìm cảnh", "top_k": 100}
+        "/api/v1/search",
+        json={
+            "query": {
+                "schema_version": "aic26.query.v1",
+                "task_type": "kis",
+                "raw_query_vi": "tìm cảnh",
+                "scene_en": "an outdoor scene",
+                "objects_en": [],
+                "ocr_vi": [],
+                "audio_vi": [],
+                "audio_events_en": [],
+                "answer_sources": [],
+                "events": None,
+            },
+            "top_k": 100,
+        },
     )
     assert response.status_code == 200
     hit = response.json()["results"][0]
     assert hit["video_id"] == "L21_V011" and hit["frame_idx"] == 24925
+
+
+def test_trake_capability_does_not_require_openai() -> None:
+    app = create_app()
+    repo = Repo()
+    app.dependency_overrides = {
+        get_repository: lambda: repo,
+        get_gpt: lambda: Gpt(),
+    }
+    response = TestClient(app).get("/api/v1/capabilities")
+    assert response.status_code == 200
+    assert response.json()["tasks"]["trake"]["missing"] == ["frames_dense_current"]

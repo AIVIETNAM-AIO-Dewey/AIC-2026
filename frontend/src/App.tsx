@@ -6,6 +6,7 @@ import {
   type Capabilities,
   type FrameHit,
   type SearchResponse,
+  type StructuredQuery,
   type TaskType,
 } from "./api/client";
 import { SubmissionBasket } from "./components/SubmissionBasket";
@@ -48,11 +49,11 @@ export default function App() {
         : [...items, hit],
     );
 
-  const run = async (query: string) => {
+  const run = async (query: StructuredQuery) => {
     setLoading(true);
     setError("");
     try {
-      setData(await search(task, query));
+      setData(await search(query));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Tìm kiếm thất bại");
     } finally {
@@ -68,7 +69,7 @@ export default function App() {
       <header className="hero">
         <p className="eyebrow">HCMC AI Challenge 2026</p>
         <h1>Tìm kiếm keyframe đa phương thức</h1>
-        <p>Tìm đúng video và frame index bằng mô tả tiếng Việt.</p>
+        <p>Dán structured query JSON đã được GPT Web/Gemini chuẩn hóa.</p>
       </header>
 
       {!capabilities && !error && <p role="status">Đang kiểm tra backend…</p>}
@@ -100,7 +101,6 @@ export default function App() {
       )}
 
       {error && <p role="alert">{error}</p>}
-      {data?.degraded && <p>GPT-4o chưa sẵn sàng; KIS đang dùng truy vấn gốc.</p>}
       {data && resultCount === 0 && <p role="status">Không tìm thấy kết quả phù hợp.</p>}
 
       {task === "trake" ? (

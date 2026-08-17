@@ -1,5 +1,30 @@
 export type TaskType = "kis" | "qa" | "trake";
 
+export type QueryEvent = {
+  label: string;
+  scene_en: string;
+  objects_en?: string[];
+  ocr_vi?: string[];
+  audio_vi?: string[];
+  audio_events_en?: string[];
+  temporal_operator?: "state" | "onset" | "offset" | "extremum";
+};
+
+export type StructuredQuery = {
+  schema_version?: "aic26.query.v1";
+  task_type: TaskType;
+  raw_query_vi: string;
+  scene_en: string;
+  objects_en?: string[];
+  ocr_vi?: string[];
+  audio_vi?: string[];
+  audio_events_en?: string[];
+  question_vi?: string | null;
+  question_en?: string | null;
+  answer_sources?: ("visual" | "ocr" | "speech" | "audio_event")[];
+  events?: QueryEvent[] | null;
+};
+
 export type FrameHit = {
   rank: number;
   score: number;
@@ -44,21 +69,20 @@ export type Capabilities = {
 
 const base = import.meta.env.VITE_API_BASE ?? "";
 
-export async function search(
-  task_type: TaskType,
-  raw_query_vi: string,
-): Promise<SearchResponse> {
+export async function search(query: StructuredQuery): Promise<SearchResponse> {
   const response = await fetch(`${base}/api/v1/search`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      task_type,
-      raw_query_vi,
+      query,
       top_k: 100,
       use_images_for_answer: true,
     }),
   });
-  if (!response.ok) throw new Error((await response.json()).detail ?? "Tìm kiếm thất bại");
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail ?? "Tìm kiếm thất bại");
+  }
   return response.json();
 }
 

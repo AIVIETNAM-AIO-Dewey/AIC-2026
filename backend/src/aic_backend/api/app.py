@@ -10,13 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from ..llm.gpt4o import CapabilityUnavailable, GPT4oAdapter
-from ..llm.query_parser import QueryParsingService
 from ..retrieval.models import SearchHit
 from ..retrieval.search import SearchService
 from ..retrieval.trake import TrakeService
 from .deps import (
     get_gpt,
-    get_parser,
     get_repository,
     get_search_service,
     get_settings,
@@ -94,7 +92,7 @@ def create_app() -> FastAPI:
             kis_missing.append("siglip2_text")
         kis_ready = not kis_missing
         qa_missing = [*kis_missing] + ([] if openai_ready else ["gpt4o"])
-        trake_missing = [*qa_missing]
+        trake_missing = [*kis_missing]
         if not collections["frames_dense"]:
             trake_missing.append("frames_dense_current")
         return CapabilitiesResponse(
@@ -115,24 +113,20 @@ def create_app() -> FastAPI:
     def search(
         request: Request,
         body: SearchRequest,
-        parser: QueryParsingService = Depends(get_parser),
         service: SearchService = Depends(get_search_service),
         trake: TrakeService = Depends(get_trake_service),
         gpt: GPT4oAdapter = Depends(get_gpt),
     ) -> SearchResponse:
         started = time.perf_counter()
         stage: dict[str, float] = {}
-        try:
-            parsed = parser.parse(task_type=body.task_type, raw_query_vi=body.raw_query_vi)
-        except CapabilityUnavailable as error:
-            raise HTTPException(status_code=503, detail="capability_unavailable") from error
-        stage["parse"] = (time.perf_counter() - started) * 1000
-        if body.task_type == "trake":
+        parsed = body.query
+        retrieve_started = time.perf_counter()
+        if parsed.task_type == "trake":
             sequences = trake.retrieve(parsed, top_k=body.top_k)
-            stage["retrieve"] = (time.perf_counter() - started) * 1000 - stage["parse"]
+            stage["retrieve"] = (time.perf_counter() - retrieve_started) * 1000
             return SearchResponse(
                 request_id=request.state.request_id,
-                task_type=body.task_type,
+                task_type=parsed.task_type,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 stage_latency_ms=stage,
                 sequences=[
@@ -152,11 +146,12 @@ def create_app() -> FastAPI:
                 ],
             )
         hits = service.retrieve(parsed, top_k=body.top_k)
-        stage["retrieve"] = (time.perf_counter() - started) * 1000 - stage["parse"]
+        stage["retrieve"] = (time.perf_counter() - retrieve_started) * 1000
         answer = None
         confidence = None
         evidence: list[str] = []
-        if body.task_type == "qa":
+        if parsed.task_type == "qa":
+            answer_started = time.perf_counter()
             try:
                 answer, confidence, evidence = gpt.answer(
                     query=parsed,
@@ -165,19 +160,16 @@ def create_app() -> FastAPI:
                 )
             except CapabilityUnavailable as error:
                 raise HTTPException(status_code=503, detail="capability_unavailable") from error
-            stage["answer"] = (
-                (time.perf_counter() - started) * 1000 - stage["parse"] - stage["retrieve"]
-            )
+            stage["answer"] = (time.perf_counter() - answer_started) * 1000
         return SearchResponse(
             request_id=request.state.request_id,
-            task_type=body.task_type,
+            task_type=parsed.task_type,
             latency_ms=(time.perf_counter() - started) * 1000,
             stage_latency_ms=stage,
             results=[_hit(hit, rank) for rank, hit in enumerate(hits, 1)],
             answer=answer,
             confidence=confidence,
             evidence_frame_uids=evidence,
-            degraded=body.task_type == "kis" and gpt.client is None,
         )
 
     @app.get("/api/v1/frames/{video_id}/{frame_idx}/image")

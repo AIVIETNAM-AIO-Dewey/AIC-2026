@@ -153,6 +153,35 @@ npm run dev
 Vite proxy `/api` sang `http://localhost:8000`. Search form luôn hiển thị nhưng bị
 khóa rõ ràng cho tới khi collection/model tương ứng sẵn sàng.
 
+### Chuẩn bị query bên ngoài hệ thống
+
+Backend không gọi GPT‑4o để dịch hoặc phân rã query. Khi thi, copy prompt trong
+[`docs/query-decomposition.md`](docs/query-decomposition.md) vào GPT Web/Gemini,
+đưa câu hỏi tiếng Việt cho LLM, rồi dán JSON `aic26.query.v1` trả về vào UI.
+
+API nhận trực tiếp JSON đã chuẩn hóa dưới field `query`:
+
+```json
+{
+  "query": {
+    "schema_version": "aic26.query.v1",
+    "task_type": "kis",
+    "raw_query_vi": "Tìm một người mặc áo đỏ đang phát biểu ngoài trời.",
+    "scene_en": "a person wearing a red shirt speaking outdoors",
+    "objects_en": ["a person wearing a red shirt"],
+    "ocr_vi": [],
+    "audio_vi": [],
+    "audio_events_en": [],
+    "answer_sources": [],
+    "events": null
+  },
+  "top_k": 100
+}
+```
+
+`raw_query_vi` chỉ giữ provenance; retrieval dùng các signal đã phân rã. GPT‑4o
+backend chỉ còn là answerer tùy chọn của Q&A, không tham gia KIS/TRAKE query parsing.
+
 ## 5. Kiểm thử
 
 ```bash
@@ -182,5 +211,5 @@ Colab T4 và Kaggle T4 trước full corpus.
 - Không push trực tiếp `main`; dùng branch nhỏ và squash merge.
 - Xem [`CONTRIBUTING.md`](CONTRIBUTING.md) và [`SECURITY.md`](SECURITY.md).
 - Model/license notes nằm trong [`docs/model-registry.md`](docs/model-registry.md).
-- Query parser prompt nằm trong
+- Prompt dùng cho GPT Web/Gemini nằm trong
   [`docs/query-decomposition.md`](docs/query-decomposition.md).

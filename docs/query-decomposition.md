@@ -1,7 +1,9 @@
 # Fixed query-decomposition prompt
 
-Prompt này là contract, không sửa trực tiếp trong notebook. Mọi thay đổi cần bump
-`prompt_version`, chạy eval KIS/Q&A/TRAKE và cập nhật `QuerySpec` nếu schema đổi.
+Copy prompt này vào GPT Web/Gemini để chuẩn bị query trước khi search, rồi dán JSON
+trả về vào UI. Backend không gọi prompt hoặc LLM API. Prompt vẫn là contract: mọi
+thay đổi cần bump `prompt_version`, chạy eval KIS/Q&A/TRAKE và cập nhật `QuerySpec`
+nếu schema đổi.
 
 ## System prompt `aic26.query-parser.v1`
 

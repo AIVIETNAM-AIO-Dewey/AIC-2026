@@ -27,8 +27,18 @@ form {
   align-items: center;
 }
 form [role="tablist"] { grid-column: 1 / -1; }
-form input { min-width: 0; }
-.form-hint { grid-column: 1 / -1; padding: 0 .35rem; color: #9a3412; }
+form label { grid-column: 1 / -1; font-weight: 700; }
+form textarea {
+  grid-column: 1 / -1;
+  width: auto;
+  min-height: 20rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: .85rem;
+}
+.form-hint, .form-error { grid-column: 1 / -1; padding: 0 .35rem; }
+.form-hint { color: #52617a; }
+.form-error { color: #b91c1c; }
 
 .grid {
   display: grid;
@@ -65,10 +75,10 @@ article img {
   object-fit: cover;
 }
 article strong, article small { display: block; margin-top: .35rem; }
-textarea { width: 90%; min-height: 5rem; }
-
 @media (max-width: 640px) {
   main { padding: 1rem; }
   form { grid-template-columns: 1fr; }
-  form [role="tablist"], .form-hint { grid-column: 1; }
+  form [role="tablist"], form label, form textarea, .form-hint, .form-error {
+    grid-column: 1;
+  }
 }

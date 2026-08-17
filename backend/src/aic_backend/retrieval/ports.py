@@ -39,10 +39,6 @@ class RetrievalRepository(Protocol):
     def ready(self) -> bool: ...
 
 
-class QueryParser(Protocol):
-    def parse(self, *, task_type: str, raw_query_vi: str) -> QuerySpec: ...
-
-
 class Answerer(Protocol):
     def answer(
         self, *, query: QuerySpec, frames: Sequence[SearchHit], use_images: bool

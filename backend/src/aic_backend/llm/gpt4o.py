@@ -53,28 +53,6 @@ class GPT4oAdapter:
             raise CapabilityUnavailable("OpenAI returned no structured output")
         return json.loads(text)
 
-    def parse(self, *, task_type: str, raw_query_vi: str) -> QuerySpec:
-        schema = QuerySpec.model_json_schema()
-        response = self._create(
-            model=self.model,
-            store=False,
-            input=[
-                {
-                    "role": "user",
-                    "content": f"Parse this Vietnamese {task_type} retrieval query: {raw_query_vi}",
-                }
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "aic26_query",
-                    "strict": True,
-                    "schema": schema,
-                }
-            },
-        )
-        return QuerySpec.model_validate(self._json(response))
-
     def answer(
         self, *, query: QuerySpec, frames: list[SearchHit], use_images: bool
     ) -> tuple[str, float, list[str]]:

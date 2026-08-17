@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Literal
 
+from aic2026.contracts.query import QuerySpec
 from pydantic import BaseModel, Field
 
 
 class SearchRequest(BaseModel):
-    task_type: Literal["kis", "qa", "trake"]
-    raw_query_vi: str = Field(min_length=1)
+    query: QuerySpec
     top_k: int = Field(default=100, ge=1, le=100)
     use_images_for_answer: bool = True
 
