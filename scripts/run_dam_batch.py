@@ -263,13 +263,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("🔍 DRY-RUN: Verifying paths for all %d assigned videos...", len(assigned_videos))
         missing_count = 0
         from aic2026.object_description import load_organizer_detections, filter_detections, FilterConfig
+        from aic2026.common.cli import read_config
+        cfg_dict = read_config(args.config) if args.config else {}
         sample_config = FilterConfig(
-            minimum_score=0.25,
-            minimum_area_ratio=0.005,
-            maximum_area_ratio=0.85,
-            same_class_iou=0.45,
-            cross_label_duplicate_iou=0.60,
-            maximum_regions=6,
+            minimum_score=float(cfg_dict.get("score_threshold", 0.30)),
+            minimum_area_ratio=float(cfg_dict.get("min_area_ratio", 0.005)),
+            maximum_area_ratio=float(cfg_dict.get("max_area_ratio", 0.85)),
+            same_class_iou=float(cfg_dict.get("class_nms_iou", 0.45)),
+            cross_label_duplicate_iou=float(cfg_dict.get("cross_label_iou", 0.60)),
+            maximum_regions=int(cfg_dict.get("max_regions", 3)),
         )
         for idx, vid in enumerate(assigned_videos, start=1):
             try:
