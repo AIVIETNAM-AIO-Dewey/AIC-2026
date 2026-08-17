@@ -5,7 +5,10 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
