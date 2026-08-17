@@ -19,7 +19,7 @@ bền vững cho cell sau. Không đặt token trong các biến này.
 2. Clone private repo bằng token read-only trong Colab Secrets, `%cd` repo root,
    rồi đặt ba `%env` path theo tài khoản. Không đưa token vào URL hoặc output.
 3. Chạy cell install rồi cell `verify_environment.py` trước khi download model.
-4. Dùng `notebooks/colab_object_description.ipynb` làm thin launcher.
+4. Dùng `offline/notebooks/colab_object_description.ipynb` làm thin launcher.
 
 Drive phù hợp để giữ artifact qua nhiều session nhưng I/O file nhỏ chậm. Nên ghi
 shard tạm ở `/content` rồi copy artifact đã đóng/manifest atomically sang Drive.
@@ -33,7 +33,7 @@ Không cache model trong Git working tree.
    Không clone Git hoặc tải lại từ `main`.
 3. Đặt artifact/cache dưới `/kaggle/working`, rồi tạo Dataset version riêng tư khi
    cần lưu qua session.
-4. Dùng `notebooks/kaggle_object_description.ipynb` làm thin launcher.
+4. Dùng `offline/notebooks/kaggle_object_description.ipynb` làm thin launcher.
 
 `/kaggle/input` không ghi được. `AIC_ARTIFACT_ROOT` và `AIC_CACHE_ROOT` không được
 trỏ vào đó trừ cache snapshot đã tồn tại và chỉ đọc.
@@ -59,24 +59,24 @@ sha256sum -c SHA256SUMS
 cd /kaggle/working/AIC-2026
 python -m pip install --no-index --no-deps \
   --find-links "$AIC_WHEELHOUSE" \
-  -r requirements/runtime-base.txt
+  -r offline/requirements/runtime-base.txt
 python -m pip install --no-index --no-deps "$AIC_DAM_WHEEL"
 ```
 
 `wheelhouse/` phải chứa wheel tương thích Python của **mọi** pin trong
-`requirements/runtime-base.txt`; không dùng sdist. Source snapshot được copy từ
+`offline/requirements/runtime-base.txt`; không dùng sdist. Source snapshot được copy từ
 `/kaggle/input/aic2026-source/AIC-2026` sang `/kaggle/working/AIC-2026` trước cell
 trên và `SHA256SUMS` của source Dataset phải được tạo từ đúng Git SHA đã duyệt. Vì
-runner tự thêm `src/` vào import path, không cần editable install hoặc PEP 517 build
+runner tự thêm `offline/src/` vào import path, không cần editable install hoặc PEP 517 build
 trong phiên Internet-off.
 
-Không cài `requirements/object-description.txt` trực tiếp trong chế độ này vì file đó cài DAM từ
+Không cài `offline/requirements/object-description.txt` trực tiếp trong chế độ này vì file đó cài DAM từ
 Git commit qua Internet. Snapshot/wheel sai hash hoặc sai revision phải fail trước
 khi model load.
 
 ## Preflight và resume
 
-`scripts/verify_environment.py` kiểm tra CUDA, VRAM và path trước model load. DAM
+`offline/scripts/verify_environment.py` kiểm tra CUDA, VRAM và path trước model load. DAM
 3B có thể không chạy ổn trên GPU VRAM thấp; preflight mặc định yêu cầu 14 GiB và
 config có OOM retry ngắn hơn. Mỗi shard phải publish atomically và chỉ được resume
 khi config hash/model revision/input checksum khớp.

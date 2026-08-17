@@ -75,4 +75,4 @@ submissions/
 outputs/
 
 # Tiny, licensed test fixtures are explicitly allowed.
-!tests/fixtures/**
+!offline/tests/fixtures/**

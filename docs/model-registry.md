@@ -1,6 +1,6 @@
 # Model registry và license gate
 
-Nguồn máy đọc là `configs/models.yaml`. Mọi production run phải dùng immutable
+Nguồn máy đọc là `offline/configs/models.yaml`. Mọi production run phải dùng immutable
 revision trong file đó; `main` hoặc model alias trôi nổi không được chấp nhận.
 
 | Role | Model/code | Revision | License | Trạng thái |
@@ -15,7 +15,7 @@ Chúng không được production run cho đến khi có model ID/API version, i
 revision, license URL, hardware profile và kết quả smoke test.
 
 SigLIP2 yêu cầu `transformers>=4.49.0`; kiến trúc `Siglip2` không tồn tại trong các
-bản cũ hơn. `requirements/runtime-base.txt` đã nâng pin từ `4.48.3` lên `4.57.6`
+bản cũ hơn. `offline/requirements/runtime-base.txt` đã nâng pin từ `4.48.3` lên `4.57.6`
 (cùng `tokenizers` và `huggingface-hub`), nên **owner của stage SAM/DAM phải chạy lại
 smoke test** trước khi pin mới được coi là an toàn cho nhánh object.
 

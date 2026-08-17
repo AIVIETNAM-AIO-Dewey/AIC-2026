@@ -18,7 +18,7 @@ thành viên không được phá vỡ data contract của các thành viên kh�
 Một PR chỉ sẵn sàng review khi:
 
 1. Có issue hoặc mô tả rõ mục tiêu, phạm vi và phần không làm.
-2. Có lệnh `%%bash`/`python scripts/<runner>.py ...` để reviewer tái lập.
+2. Có lệnh `%%bash`/`python offline/scripts/<runner>.py ...` để reviewer tái lập.
 3. Ghi rõ dataset/split, config, model ID + revision, seed, Git SHA, GPU, runtime
    và peak VRAM cho mọi kết quả benchmark.
 4. CI CPU xanh; smoke test dùng fixture nhỏ, không tải model hay dữ liệu cuộc thi.
@@ -34,7 +34,7 @@ commit file `CODEOWNERS` với username giả.
 
 ## Quy tắc code và notebook
 
-- Logic nằm trong `src/aic2026`; `scripts/` chỉ parse CLI và gọi package. Notebook
+- Logic nằm trong `offline/src/aic2026`; `offline/scripts/` chỉ parse CLI và gọi package. Notebook
   chỉ cài môi trường, đặt biến, gọi script và xem vài dòng kết quả.
 - Không hard-code `/content`, `/kaggle`, Google Drive hoặc đường dẫn Windows trong
   code. Dùng `AIC_DATA_ROOT`, `AIC_ARTIFACT_ROOT`, `AIC_CACHE_ROOT` hoặc CLI flag.
@@ -49,7 +49,7 @@ commit file `CODEOWNERS` với username giả.
 - `data/raw` là read-only. Không ghi đè dữ liệu do ban tổ chức cung cấp.
 - Dữ liệu sinh ra đặt dưới `AIC_ARTIFACT_ROOT`; mỗi stage ghi manifest sidecar.
   `runs/<run_id>/` chỉ dành cho aggregate metadata/log. Các payload đều bị Git ignore.
-- Chỉ commit fixture nhỏ, có quyền phân phối, trong `tests/fixtures/`.
+- Chỉ commit fixture nhỏ, có quyền phân phối, trong `offline/tests/fixtures/`.
 - Kết quả thí nghiệm nhỏ được ghi trong PR hoặc external tracker; liên kết
   artifact riêng tư bằng ID/checksum, không bằng URL chứa credential.
 - Không công bố metric nếu thiếu resolved config, input version, model revision,
@@ -58,7 +58,7 @@ commit file `CODEOWNERS` với username giả.
 ## Checklist trước khi push
 
 ```bash
-python -m pip install -r requirements/dev.txt
+python -m pip install -r offline/requirements/dev.txt
 pre-commit run --all-files
 ruff check .
 ruff format --check .
