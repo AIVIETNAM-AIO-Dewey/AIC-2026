@@ -313,10 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.rclone_dest and not args.no_resume:
         try:
             res = subprocess.run(
-                ["rclone", "lsf", args.rclone_dest, "--tpslimit", "5"],
+                ["rclone", "lsf", args.rclone_dest, "--fast-list", "--tpslimit", "5"],
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=60,
             )
             if res.returncode == 0:
                 for fname in res.stdout.splitlines():
@@ -326,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
                 if remote_completed_videos:
                     logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
         except Exception as exc:
-            logger.warning("Could not pre-fetch remote Google Drive file list: %s", exc)
+            logger.info("Remote pre-fetch skipped (will compute from scratch): %s", exc)
 
     for idx, video_id in enumerate(assigned_videos, start=1):
         video_start_time = time.time()
