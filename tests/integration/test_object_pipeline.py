@@ -87,6 +87,8 @@ def test_synthetic_end_to_end_and_completed_resume(tmp_path: Path) -> None:
     )
 
     assert mask_counts["regions"] == 2
+    assert mask_counts["frames_without_regions"] == 0
+    assert mask_counts["frames_at_region_cap"] == 0
     assert caption_counts["captions_ok"] == 2
     record = ObjectFrameRecord.model_validate(next(iter_jsonl(descriptions)))
     assert [region.region_id for region in record.regions] == [

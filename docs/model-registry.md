@@ -8,12 +8,16 @@ revision trong file đó; `main` hoặc model alias trôi nổi không được 
 | Bbox-to-mask refinement | `facebook/sam-vit-base` | `70c1a07f894ebb5b307fd9eaaee97b9dfc16068f` | Apache-2.0 | locked |
 | Region caption weights | `nvidia/DAM-3B` | `0797bedd98d645cd021379a4661ee233da279bba` | NVIDIA Noncommercial | locked, cần rule check |
 | DAM code | `NVlabs/describe-anything` | `153ad3d33c29324e9197f565547c6bc8500da02d` | Apache-2.0 | locked |
-| Planned scene embedding | `google/siglip2-base-patch16-224` | `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2` | Apache-2.0 | architecture locked, chưa implement |
+| Scene embedding | `google/siglip2-base-patch16-224` | `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2` | Apache-2.0 | locked |
 
 Vietnamese OCR, PhoWhisper và query/answer model do các subsystem owners phụ trách.
 Chúng không được production run cho đến khi có model ID/API version, immutable
-revision, license URL, hardware profile và kết quả smoke test. SigLIP2 mới khóa ở
-mức kiến trúc; owner retrieval vẫn phải thêm implementation và benchmark.
+revision, license URL, hardware profile và kết quả smoke test.
+
+SigLIP2 yêu cầu `transformers>=4.49.0`; kiến trúc `Siglip2` không tồn tại trong các
+bản cũ hơn. `requirements/runtime-base.txt` đã nâng pin từ `4.48.3` lên `4.57.6`
+(cùng `tokenizers` và `huggingface-hub`), nên **owner của stage SAM/DAM phải chạy lại
+smoke test** trước khi pin mới được coi là an toàn cho nhánh object.
 
 ## Quy trình đổi model
 

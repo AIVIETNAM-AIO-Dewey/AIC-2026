@@ -32,19 +32,33 @@ models:
     status: locked
     approval_note: Confirm competition eligibility before a production run.
 
-planned_models:
   scene_embedding:
+    role: whole-frame scene embedding for coarse retrieval and scene_en scoring
+    provider: huggingface
     family: SigLIP2
     model_id: google/siglip2-base-patch16-224
     revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
     license: Apache-2.0
-    status: architecture_locked_not_implemented
+    license_url: https://huggingface.co/google/siglip2-base-patch16-224/tree/75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
+    trust_remote_code: false
+    embedding_dim: 768
+    minimum_transformers: 4.49.0
+    status: locked
+
+planned_models:
   vietnamese_ocr:
     family: owner_selected
     status: owner_must_lock_id_revision_and_license
   vietnamese_asr:
     family: PhoWhisper
-    status: owner_must_lock_id_revision_and_license
+    role: Vietnamese automatic speech recognition with English code-switch support
+    provider: huggingface
+    model_id: vinai/PhoWhisper-large
+    ct2_model_id: kiendt/PhoWhisper-large-ct2
+    license: MIT
+    license_url: https://huggingface.co/vinai/PhoWhisper-large
+    trust_remote_code: false
+    status: locked
   query_parser_and_qa:
     family: owner_selected
     status: owner_must_lock_model_or_api_version_and_terms

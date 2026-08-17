@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=75,<76"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aic2026-backend"
+version = "0.1.0"
+description = "CPU-first online retrieval API for AIC 2026"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "fastapi==0.115.12",
+  "httpx==0.28.1",
+  "numpy==1.26.4",
+  "openai==1.77.0",
+  "pydantic==2.10.6",
+  "pydantic-settings==2.8.1",
+  "qdrant-client==1.18.0",
+  "uvicorn[standard]==0.34.2",
+]
+
+[project.optional-dependencies]
+encoders = [
+  "onnxruntime==1.20.1",
+  "optimum[onnxruntime]==1.24.0",
+  "torch==2.6.0",
+  "transformers==4.48.3",
+]
+dev = [
+  "pytest==8.3.4",
+  "pytest-asyncio==0.25.3",
+  "ruff==0.9.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection signature is intentionally expressed through
+# function defaults; disabling it globally would hide unrelated bugs.
+"src/aic_backend/api/app.py" = ["B008"]

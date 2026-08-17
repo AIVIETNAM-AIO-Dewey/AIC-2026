@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
@@ -20,9 +20,41 @@ class FrameMapRow:
     pts_time_s: float
     fps: float
     frame_idx: int
+    # Keyframe numbers that shared this row's frame_idx and were not indexed.
+    discarded_keyframe_ns: tuple[int, ...] = ()
 
 
-def read_frame_map(path: Path) -> list[FrameMapRow]:
+def _drop_duplicate_frame_idx(rows: list[FrameMapRow]) -> list[FrameMapRow]:
+    """Keep one keyframe per `frame_idx` instead of inventing a new index.
+
+    Some organizer maps compute `frame_idx` as `floor(pts_time * fps)`, so a
+    keyframe one frame after its predecessor (`pts_time` 1/fps, product 0.999...)
+    inherits the predecessor's index and two keyframes claim one `frame_uid`.
+
+    Rewriting the index would put a value in our submission that the organizer's
+    own map never assigned. Dropping instead keeps every surviving `frame_idx`
+    exactly as shipped; the discarded keyframe is simply not indexed.
+
+    The survivor is the middle of the colliding run — deterministic, so a rerun
+    with the same config reproduces the same manifest byte for byte.
+    """
+    kept: list[FrameMapRow] = []
+    start = 0
+    while start < len(rows):
+        end = start
+        while end + 1 < len(rows) and rows[end + 1].frame_idx == rows[start].frame_idx:
+            end += 1
+        run = rows[start : end + 1]
+        survivor = run[len(run) // 2]
+        if len(run) > 1:
+            discarded = tuple(row.keyframe_n for row in run if row is not survivor)
+            survivor = replace(survivor, discarded_keyframe_ns=discarded)
+        kept.append(survivor)
+        start = end + 1
+    return kept
+
+
+def read_frame_map(path: Path, *, drop_duplicate_frame_idx: bool = True) -> list[FrameMapRow]:
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         required = {"n", "pts_time", "fps", "frame_idx"}
@@ -49,6 +81,8 @@ def read_frame_map(path: Path) -> list[FrameMapRow]:
 
     if not rows:
         raise ValueError(f"Frame map is empty: {path}")
+    if drop_duplicate_frame_idx:
+        rows = _drop_duplicate_frame_idx(rows)
     for name, values in (
         ("n", [row.keyframe_n for row in rows]),
         ("frame_idx", [row.frame_idx for row in rows]),
@@ -83,10 +117,14 @@ def build_frame_refs(
     frames_dir: Path,
     data_root: Path,
     limit: int | None = None,
+    drop_duplicate_frame_idx: bool = True,
 ) -> list[FrameRef]:
-    rows = read_frame_map(map_csv)
+    rows = read_frame_map(map_csv, drop_duplicate_frame_idx=drop_duplicate_frame_idx)
     indexed = _index_frames(frames_dir)
+    # Deliberately discarded keyframes still have an image on disk, so they must
+    # count as mapped or the surplus check below rejects the whole video.
     expected_keyframes = {row.keyframe_n for row in rows}
+    expected_keyframes.update(n for row in rows for n in row.discarded_keyframe_ns)
     if limit is None:
         surplus = sorted(set(indexed).difference(expected_keyframes))
         if surplus:

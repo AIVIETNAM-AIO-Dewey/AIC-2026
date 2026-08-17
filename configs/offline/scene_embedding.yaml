@@ -1,0 +1,14 @@
+schema_version: "1.0"
+run:
+  run_id: scene-embedding-v1
+seed: 2026
+device: auto
+
+siglip_model_id: google/siglip2-base-patch16-224
+siglip_revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
+
+# MPS has no bfloat16. float32 keeps the index bit-comparable with a CUDA rerun;
+# switch to float16 only after measuring that it is both faster and equivalent.
+compute_dtype: float32
+matrix_dtype: float16
+batch_size: 32

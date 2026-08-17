@@ -4,7 +4,7 @@ Repo dùng chung của team cho vòng Sơ tuyển AI Challenge 2026 TP.HCM. Thi�
 tiên chạy trên **Google Colab/Kaggle**, tái lập bằng CLI, và cho phép mỗi thành viên
 phát triển một modality mà không phụ thuộc notebook của người khác.
 
-Hiện tại code tập trung vào nhánh đã được giao:
+Repository hiện gồm pipeline offline và retrieval full-stack:
 
 ```text
 organizer Objects (bbox/class/score)
@@ -12,11 +12,15 @@ organizer Objects (bbox/class/score)
   -> SAM bbox-to-mask refinement
   -> DAM localized English description
   -> versioned ObjectFrameRecord JSONL + RunManifest
+
+keyframes (frame manifest)
+  -> SigLIP2 whole-frame embedding
+  -> versioned SceneEmbeddingRecord JSONL + [N, D] matrix + RunManifest
 ```
 
-SigLIP, Vietnamese OCR, PhoWhisper, query parser, fusion, Q&A và TRAKE alignment là
-kiến trúc đã thống nhất nhưng chưa được coi là implemented cho đến khi subsystem
-owner thêm code, model pin, validator và test.
+EasyOCR, PhoWhisper, dense TRAKE 5 FPS, Qdrant hybrid retrieval, FastAPI và React
+đều có runner/module riêng. Model GPU chỉ chạy offline; API image không chứa
+SAM/DAM/PhoWhisper/EasyOCR weights.
 
 ### Ownership tạm thời
 
@@ -77,7 +81,7 @@ flowchart LR
 
 Chi tiết data flow, failure policy và scoring rationale nằm trong
 [`docs/architecture.md`](docs/architecture.md). Contract chính thức nằm trong
-[`docs/data-contracts.md`](docs/data-contracts.md).
+[`docs/architecture.md`](docs/architecture.md).
 
 ### Offline
 
@@ -144,7 +148,26 @@ calibrate trên validation trước khi cộng.
   curve dense trong từng video; k-best DP chọn `t1 < ... < tn`, rồi merge/rank các
   sequences giữa videos. Không khóa vào đúng một video quá sớm.
 
-## 3. Chạy object -> bbox/mask -> DAM trên cloud
+## 3. Chuẩn bị dữ liệu
+
+Sáu ZIP gốc được giữ nguyên dưới `data/raw/` và bị Git ignore. Không giải nén trực
+tiếp vào repo. Lệnh chuẩn kiểm SHA-256, ZIP traversal, dung lượng trống và coverage,
+sau đó publish atomically subset đủ dữ liệu:
+
+```bash
+python scripts/prepare_data.py \
+  --raw-root data/raw \
+  --prepared-root data/prepared \
+  --subset L21 \
+  --resume
+```
+
+Inventory L21 hiện có 29 video, 7.800 mapping/Object và 10 duplicate `frame_idx`;
+canonical frame manifest giữ keyframe thứ hai của mỗi cặp nên còn 7.790 frame.
+Archive CLIP BTC được checksum nhưng đánh dấu `ignored_by_policy` và không giải nén.
+Đặt `AIC_DATA_ROOT=data/prepared/L21` cho các stage tiếp theo.
+
+## 4. Chạy object -> bbox/mask -> DAM trên cloud
 
 ### Data layout cần cung cấp
 
@@ -205,7 +228,7 @@ Cell 3 - install và preflight:
 ```bash
 %%bash
 set -euo pipefail
-python -m pip install --no-deps -r requirements/colab.txt
+python -m pip install --no-deps -r requirements/object-description.txt
 python scripts/verify_environment.py \
   --config configs/offline/object_description.yaml \
   --device cuda --write-report
@@ -243,7 +266,7 @@ python scripts/run_dam_descriptions.py \
   --mask-artifact "$MASK_ARTIFACT" \
   --device cuda --resume
 
-python scripts/validate_object_artifacts.py \
+python scripts/validate_artifacts.py \
   --artifact "$DESCRIPTION_ARTIFACT" \
   --manifest "${DESCRIPTION_ARTIFACT%.jsonl}.manifest.json" \
   --require-captions
@@ -290,21 +313,21 @@ Cell 2 - sửa Dataset slug/video ID theo attachment của team:
 %env AIC_VIDEO_ID=replace_with_video_id
 ```
 
-Cell 3 - install/preflight dùng `requirements/kaggle.txt`, sau đó chạy đúng Cell 4
+Cell 3 - install/preflight dùng `requirements/object-description.txt`, sau đó chạy đúng Cell 4
 của Colab:
 
 ```bash
 %%bash
 set -euo pipefail
-python -m pip install --no-deps -r requirements/kaggle.txt
+python -m pip install --no-deps -r requirements/object-description.txt
 python scripts/verify_environment.py \
   --config configs/offline/object_description.yaml \
   --device cuda --write-report
 ```
 
-Kaggle Internet-off dùng `requirements/kaggle-offline.txt`, pinned DAM wheel và
+Kaggle Internet-off dùng wheelhouse của `runtime-base.txt`, pinned DAM wheel và
 Hugging Face cache snapshot từ private Dataset; xem lệnh checksum cụ thể trong
-[`docs/cloud-runbook.md`](docs/cloud-runbook.md).
+[`docs/runbook.md`](docs/runbook.md).
 
 Khi Kaggle Internet tắt, attach private Dataset chứa model snapshots đúng revisions
 trong `configs/models.yaml` và trỏ `AIC_CACHE_ROOT` vào snapshot read-only hoặc copy
@@ -313,7 +336,46 @@ sang `/kaggle/working`. Không fallback sang `main`.
 Thin notebooks tương ứng: [`notebooks/colab_object_description.ipynb`](notebooks/colab_object_description.ipynb)
 và [`notebooks/kaggle_object_description.ipynb`](notebooks/kaggle_object_description.ipynb).
 
-## 4. Output và validation
+### SigLIP2 scene embeddings (chạy local, Apple Silicon)
+
+Stage này không cần cloud GPU. Chỉ cần `keyframes/` và `map-keyframes/` dưới
+`AIC_DATA_ROOT`; không cần tải videos, objects hay CLIP features của ban tổ chức.
+
+```bash
+python -m pip install torch torchvision   # chỉ trong venv local, không thêm vào requirements/
+export AIC_DATA_ROOT=... AIC_ARTIFACT_ROOT=... AIC_CACHE_ROOT=... AIC_VIDEO_ID=L01_V001
+
+python scripts/build_frame_manifest.py \
+  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
+  --map-csv "$AIC_DATA_ROOT/map-keyframes/$AIC_VIDEO_ID.csv" \
+  --frames-dir "$AIC_DATA_ROOT/keyframes/$AIC_VIDEO_ID" --resume
+
+python scripts/run_scene_embeddings.py \
+  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
+  --frame-manifest "$AIC_ARTIFACT_ROOT/frame_manifests/$AIC_VIDEO_ID.jsonl" \
+  --device mps --resume
+```
+
+Dùng `--device mps` một cách tường minh: `device: auto` không có nhánh MPS và sẽ
+âm thầm rơi về `cpu`. Đo trên M4 Pro: ~105 ảnh/giây ở `batch_size: 32`.
+
+### Vector index (Qdrant)
+
+Backend ingest là đường nạp Qdrant duy nhất. Nó đọc JSONL metadata cùng NPY companion,
+explode DAM/OCR/ASR đúng granularity, kiểm checksum/revision rồi đổi alias atomically.
+
+```bash
+docker compose up -d qdrant
+python -m aic_backend.ingest.cli \
+  --artifact-root "$AIC_ARTIFACT_ROOT" --all --activate \
+  --e5-model-path "$AIC_ARTIFACT_ROOT/models/multilingual-e5-base"
+```
+
+Các collection `frames_sparse`, `frames_dense`, `regions`, `ocr`, `asr` dùng UUIDv5
+ổn định và alias `*_current`. Payload luôn giữ canonical `video_id`, `frame_idx`,
+`pts_time_s`, `run_id`; không fallback sang filename hoặc `keyframe_n`.
+
+## 5. Output và validation
 
 Với `VIDEO_ID`, outputs cố định:
 
@@ -321,6 +383,8 @@ Với `VIDEO_ID`, outputs cố định:
 frame_manifests/<VIDEO_ID>.jsonl
 object_description/masks/<VIDEO_ID>.jsonl
 object_description/descriptions/<VIDEO_ID>.jsonl
+scene_embeddings/<VIDEO_ID>.jsonl
+scene_embeddings/<VIDEO_ID>.f16.npy
 ```
 
 Mỗi stage manifest đổi suffix `.jsonl` thành `.manifest.json`. Description JSONL
@@ -330,7 +394,7 @@ frame, duplicate ID, bbox/mask ngoài ảnh hoặc manifest không tương thíc
 failure. Shard description chỉ publish khi mọi caption `ok`; lỗi/OOM giữ `.partial`
 để `--resume` retry, và primary OOM retry được ghi trong manifest counters.
 
-## 5. Cấu trúc repo
+## 6. Cấu trúc repo
 
 ```text
 configs/       immutable model registry và pipeline defaults
@@ -338,13 +402,16 @@ docs/          architecture, contracts, cloud/model runbooks
 notebooks/     thin Colab/Kaggle launchers, không chứa pipeline logic
 scripts/       CLI entry points
 src/aic2026/   reusable implementation và strict contracts
+backend/       FastAPI theo api/retrieval/ingest/llm
+frontend/      React/Vite readiness, KIS, Q&A và TRAKE UI
+docker/        CPU API/web images; Qdrant nằm trong compose.yaml
 tests/         CPU tests + tiny licensed fixtures
-data/          organizer data mount (ignored)
+data/raw/      archive gốc; data/prepared/ là atomic prepared subset (ignored)
 artifacts/     generated outputs (ignored)
 runs/          run metadata (ignored)
 ```
 
-## 6. Làm việc nhóm, reproducibility và license
+## 7. Làm việc nhóm, reproducibility và license
 
 - Một shared private repo, `main` protected, nhánh ngắn hạn, squash merge, ít nhất
   một reviewer; contract/config/model changes cần subsystem owner review.
@@ -369,4 +436,4 @@ pytest -m "not gpu and not slow"
 ```
 
 Cloud setup, cache, Internet-off và resume policy được mô tả tại
-[`docs/cloud-runbook.md`](docs/cloud-runbook.md).
+[`docs/runbook.md`](docs/runbook.md).

@@ -1,3 +1,0 @@
--r runtime.txt
-
-# Colab supplies the CUDA-matched PyTorch wheel. Do not replace it implicitly.

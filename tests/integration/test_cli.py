@@ -69,7 +69,7 @@ def test_frame_builder_and_validator_cli(tmp_path: Path) -> None:
     validator = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts" / "validate_object_artifacts.py"),
+            str(REPO_ROOT / "scripts" / "validate_artifacts.py"),
             "--artifact",
             str(output),
             "--manifest",
@@ -89,7 +89,7 @@ def test_frame_builder_and_validator_cli(tmp_path: Path) -> None:
     mismatch = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts" / "validate_object_artifacts.py"),
+            str(REPO_ROOT / "scripts" / "validate_artifacts.py"),
             "--artifact",
             str(output),
             "--manifest",

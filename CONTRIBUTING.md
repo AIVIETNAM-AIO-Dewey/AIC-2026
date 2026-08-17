@@ -50,7 +50,7 @@ commit file `CODEOWNERS` với username giả.
 - Dữ liệu sinh ra đặt dưới `AIC_ARTIFACT_ROOT`; mỗi stage ghi manifest sidecar.
   `runs/<run_id>/` chỉ dành cho aggregate metadata/log. Các payload đều bị Git ignore.
 - Chỉ commit fixture nhỏ, có quyền phân phối, trong `tests/fixtures/`.
-- Kết quả thí nghiệm nhỏ được ghi trong `reports/experiments/<id>.md`; liên kết
+- Kết quả thí nghiệm nhỏ được ghi trong PR hoặc external tracker; liên kết
   artifact riêng tư bằng ID/checksum, không bằng URL chứa credential.
 - Không công bố metric nếu thiếu resolved config, input version, model revision,
   seed và Git SHA. Ghi rõ kernel CUDA nào không deterministic.

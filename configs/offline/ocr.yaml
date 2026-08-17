@@ -1,0 +1,7 @@
+schema_version: "1.0"
+run:
+  run_id: easyocr-v1
+seed: 2026
+device: auto
+languages: [vi, en]
+model_revision: easyocr-1.7.2

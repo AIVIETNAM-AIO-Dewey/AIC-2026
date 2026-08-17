@@ -43,7 +43,8 @@ class SamMaskGenerator:
             from transformers import AutoModelForMaskGeneration, AutoProcessor
         except ImportError as error:
             raise RuntimeError(
-                "transformers with SAM support is required; install requirements/runtime.txt"
+                "transformers with SAM support is required; install "
+                "requirements/object-description.txt"
             ) from error
         local_files_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
         processor = AutoProcessor.from_pretrained(

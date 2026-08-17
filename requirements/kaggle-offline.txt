@@ -1,7 +1,0 @@
--r runtime-base.txt
-
-# Install the prebuilt wheel for NVlabs/describe-anything commit
-# 153ad3d33c29324e9197f565547c6bc8500da02d from the team's private Kaggle Dataset:
-#   python -m pip install --no-index --no-deps "$AIC_DAM_WHEEL"
-# The wheel and Hugging Face snapshots must match the checksums in the private
-# mirror manifest before this environment is accepted.

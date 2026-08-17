@@ -1,0 +1,32 @@
+schema_version: "1.0"
+run:
+  run_id: phowhisper-asr-v1
+seed: 2026
+device: auto
+
+# PhoWhisper model selection
+model_id: vinai/PhoWhisper-large
+ct2_model_id: kiendt/PhoWhisper-large-ct2
+engine: faster_whisper            # "faster_whisper" or "huggingface"
+compute_type: float16             # float16 for GPU, int8 for CPU
+
+# Audio extraction
+sampling_rate: 16000
+audio_channels: 1
+
+# Sliding window segmentation
+window_size_s: 30.0
+stride_s: 15.0
+
+# PhoWhisper decoding
+language: vi
+initial_prompt: "Bản tin thời sự, tin tức Việt Nam, YouTube, Facebook, iPhone, AI, video, online"
+vad_filter: true
+vad_min_silence_duration_ms: 500
+
+# Deduplication
+dedup_time_overlap_threshold: 0.80
+dedup_text_similarity_threshold: 0.85
+merge_gap_ms: 500
+
+# Storage is mounted/attached by Colab or Kaggle; core never invokes rclone.

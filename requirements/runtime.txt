@@ -1,5 +1,0 @@
--r runtime-base.txt
-
-# DAM source is pinned to an immutable Git commit. For Internet-off Kaggle runs,
-# build/attach an approved wheel from this exact commit instead of using main.
-git+https://github.com/NVlabs/describe-anything.git@153ad3d33c29324e9197f565547c6bc8500da02d
