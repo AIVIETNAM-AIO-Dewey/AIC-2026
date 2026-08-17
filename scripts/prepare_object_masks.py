@@ -32,6 +32,7 @@ from aic2026.common import (  # noqa: E402
 )
 from aic2026.contracts import FrameRef  # noqa: E402
 from aic2026.object_description import (  # noqa: E402
+    BboxMaskGenerator,
     FilterConfig,
     SamMaskGenerator,
     prepare_masks,
@@ -46,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-manifest", type=Path, required=True)
     parser.add_argument("--objects-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--use-bbox",
+        action="store_true",
+        help="Use fast direct bounding box masks instead of loading SAM (zero GPU overhead)",
+    )
     return parser
 
 
@@ -162,12 +168,16 @@ def main(argv: list[str] | None = None) -> int:
             write_manifest(manifest_path, manifest)
             print(json.dumps({"status": "recovered", "output": str(output), **counters}))
             return 0
-        backend = SamMaskGenerator.from_pretrained(
-            model_id=sam_id,
-            revision=sam_revision,
-            cache_dir=roots["cache_root"] / "huggingface",
-            device=device,
-        )
+        use_bbox = args.use_bbox or str(config.get("mask_backend", "")).lower() == "bbox"
+        if use_bbox:
+            backend = BboxMaskGenerator()
+        else:
+            backend = SamMaskGenerator.from_pretrained(
+                model_id=sam_id,
+                revision=sam_revision,
+                cache_dir=roots["cache_root"] / "huggingface",
+                device=device,
+            )
         counters = prepare_masks(
             frame_manifest=frame_manifest,
             objects_dir=objects_dir,

@@ -262,11 +262,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         logger.info("🔍 DRY-RUN: Verifying paths for all %d assigned videos...", len(assigned_videos))
         missing_count = 0
+        from aic2026.object_description import load_organizer_detections, filter_detections, FilterConfig
+        sample_config = FilterConfig(
+            minimum_score=0.25,
+            minimum_area_ratio=0.005,
+            maximum_area_ratio=0.85,
+            same_class_iou=0.45,
+            cross_label_duplicate_iou=0.60,
+            maximum_regions=6,
+        )
         for idx, vid in enumerate(assigned_videos, start=1):
             try:
                 f_dir = resolver.resolve_frames_dir(vid)
                 o_dir = resolver.resolve_objects_dir(vid)
                 m_csv = resolver.resolve_map_csv(vid)
+                if idx == 1:
+                    sample_json = next(o_dir.glob("*.json"), None)
+                    if sample_json and sample_json.is_file():
+                        raw_dets = load_organizer_detections(sample_json)
+                        filtered = filter_detections(raw_dets, sample_config)
+                        labels = [d.class_entity for d in filtered]
+                        logger.info("  🎯 Sample Box Filter Test (%s/%s): %d raw boxes -> %d distinct objects: %s", vid, sample_json.name, len(raw_dets), len(filtered), labels)
                 if idx <= 5 or idx == len(assigned_videos):
                     logger.info("  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s", idx, len(assigned_videos), vid, f_dir.name, o_dir.name, m_csv.name)
             except FileNotFoundError as error:

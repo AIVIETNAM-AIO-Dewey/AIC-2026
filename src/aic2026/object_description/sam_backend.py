@@ -24,6 +24,22 @@ class MaskPrediction:
     iou_score: float | None
 
 
+class BboxMaskGenerator:
+    """Direct, instant bounding box mask generator (zero GPU overhead)."""
+    def generate(
+        self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]
+    ) -> list[MaskPrediction]:
+        width, height = image.size
+        return [
+            MaskPrediction(
+                mask=rectangle_mask(height, width, box),
+                source="bbox_fallback",
+                iou_score=None,
+            )
+            for box in boxes_xyxy
+        ]
+
+
 class SamMaskGenerator:
     def __init__(self, processor: Any, model: Any, device: str) -> None:
         self.processor = processor
