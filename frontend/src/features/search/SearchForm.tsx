@@ -9,15 +9,17 @@ type Props = {
 };
 
 export function SearchForm({ task, setTask, onSearch, loading, capabilities }: Props) {
+  const activeCapability = capabilities[task];
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
         const query = new FormData(event.currentTarget).get("query")?.toString().trim();
-        if (query) onSearch(query);
+        if (query && activeCapability.ready) onSearch(query);
       }}
     >
-      <div role="tablist">
+      <div role="tablist" aria-label="Loại truy vấn">
         {(["kis", "qa", "trake"] as TaskType[]).map((mode) => (
           <button
             key={mode}
@@ -36,9 +38,19 @@ export function SearchForm({ task, setTask, onSearch, loading, capabilities }: P
         name="query"
         aria-label="Vietnamese query"
         placeholder="Nhập truy vấn tiếng Việt"
+        disabled={!activeCapability.ready}
         required
       />
-      <button disabled={loading}>{loading ? "Đang tìm…" : "Tìm kiếm"}</button>
+      <button disabled={loading || !activeCapability.ready}>
+        {loading ? "Đang tìm…" : "Tìm kiếm"}
+      </button>
+      {!activeCapability.ready && (
+        <small className="form-hint" role="status">
+          {activeCapability.missing.length > 0
+            ? `Chưa thể chạy ${task.toUpperCase()}: thiếu ${activeCapability.missing.join(", ")}.`
+            : `Chưa thể chạy ${task.toUpperCase()}.`}
+        </small>
+      )}
     </form>
   );
 }

@@ -1,2 +1,22 @@
 import type { Sequence } from "../../api/client";
-export function Timeline({ sequences }: { sequences: Sequence[] }) { return <section>{sequences.map(sequence => <article key={`${sequence.video_id}:${sequence.rank}`}><h2>#{sequence.rank} · {sequence.video_id}</h2><ol>{sequence.events.map(event => <li key={event.event_index}>Event {event.event_index + 1}: frame_idx {event.frame.frame_idx}</li>)}</ol></article>)}</section>; }
+
+export function Timeline({ sequences }: { sequences: Sequence[] }) {
+  return (
+    <section>
+      {sequences.map((sequence) => (
+        <article key={`${sequence.video_id}:${sequence.rank}`}>
+          <h2>
+            #{sequence.rank} · {sequence.video_id}
+          </h2>
+          <ol>
+            {sequence.events.map((event) => (
+              <li key={event.event_index}>
+                Sự kiện {event.event_index + 1}: frame_idx {event.frame.frame_idx}
+              </li>
+            ))}
+          </ol>
+        </article>
+      ))}
+    </section>
+  );
+}
