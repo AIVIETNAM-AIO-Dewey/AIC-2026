@@ -301,6 +301,25 @@ def main(argv: list[str] | None = None) -> int:
     skipped_count = 0
     start_time_all = time.time()
 
+    remote_completed_videos: set[str] = set()
+    if args.rclone_dest and not args.no_resume:
+        try:
+            res = subprocess.run(
+                ["rclone", "lsf", args.rclone_dest, "--tpslimit", "5"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if res.returncode == 0:
+                for fname in res.stdout.splitlines():
+                    fname = fname.strip()
+                    if fname.endswith(".jsonl"):
+                        remote_completed_videos.add(fname[:-6])
+                if remote_completed_videos:
+                    logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
+        except Exception as exc:
+            logger.warning("Could not pre-fetch remote Google Drive file list: %s", exc)
+
     for idx, video_id in enumerate(assigned_videos, start=1):
         video_start_time = time.time()
         pct = (idx / total_assigned) * 100
@@ -312,11 +331,11 @@ def main(argv: list[str] | None = None) -> int:
         description_artifact = output_root / "object_description" / "descriptions" / f"{video_id}.jsonl"
         description_manifest = description_artifact.with_suffix(".manifest.json")
 
-        # Check if already completed (Resume)
-        if not args.no_resume and is_video_completed(description_artifact, description_manifest):
-            logger.info("  [SKIP - ALREADY COMPLETED] %s", video_id)
+        # Check if already completed (Resume from local SSD or Google Drive)
+        if not args.no_resume and (video_id in remote_completed_videos or is_video_completed(description_artifact, description_manifest)):
+            logger.info("  [SKIP - ALREADY COMPLETED IN GDRIVE/LOCAL] %s", video_id)
             skipped_count += 1
-            if args.rclone_dest:
+            if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
                 rclone_sync_file(description_artifact, args.rclone_dest)
                 rclone_sync_file(description_manifest, args.rclone_dest)
             continue
