@@ -77,11 +77,13 @@ class PathResolver:
     def _build_keyframe_index(self) -> dict[str, Path]:
         if self._keyframe_index is not None:
             return self._keyframe_index
-        logger.info("Indexing keyframe directories under %s ...", self.keyframes_root)
+        logger.info("Fast-indexing keyframe directories under %s ...", self.keyframes_root)
         index: dict[str, Path] = {}
-        for path in self.keyframes_root.rglob("*"):
-            if path.is_dir() and path.name.startswith("L") and "_" in path.name:
-                index[path.name] = path
+        for root, dirs, _ in os.walk(self.keyframes_root):
+            for d in list(dirs):
+                if d.startswith("L") and "_" in d:
+                    index[d] = Path(root) / d
+                    dirs.remove(d)  # Do NOT recurse into video directory (skip 177K jpgs)
         logger.info("Indexed %d keyframe video directories.", len(index))
         self._keyframe_index = index
         return index
@@ -89,11 +91,13 @@ class PathResolver:
     def _build_objects_index(self) -> dict[str, Path]:
         if self._objects_index is not None:
             return self._objects_index
-        logger.info("Indexing object directories under %s ...", self.objects_root)
+        logger.info("Fast-indexing object directories under %s ...", self.objects_root)
         index: dict[str, Path] = {}
-        for path in self.objects_root.rglob("*"):
-            if path.is_dir() and path.name.startswith("L") and "_" in path.name:
-                index[path.name] = path
+        for root, dirs, _ in os.walk(self.objects_root):
+            for d in list(dirs):
+                if d.startswith("L") and "_" in d:
+                    index[d] = Path(root) / d
+                    dirs.remove(d)  # Do NOT recurse into object directory (skip jsons)
         logger.info("Indexed %d object directories.", len(index))
         self._objects_index = index
         return index
@@ -101,13 +105,15 @@ class PathResolver:
     def _build_map_csv_index(self) -> dict[str, Path]:
         if self._map_csv_index is not None:
             return self._map_csv_index
-        logger.info("Indexing map-keyframes CSVs under %s ...", self.map_keyframes_root)
+        logger.info("Fast-indexing map-keyframes CSVs under %s ...", self.map_keyframes_root)
         index: dict[str, Path] = {}
         for root_to_scan in (self.map_keyframes_root, REPO_ROOT / "data" / "map-keyframes"):
             if root_to_scan.exists():
-                for path in root_to_scan.rglob("*.csv"):
-                    if path.is_file() and path.stem.startswith("L"):
-                        index[path.stem] = path
+                for root, _, files in os.walk(root_to_scan):
+                    for f in files:
+                        if f.endswith(".csv") and f.startswith("L"):
+                            p = Path(root) / f
+                            index[p.stem] = p
         logger.info("Indexed %d map CSV files.", len(index))
         self._map_csv_index = index
         return index
