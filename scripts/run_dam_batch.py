@@ -173,19 +173,101 @@ class PathResolver:
         raise FileNotFoundError(f"Map CSV for {video_id} not found under {self.map_keyframes_root}")
 
 
-def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 3) -> bool:
-    """Sync a single file to rclone remote with exponential backoff retries."""
-    cmd = ["rclone", "copy", str(local_path), rclone_dest]
+def find_rclone_config() -> str | None:
+    """Find the first available rclone configuration file."""
+    candidates = [
+        os.environ.get("RCLONE_CONFIG"),
+        str(Path.home() / ".config" / "rclone" / "rclone.conf"),
+        str(Path.home() / ".rclone.conf"),
+        "/root/.config/rclone/rclone.conf",
+        "/root/.rclone.conf",
+        "/kaggle/working/.rclone.conf",
+        "/tmp/rclone.conf",
+    ]
+    for c in candidates:
+        if c and Path(c).is_file():
+            return c
+    return None
+
+
+def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -> bool:
+    """Sync a single file to rclone remote with exponential backoff retries and explicit config."""
+    if not local_path.is_file():
+        logger.error("  [RCLONE] Source file does not exist: %s", local_path)
+        return False
+
+    dest_url = rclone_dest if rclone_dest.endswith("/") else rclone_dest + "/"
+    config_path = find_rclone_config()
+
+    base_cmd = ["rclone", "copyto", str(local_path), dest_url + local_path.name]
+    if config_path:
+        base_cmd.extend(["--config", config_path])
+    base_cmd.extend([
+        "--retries", "5",
+        "--retries-sleep", "3s",
+        "--low-level-retries", "10",
+        "--timeout", "5m",
+        "--contimeout", "60s",
+        "--drive-chunk-size", "64M",
+        "--tpslimit", "5",
+    ])
+
+    backoff_delays = [5, 10, 20, 30, 60]
     for attempt in range(1, max_retries + 1):
         try:
-            subprocess.run(cmd, capture_output=True, check=True, text=True)
-            logger.info("  [RCLONE] Synced %s -> %s", local_path.name, rclone_dest)
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            logger.warning("  [RCLONE] Attempt %d/%d failed for %s: %s", attempt, max_retries, local_path.name, exc)
-            if attempt < max_retries:
-                time.sleep(2 ** attempt)
+            res = subprocess.run(
+                base_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if res.returncode == 0:
+                logger.info("  [RCLONE] Synced %s -> %s", local_path.name, dest_url)
+                return True
+            else:
+                err_out = (res.stderr or res.stdout or "").strip()
+                logger.warning(
+                    "  [RCLONE] Attempt %d/%d failed for %s (exit code %d): %s",
+                    attempt,
+                    max_retries,
+                    local_path.name,
+                    res.returncode,
+                    err_out[:300] if err_out else "No output",
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("  [RCLONE] Attempt %d/%d timed out (300s) for %s", attempt, max_retries, local_path.name)
+        except Exception as exc:
+            logger.warning("  [RCLONE] Attempt %d/%d exception for %s: %s", attempt, max_retries, local_path.name, exc)
+
+        if attempt < max_retries:
+            delay = backoff_delays[min(attempt - 1, len(backoff_delays) - 1)]
+            logger.info("  [RCLONE] Retrying upload in %ds...", delay)
+            time.sleep(delay)
+
     return False
+
+
+def rclone_sync_dir(local_dir: Path, rclone_dest: str) -> bool:
+    """Bulk sync an entire local directory to rclone remote."""
+    if not local_dir.is_dir():
+        return False
+    config_path = find_rclone_config()
+    cmd = ["rclone", "copy", str(local_dir), rclone_dest]
+    if config_path:
+        cmd.extend(["--config", config_path])
+    cmd.extend([
+        "--retries", "5",
+        "--retries-sleep", "3s",
+        "--low-level-retries", "10",
+        "--timeout", "5m",
+        "--contimeout", "60s",
+        "--tpslimit", "5",
+    ])
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        return res.returncode == 0
+    except Exception:
+        return False
 
 
 def is_video_completed(description_artifact: Path, description_manifest: Path) -> bool:
@@ -419,8 +501,11 @@ def main(argv: list[str] | None = None) -> int:
 
         # Sync to Google Drive
         if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
-            rclone_sync_file(description_artifact, args.rclone_dest)
-            rclone_sync_file(description_manifest, args.rclone_dest)
+            ok1 = rclone_sync_file(description_artifact, args.rclone_dest)
+            ok2 = rclone_sync_file(description_manifest, args.rclone_dest)
+            if not (ok1 and ok2):
+                logger.warning("  [RCLONE] Direct single-file upload failed; executing directory sync fallback...")
+                rclone_sync_dir(description_artifact.parent, args.rclone_dest)
 
         elapsed_vid = time.time() - video_start_time
         completed_in_run += 1
