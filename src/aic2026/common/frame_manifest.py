@@ -49,15 +49,22 @@ def read_frame_map(path: Path) -> list[FrameMapRow]:
 
     if not rows:
         raise ValueError(f"Frame map is empty: {path}")
-    for name, values in (
-        ("n", [row.keyframe_n for row in rows]),
-        ("frame_idx", [row.frame_idx for row in rows]),
-        ("pts_time", [row.pts_time_s for row in rows]),
-    ):
-        if len(values) != len(set(values)):
-            raise ValueError(f"Duplicate {name} in {path}")
-        if any(current <= previous for previous, current in zip(values, values[1:], strict=False)):
-            raise ValueError(f"{name} must be strictly increasing in {path}")
+
+    # Keyframe 'n' is the canonical primary key and must be strictly increasing and unique.
+    n_values = [row.keyframe_n for row in rows]
+    if len(n_values) != len(set(n_values)):
+        raise ValueError(f"Duplicate n in {path}")
+    if any(current <= previous for previous, current in zip(n_values, n_values[1:], strict=False)):
+        raise ValueError(f"n must be strictly increasing in {path}")
+
+    # Timestamps and frame indices must be monotonically non-decreasing.
+    pts_values = [row.pts_time_s for row in rows]
+    if any(current < previous for previous, current in zip(pts_values, pts_values[1:], strict=False)):
+        raise ValueError(f"pts_time must be non-decreasing in {path}")
+
+    frame_idx_values = [row.frame_idx for row in rows]
+    if any(current < previous for previous, current in zip(frame_idx_values, frame_idx_values[1:], strict=False)):
+        raise ValueError(f"frame_idx must be non-decreasing in {path}")
     return rows
 
 
