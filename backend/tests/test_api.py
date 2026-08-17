@@ -9,16 +9,29 @@ from aic_backend.api.deps import (
     get_search_service,
     get_trake_service,
 )
-from aic_backend.application.search_service import SearchService
-from aic_backend.application.trake_service import TrakeService
-from aic_backend.domain.models import FrameCandidate
+from aic_backend.retrieval.models import FrameCandidate
+from aic_backend.retrieval.search import SearchService
+from aic_backend.retrieval.trake import TrakeService
 
 
 class Repo:
     def ready(self):
         return True
 
-    def search_scene(self, query, *, limit, video_id=None):
+    def status(self):
+        return {
+            "qdrant_ready": True,
+            "collections": {
+                "frames_sparse": True,
+                "frames_dense": False,
+                "regions": False,
+                "ocr": False,
+                "asr": False,
+            },
+            "models": {"siglip2_text": True, "e5_text": False},
+        }
+
+    def search_scene(self, query, *, limit, video_id=None, dense=False):
         return [
             FrameCandidate(
                 video_id="L21_V011", frame_idx=24925, pts_time_s=997.0, keyframe_n=262, score=0.9

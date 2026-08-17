@@ -69,17 +69,14 @@ def test_corrupt_frame_fails_manifest_build(tmp_path: Path) -> None:
         )
 
 
-def test_drop_keeps_one_keyframe_per_frame_idx(tmp_path: Path) -> None:
+def test_default_keeps_second_keyframe_per_duplicate_frame_idx(tmp_path: Path) -> None:
     """Organizer maps sometimes floor pts_time*fps, colliding row 2 into row 1."""
     csv_path = tmp_path / "L21_V006.csv"
     csv_path.write_text(
         "n,pts_time,fps,frame_idx\n1,0.0,30.0,0\n2,0.0333333,30.0,0\n3,3.03333,30.0,90\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="Duplicate frame_idx"):
-        read_frame_map(csv_path)
-
-    rows = read_frame_map(csv_path, drop_duplicate_frame_idx=True)
+    rows = read_frame_map(csv_path)
     assert [row.frame_idx for row in rows] == [0, 90]
     # Every surviving frame_idx is exactly what the organizer shipped.
     assert [row.keyframe_n for row in rows] == [2, 3]
@@ -118,14 +115,14 @@ def test_drop_still_rejects_an_unexplained_regression(tmp_path: Path) -> None:
         read_frame_map(csv_path, drop_duplicate_frame_idx=True)
 
 
-def test_drop_is_off_by_default_for_other_stages(tmp_path: Path) -> None:
+def test_strict_duplicate_policy_is_available_for_audits(tmp_path: Path) -> None:
     csv_path = tmp_path / "L21_V006.csv"
     csv_path.write_text(
         "n,pts_time,fps,frame_idx\n1,0.0,30.0,0\n2,0.0333333,30.0,0\n3,3.03333,30.0,90\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="Duplicate frame_idx"):
-        read_frame_map(csv_path)
+        read_frame_map(csv_path, drop_duplicate_frame_idx=False)
 
 
 def test_discarded_keyframe_image_is_not_reported_as_surplus(tmp_path: Path) -> None:

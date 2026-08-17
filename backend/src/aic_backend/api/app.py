@@ -9,11 +9,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from ..application.query_parser import QueryParsingService
-from ..application.search_service import SearchService
-from ..application.trake_service import TrakeService
-from ..domain.models import SearchHit
-from ..infrastructure.openai.gpt4o import CapabilityUnavailable, GPT4oAdapter
+from ..llm.gpt4o import CapabilityUnavailable, GPT4oAdapter
+from ..llm.query_parser import QueryParsingService
+from ..retrieval.models import SearchHit
+from ..retrieval.search import SearchService
+from ..retrieval.trake import TrakeService
 from .deps import (
     get_gpt,
     get_parser,
@@ -80,10 +80,35 @@ def create_app() -> FastAPI:
     def capabilities(
         repository=Depends(get_repository), gpt: GPT4oAdapter = Depends(get_gpt)
     ) -> CapabilitiesResponse:
+        status = repository.status()
+        collections = status["collections"]
+        models = status["models"]
+        qdrant_ready = bool(status["qdrant_ready"])
+        openai_ready = gpt.client is not None
+        kis_missing = []
+        if not qdrant_ready:
+            kis_missing.append("qdrant")
+        if not collections["frames_sparse"]:
+            kis_missing.append("frames_sparse_current")
+        if not models["siglip2_text"]:
+            kis_missing.append("siglip2_text")
+        kis_ready = not kis_missing
+        qa_missing = [*kis_missing] + ([] if openai_ready else ["gpt4o"])
+        trake_missing = [*qa_missing]
+        if not collections["frames_dense"]:
+            trake_missing.append("frames_dense_current")
         return CapabilitiesResponse(
-            qdrant_ready=repository.ready(),
-            openai_configured=gpt.client is not None,
+            qdrant_ready=qdrant_ready,
+            openai_configured=openai_ready,
             image_answers_enabled=settings.enable_image_answers,
+            search_ready=kis_ready,
+            collections=collections,
+            models=models,
+            tasks={
+                "kis": {"ready": kis_ready, "missing": kis_missing},
+                "qa": {"ready": not qa_missing, "missing": qa_missing},
+                "trake": {"ready": not trake_missing, "missing": trake_missing},
+            },
         )
 
     @app.post("/api/v1/search", response_model=SearchResponse)

@@ -52,5 +52,6 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm audit --audit-level=high
           npm run build
           npm test

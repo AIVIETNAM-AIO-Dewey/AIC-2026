@@ -7,9 +7,29 @@ import pytest
 from pydantic import ValidationError
 
 from aic2026.asr.normalizer import normalize_transcript
-from aic2026.asr.pipeline import _deduplicate_segments
+from aic2026.asr.pipeline import _deduplicate_segments, _generate_windows, _load_keyframes
 from aic2026.asr.validation import validate_jsonl
 from aic2026.contracts.asr import AsrKeyframeRef, AsrSegmentRecord, AsrVideoManifest
+
+
+def test_asr_csv_loader_applies_canonical_duplicate_policy(tmp_path: Path) -> None:
+    mapping = tmp_path / "L21_V006.csv"
+    mapping.write_text(
+        "n,pts_time,fps,frame_idx\n1,0,30,0\n2,0.033,30,0\n3,1,30,30\n",
+        encoding="utf-8",
+    )
+    rows = _load_keyframes(mapping)
+    assert [(row["n"], row["frame_idx"]) for row in rows] == [(2, 0), (3, 30)]
+
+
+def test_asr_windows_use_locked_30_second_window_and_15_second_stride() -> None:
+    assert _generate_windows(61.0, 30.0, 15.0) == [
+        (0.0, 30.0),
+        (15.0, 45.0),
+        (30.0, 60.0),
+        (45.0, 61.0),
+        (60.0, 61.0),
+    ]
 
 
 def test_asr_keyframe_ref_validation() -> None:

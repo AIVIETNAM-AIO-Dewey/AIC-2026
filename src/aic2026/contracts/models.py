@@ -31,7 +31,8 @@ class StrictModel(BaseModel):
 class FrameRef(StrictModel):
     video_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
     frame_uid: str = Field(min_length=3)
-    keyframe_n: PositiveInt
+    # Dense TRAKE frames are decoded from video and have no organizer keyframe ordinal.
+    keyframe_n: PositiveInt | None = None
     frame_idx: int = Field(ge=0)
     pts_time_s: float = Field(ge=0)
     fps: PositiveFloat
@@ -161,6 +162,8 @@ class ObjectFrameRecord(FrameRef):
 
     @model_validator(mode="after")
     def validate_region_identity(self) -> ObjectFrameRecord:
+        if self.keyframe_n is None:
+            raise ValueError("object regions require an organizer keyframe_n")
         ids = [region.region_id for region in self.regions]
         if len(ids) != len(set(ids)):
             raise ValueError("region_id values must be unique within a frame")

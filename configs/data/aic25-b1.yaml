@@ -1,0 +1,28 @@
+schema_version: "aic26.source_archives.v1"
+archives:
+  clip-features-32-aic25-b1.zip:
+    role: clip_legacy
+    sha256: 05404569fcd233bff77103bdb805d3591a64b0b538399796e0dd211fbafc8ed3
+    ignored_by_policy: true
+  Keyframes_L21.zip:
+    role: keyframes
+    sha256: 30412ab4c3c5f3bbd7cef0feb59e7670a6683d2d8d4a90b196cea9688d554221
+  map-keyframes-aic25-b1.zip:
+    role: mappings
+    sha256: 982e176fdfa5b324cb3841cb76636ea0379d50575c94028533dc3d595cfe90d5
+  media-info-aic25-b1.zip:
+    role: media_info
+    sha256: d34d8ac01dc5b771cbd9d692d560a863f133b8411091804047a7a01dc54080cb
+  objects-aic25-b1.zip:
+    role: objects
+    sha256: 982683c5421fa06a087dba25c019d69390ac83cb95e05532bfa2ad29fa290cec
+  Videos_L21_a.zip:
+    role: videos
+    sha256: 2122c41762815a3cacb38d348480b7be5c0e26faa5541321e6524aebee3c52de
+subsets:
+  L21:
+    videos: 29
+    keyframes_raw: 7800
+    keyframes_canonical: 7790
+    objects: 7800
+    duplicate_frame_idx_rows: 10

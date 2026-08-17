@@ -13,7 +13,7 @@ protobuf==5.29.3
 pydantic==2.10.6
 # Vector index for scene embeddings. Client only; the Qdrant server is a separate
 # native binary or container, never a Python dependency.
-qdrant-client==1.19.0
+qdrant-client==1.18.0
 pyyaml==6.0.2
 safetensors==0.5.2
 sentencepiece==0.2.0

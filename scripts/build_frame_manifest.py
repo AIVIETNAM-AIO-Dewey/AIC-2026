@@ -18,6 +18,7 @@ from aic2026.common import (  # noqa: E402
     create_manifest,
     fail_manifest,
     prepare_resume,
+    require_prepared_video,
     write_jsonl_atomic,
     write_manifest,
 )
@@ -33,12 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frames-dir", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--drop-duplicate-frame-idx",
+        "--strict-duplicate-frame-idx",
         action="store_true",
         help=(
-            "When several keyframes share one frame_idx, index only the middle one and "
-            "discard the rest. No frame_idx is ever rewritten, so every indexed frame "
-            "keeps the value the organizer shipped. The run manifest records the count."
+            "Fail instead of applying the canonical policy that keeps the second "
+            "keyframe in each duplicate frame_idx pair."
         ),
     )
     return parser
@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     video_id = args.video_id or config.get("video_id")
     if not video_id:
         raise SystemExit("--video-id is required")
+    require_prepared_video(roots["data_root"], video_id)
     map_csv = _configured_path(args.map_csv, config, "map_csv", roots["data_root"])
     frames_dir = _configured_path(args.frames_dir, config, "frames_dir", roots["data_root"])
     if map_csv is None or frames_dir is None:
@@ -77,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": config.get("schema_version", "1.0"),
         "video_id": video_id,
         "limit": args.limit,
-        "drop_duplicate_frame_idx": args.drop_duplicate_frame_idx,
+        "drop_duplicate_frame_idx": not args.strict_duplicate_frame_idx,
     }
     run_id = str(config.get("run", {}).get("run_id", "object-description-v1"))
     manifest = create_manifest(
@@ -110,12 +111,12 @@ def main(argv: list[str] | None = None) -> int:
             frames_dir=frames_dir,
             data_root=roots["data_root"],
             limit=args.limit,
-            drop_duplicate_frame_idx=args.drop_duplicate_frame_idx,
+            drop_duplicate_frame_idx=not args.strict_duplicate_frame_idx,
         )
         discarded_keyframes = sum(
             len(row.discarded_keyframe_ns)
             for row in read_frame_map(
-                map_csv, drop_duplicate_frame_idx=args.drop_duplicate_frame_idx
+                map_csv, drop_duplicate_frame_idx=not args.strict_duplicate_frame_idx
             )
         )
         recovered_final = output.exists()

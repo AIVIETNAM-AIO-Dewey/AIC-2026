@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from ..application.query_parser import QueryParsingService
-from ..application.search_service import SearchService
-from ..application.trake_service import TrakeService
-from ..infrastructure.openai.gpt4o import GPT4oAdapter
-from ..infrastructure.qdrant.repository import QdrantRepository
+from ..llm.gpt4o import GPT4oAdapter
+from ..llm.query_parser import QueryParsingService
+from ..retrieval.qdrant import QdrantRepository
+from ..retrieval.search import SearchService
+from ..retrieval.trake import TrakeService
 from ..settings import Settings
 
 
@@ -25,13 +25,12 @@ def get_repository() -> QdrantRepository:
     except ImportError as error:  # pragma: no cover
         raise RuntimeError("backend dependencies are not installed") from error
     client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=5)
-    from ..infrastructure.encoders.e5 import E5OnnxEncoder
+    encoder = None
+    e5_snapshot = settings.artifact_root / "models" / "multilingual-e5-base"
+    if e5_snapshot.is_dir():
+        from ..retrieval.e5 import E5OnnxEncoder
 
-    # The cache/model folder is explicitly mounted; API never downloads model weights.
-    encoder = E5OnnxEncoder.from_pretrained(
-        model_path=settings.artifact_root / "models" / "multilingual-e5-base",
-        device=settings.device,
-    )
+        encoder = E5OnnxEncoder.from_pretrained(model_path=e5_snapshot, device=settings.device)
     scene_encoder = None
     siglip_snapshot = settings.artifact_root / "models" / "siglip2"
     if siglip_snapshot.is_dir():

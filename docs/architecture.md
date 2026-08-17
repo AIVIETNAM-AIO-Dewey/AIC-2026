@@ -99,3 +99,20 @@ là binary theo tổ hợp video-frame (và answer cho Q&A). TRAKE chỉ nhận 
   snapshot/revision cần attach.
 - Stage publish output atomically; `--resume` chỉ skip record đã complete và đúng
   config hash.
+
+## Data contracts
+
+Nguồn chuẩn là Pydantic models trong `src/aic2026/contracts`; JSONL dùng UTF-8,
+field thừa bị từ chối. `frame_uid` luôn là `<video_id>:<frame_idx>`. Keyframe
+artifact có `keyframe_n`; dense TRAKE frame để field này `null` và giữ decoded
+`frame_idx` 0-based cùng PTS thật.
+
+- `aic26.object_regions.v1`: một record/frame, region có bbox, SAM RLE và DAM caption.
+- `aic26.scene_embeddings.v1`: JSONL metadata có `row` + NPY companion L2-normalized.
+- `aic26.ocr.v1`: raw/normalized Vietnamese, confidence và polygon theo keyframe.
+- `aic26.asr_segments.v1`: segment timestamped tham chiếu danh sách keyframe.
+- `aic26.query.v1`: decomposition versioned cho KIS/Q&A/TRAKE.
+- `aic26.run_manifest.v1`: config, input/output hash, model revision, seed và counters.
+
+Ingest explode DAM theo region, OCR theo span và ASR theo segment-keyframe. Mọi Qdrant
+payload bắt buộc có canonical `video_id`, `frame_idx`, `pts_time_s`, `run_id`.

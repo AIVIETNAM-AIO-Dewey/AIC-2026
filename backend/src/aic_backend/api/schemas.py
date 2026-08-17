@@ -69,3 +69,7 @@ class CapabilitiesResponse(BaseModel):
     qdrant_ready: bool
     openai_configured: bool
     image_answers_enabled: bool
+    search_ready: bool
+    tasks: dict[str, dict[str, object]]
+    collections: dict[str, bool]
+    models: dict[str, bool]

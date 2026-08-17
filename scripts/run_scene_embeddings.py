@@ -28,6 +28,7 @@ from aic2026.common import (  # noqa: E402
     fail_manifest,
     iter_jsonl,
     prepare_resume,
+    require_prepared_video,
     validate_upstream_manifest,
     write_manifest,
 )
@@ -58,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     video_id = args.video_id or config.get("video_id")
     if not video_id:
         raise SystemExit("--video-id is required")
+    require_prepared_video(roots["data_root"], video_id)
     device = resolve_device(args.device, config)
     if device == "cpu":
         print(

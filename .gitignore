@@ -12,6 +12,7 @@ dist/
 .venv/
 venv/
 frontend/node_modules/
+frontend/.npm-cache/
 frontend/tsconfig.tsbuildinfo
 
 # Notebook/editor state
@@ -30,13 +31,10 @@ Thumbs.db
 *service-account*.json
 *credentials*.json
 
-# Competition data: keep only the policy files
+# Competition data and generated artifacts
 data/**
-!data/README.md
 artifacts/**
-!artifacts/README.md
 runs/**
-!runs/README.md
 
 # Model and framework caches
 .cache/

@@ -16,7 +16,7 @@ class SceneEmbeddingRecord(FrameRef):
 
     Line order mirrors the upstream frame manifest and `row` must equal the line
     number, so the index and the matrix stay joinable by position alone. See
-    `docs/data-contracts.md` for the full two-file contract.
+    `docs/architecture.md` for the full two-file contract.
     """
 
     schema_version: Literal["aic26.scene_embeddings.v1"] = SCENE_EMBEDDING_SCHEMA

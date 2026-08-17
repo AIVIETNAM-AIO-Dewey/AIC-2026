@@ -6,12 +6,14 @@ Processes one video at a time for resumability on Kaggle.
 
 from __future__ import annotations
 
-import csv
 import logging
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from aic2026.common import iter_jsonl
+from aic2026.common.frame_manifest import read_frame_map
+from aic2026.contracts import FrameRef
 from aic2026.contracts.asr import AsrKeyframeRef, AsrSegmentRecord, AsrVideoManifest
 
 from .audio import AudioExtractionError, extract_audio_pcm, get_audio_duration_s
@@ -164,23 +166,30 @@ def _deduplicate_segments(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_keyframes(csv_path: str | Path) -> list[dict[str, float | int]]:
-    """Load a map-keyframes CSV without a heavyweight dataframe dependency."""
-    with Path(csv_path).open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = {name.strip() for name in reader.fieldnames or []}
-        required = {"n", "pts_time", "fps", "frame_idx"}
-        missing = required - fieldnames
-        if missing:
-            raise ValueError(f"Keyframe CSV missing columns: {missing}")
+def _load_keyframes(path: str | Path) -> list[dict[str, float | int]]:
+    """Load the shared canonical frame manifest or canonicalize an organizer CSV."""
+    path = Path(path)
+    if path.suffix.lower() == ".jsonl":
+        refs = [FrameRef.model_validate(raw) for raw in iter_jsonl(path)]
         rows = [
             {
-                "n": int(row["n"]),
-                "pts_time": float(row["pts_time"]),
-                "fps": float(row["fps"]),
-                "frame_idx": int(row["frame_idx"]),
+                "n": int(ref.keyframe_n),
+                "pts_time": ref.pts_time_s,
+                "fps": float(ref.fps),
+                "frame_idx": ref.frame_idx,
             }
-            for row in reader
+            for ref in refs
+            if ref.keyframe_n is not None
+        ]
+    else:
+        rows = [
+            {
+                "n": row.keyframe_n,
+                "pts_time": row.pts_time_s,
+                "fps": row.fps,
+                "frame_idx": row.frame_idx,
+            }
+            for row in read_frame_map(path)
         ]
     return sorted(rows, key=lambda row: float(row["pts_time"]))
 
@@ -251,8 +260,8 @@ def process_video(
     keyframe_csv_path: str | Path,
     output_dir: str | Path,
     backend: AsrBackend,
-    window_size_s: float = 15.0,
-    stride_s: float = 7.5,
+    window_size_s: float = 30.0,
+    stride_s: float = 15.0,
     sample_rate: int = 16_000,
     language: str = "vi",
     initial_prompt: str | None = None,

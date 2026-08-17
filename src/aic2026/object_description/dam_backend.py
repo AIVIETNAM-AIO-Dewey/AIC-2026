@@ -64,7 +64,7 @@ class DamCaptioner:
             from dam import DescribeAnythingModel, disable_torch_init
         except ImportError as error:
             raise RuntimeError(
-                "Pinned NVlabs/describe-anything is not installed. Follow docs/cloud-runbook.md."
+                "Pinned NVlabs/describe-anything is not installed. Follow docs/runbook.md."
             ) from error
         # DAM accepts a Hugging Face model id but has no explicit revision argument.
         # Resolve the pinned snapshot first and pass its immutable local path.

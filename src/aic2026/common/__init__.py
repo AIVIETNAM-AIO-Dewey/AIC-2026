@@ -1,5 +1,6 @@
 """Common deterministic I/O and frame-manifest helpers."""
 
+from .data_prep import require_prepared_video
 from .frame_manifest import build_frame_refs, read_frame_map
 from .io import atomic_write_json, iter_jsonl, sha256_file, sha256_path, write_jsonl_atomic
 from .manifest import (
@@ -19,6 +20,7 @@ __all__ = [
     "fail_manifest",
     "iter_jsonl",
     "prepare_resume",
+    "require_prepared_video",
     "read_frame_map",
     "sha256_file",
     "sha256_path",

@@ -219,7 +219,14 @@ def prepare_masks(
     expected_records = [(frame.frame_uid, run_id) for frame in frame_refs]
     writer.validate_prefix(expected_records, caption_mode="pending")
     object_files = index_object_files(objects_dir)
-    counters = {"frames": 0, "regions": 0, "bbox_fallbacks": 0, "skipped": 0}
+    counters = {
+        "frames": 0,
+        "regions": 0,
+        "bbox_fallbacks": 0,
+        "frames_without_regions": 0,
+        "frames_at_region_cap": 0,
+        "skipped": 0,
+    }
     for frame in frame_refs:
         if frame.frame_uid in writer.seen:
             counters["skipped"] += 1
@@ -228,6 +235,8 @@ def prepare_masks(
         if object_path is None:
             raise ValueError(f"Missing Objects JSON for keyframe n={frame.keyframe_n}")
         detections = filter_detections(load_organizer_detections(object_path), filter_config)
+        counters["frames_without_regions"] += int(not detections)
+        counters["frames_at_region_cap"] += int(len(detections) == filter_config.maximum_regions)
         image_path = (data_root / frame.frame_relpath).resolve()
         try:
             image_path.relative_to(data_root.resolve())
@@ -276,11 +285,13 @@ def prepare_masks(
             progress(record)
     writer.validate_prefix(expected_records, caption_mode="pending", require_complete=True)
     writer.finalize()
-    totals = _summarize_object_artifact(output)
+    totals = _summarize_object_artifact(output, region_cap=filter_config.maximum_regions)
     return {
         "frames": totals["frames"],
         "regions": totals["regions"],
         "bbox_fallbacks": totals["bbox_fallbacks"],
+        "frames_without_regions": totals["frames_without_regions"],
+        "frames_at_region_cap": totals["frames_at_region_cap"],
         "skipped": counters["skipped"],
     }
 
@@ -289,11 +300,13 @@ def _is_cuda_oom(error: BaseException) -> bool:
     return error.__class__.__name__ == "OutOfMemoryError" and "torch" in error.__class__.__module__
 
 
-def _summarize_object_artifact(path: Path) -> dict[str, int]:
+def _summarize_object_artifact(path: Path, *, region_cap: int = 20) -> dict[str, int]:
     counters = {
         "frames": 0,
         "regions": 0,
         "bbox_fallbacks": 0,
+        "frames_without_regions": 0,
+        "frames_at_region_cap": 0,
         "captions_ok": 0,
         "captions_error": 0,
         "captions_oom": 0,
@@ -302,6 +315,8 @@ def _summarize_object_artifact(path: Path) -> dict[str, int]:
         record = ObjectFrameRecord.model_validate(raw)
         counters["frames"] += 1
         counters["regions"] += len(record.regions)
+        counters["frames_without_regions"] += int(not record.regions)
+        counters["frames_at_region_cap"] += int(len(record.regions) == region_cap)
         for region in record.regions:
             counters["bbox_fallbacks"] += int(region.segmentation.mask_source == "bbox_fallback")
             if region.caption.status != "pending":

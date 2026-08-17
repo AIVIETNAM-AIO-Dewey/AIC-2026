@@ -5,3 +5,7 @@ seed: 2026
 device: auto
 sampling_fps: 5.0
 thumbnail_jpeg_quality: 90
+batch_size: 32
+compute_dtype: float32
+siglip_model_id: google/siglip2-base-patch16-224
+siglip_revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2

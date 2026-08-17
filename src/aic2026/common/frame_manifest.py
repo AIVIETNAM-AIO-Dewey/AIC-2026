@@ -54,7 +54,7 @@ def _drop_duplicate_frame_idx(rows: list[FrameMapRow]) -> list[FrameMapRow]:
     return kept
 
 
-def read_frame_map(path: Path, *, drop_duplicate_frame_idx: bool = False) -> list[FrameMapRow]:
+def read_frame_map(path: Path, *, drop_duplicate_frame_idx: bool = True) -> list[FrameMapRow]:
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         required = {"n", "pts_time", "fps", "frame_idx"}
@@ -117,7 +117,7 @@ def build_frame_refs(
     frames_dir: Path,
     data_root: Path,
     limit: int | None = None,
-    drop_duplicate_frame_idx: bool = False,
+    drop_duplicate_frame_idx: bool = True,
 ) -> list[FrameRef]:
     rows = read_frame_map(map_csv, drop_duplicate_frame_idx=drop_duplicate_frame_idx)
     indexed = _index_frames(frames_dir)

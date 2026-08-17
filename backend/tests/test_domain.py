@@ -1,7 +1,7 @@
-from aic_backend.domain.assignment import assign_objects
-from aic_backend.domain.fusion import normalized_weights, temporal_nms, weighted_rrf
-from aic_backend.domain.models import FrameCandidate
-from aic_backend.domain.temporal import ordered_event_sequences
+from aic_backend.retrieval.assignment import assign_objects
+from aic_backend.retrieval.fusion import normalized_weights, temporal_nms, weighted_rrf
+from aic_backend.retrieval.models import FrameCandidate
+from aic_backend.retrieval.temporal import ordered_event_sequences
 
 
 def row(

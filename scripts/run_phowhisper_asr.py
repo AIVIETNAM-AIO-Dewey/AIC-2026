@@ -17,6 +17,7 @@ from _common import add_common_arguments, read_config, resolve_device  # noqa: E
 
 from aic2026.asr.backend import create_asr_backend  # noqa: E402
 from aic2026.asr.pipeline import process_video  # noqa: E402
+from aic2026.common import require_prepared_video  # noqa: E402
 
 
 class FlushStreamHandler(logging.StreamHandler):
@@ -51,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--map-csv-dir",
         type=Path,
         help="Directory containing map-keyframes/*.csv files.",
+    )
+    parser.add_argument(
+        "--frame-manifest-dir",
+        type=Path,
+        help="Canonical frame_manifests directory; preferred over organizer CSV.",
     )
     parser.add_argument(
         "--engine",
@@ -113,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     data_root = args.data_root or Path(os.environ.get("AIC_DATA_ROOT", REPO_ROOT))
     video_dir = args.video_dir or (data_root / "videos")
     map_csv_dir = args.map_csv_dir or (data_root / "map-keyframes")
+    frame_manifest_dir = args.frame_manifest_dir or (output_root / "frame_manifests")
 
     logger.info("Initializing ASR backend engine=%s model=%s device=%s", engine, model_id, device)
     backend = create_asr_backend(
@@ -150,9 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     skipped_count = 0
 
     for video_id, video_path in video_list:
-        csv_path = map_csv_dir / f"{video_id}.csv"
-        if not csv_path.exists():
-            logger.warning("Missing map-keyframes CSV for %s at %s. Skipping.", video_id, csv_path)
+        require_prepared_video(data_root, video_id)
+        frame_source = frame_manifest_dir / f"{video_id}.jsonl"
+        if not frame_source.exists():
+            frame_source = map_csv_dir / f"{video_id}.csv"
+        if not frame_source.exists():
+            logger.warning("Missing canonical frame map for %s. Skipping.", video_id)
             continue
 
         manifest_path = output_dir / f"{video_id}.manifest.json"
@@ -167,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         process_video(
             video_id=video_id,
             video_path=video_path,
-            keyframe_csv_path=csv_path,
+            keyframe_csv_path=frame_source,
             output_dir=output_dir,
             backend=backend,
             window_size_s=window_size_s,
