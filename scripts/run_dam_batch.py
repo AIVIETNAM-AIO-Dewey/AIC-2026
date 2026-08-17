@@ -263,8 +263,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("🔍 DRY-RUN: Verifying paths for all %d assigned videos...", len(assigned_videos))
         missing_count = 0
         from aic2026.object_description import load_organizer_detections, filter_detections, FilterConfig
-        from aic2026.common.cli import read_config
-        cfg_dict = read_config(args.config) if args.config else {}
+        import yaml
+        cfg_dict: dict[str, Any] = {}
+        if args.config and args.config.exists():
+            try:
+                with open(args.config, "r", encoding="utf-8") as cf:
+                    cfg_dict = yaml.safe_load(cf) or {}
+            except Exception:
+                pass
         sample_config = FilterConfig(
             minimum_score=float(cfg_dict.get("score_threshold", 0.30)),
             minimum_area_ratio=float(cfg_dict.get("min_area_ratio", 0.005)),
