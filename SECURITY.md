@@ -2,9 +2,9 @@
 
 ## Dữ liệu và secret
 
-- Repo mặc định phải để **private** trong thời gian thi. Không upload hoặc chia sẻ
-  lại video, metadata hạn chế, ground truth hay tài nguyên do ban tổ chức cấp nếu
-  điều khoản không cho phép.
+- Source repository có thể public, nhưng tuyệt đối không upload hoặc chia sẻ lại
+  video, metadata hạn chế, ground truth hay tài nguyên do ban tổ chức cấp. Nếu điều
+  lệ yêu cầu private repository, maintainer phải đổi visibility trước khi chạy thật.
 - Lưu token trong Colab Secrets, Kaggle Secrets hoặc GitHub Actions Secrets. Không
   đặt token trong notebook, YAML, command history, log hay ảnh chụp màn hình.
 - Không commit `.env`, service-account JSON, signed URL, cookie hoặc model weight.
@@ -15,7 +15,7 @@
 
 ## Model và dependency
 
-- Chỉ tải model đúng ID và immutable revision trong `configs/models.yaml`.
+- Chỉ tải model đúng ID và immutable revision trong `offline/configs/models.yaml`.
 - Ưu tiên `safetensors`; không load pickle/checkpoint không rõ nguồn gốc.
 - `trust_remote_code` mặc định là `false`. Ngoại lệ phải pin revision, review source
   và được maintainer phê duyệt trước khi chạy với secret hoặc dữ liệu cuộc thi.

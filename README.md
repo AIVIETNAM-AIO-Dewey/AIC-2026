@@ -1,439 +1,186 @@
-# AIC 2026 - Video Retrieval Pipeline
+# AIC 2026 MultiRetrieval
 
-Repo dùng chung của team cho vòng Sơ tuyển AI Challenge 2026 TP.HCM. Thiết kế ưu
-tiên chạy trên **Google Colab/Kaggle**, tái lập bằng CLI, và cho phép mỗi thành viên
-phát triển một modality mà không phụ thuộc notebook của người khác.
+Hệ thống video retrieval cho HCMC AI Challenge 2026, gồm pipeline offline chạy
+trên Colab/Kaggle và ứng dụng online chạy FastAPI, Qdrant, React.
 
-Repository hiện gồm pipeline offline và retrieval full-stack:
+## Bắt đầu từ đâu?
 
-```text
-organizer Objects (bbox/class/score)
-  -> filter + deduplicate
-  -> SAM bbox-to-mask refinement
-  -> DAM localized English description
-  -> versioned ObjectFrameRecord JSONL + RunManifest
-
-keyframes (frame manifest)
-  -> SigLIP2 whole-frame embedding
-  -> versioned SceneEmbeddingRecord JSONL + [N, D] matrix + RunManifest
-```
-
-EasyOCR, PhoWhisper, dense TRAKE 5 FPS, Qdrant hybrid retrieval, FastAPI và React
-đều có runner/module riêng. Model GPU chỉ chạy offline; API image không chứa
-SAM/DAM/PhoWhisper/EasyOCR weights.
-
-### Ownership tạm thời
-
-| Component | Trách nhiệm | Review bắt buộc |
+| Bạn phụ trách | Thư mục | Việc chính |
 |---|---|---|
-| Contracts, configs, evaluation | Repo admin cho đến khi có GitHub handles | Mọi schema/model/scoring change |
-| Organizer Objects → SAM → DAM | Object-description owner | Output schema hoặc model revision |
-| SigLIP2 và retrieval/fusion | Retrieval owner | Index contract và calibration |
-| Vietnamese OCR | OCR owner | Text/polygon contract |
-| PhoWhisper ASR | ASR owner | Segment/timestamp contract |
-| Colab, Kaggle, CI | Infra owner | Dependency hoặc runner interface |
+| Offline/ML | `offline/` | Chuẩn bị dữ liệu, DAM, OCR, ASR, SigLIP2, dense frames |
+| Backend | `backend/` | Ingest Qdrant, retrieval KIS/Q&A/TRAKE, API |
+| Frontend | `frontend/` | Search UI, keyframe grid, answer/timeline, submission basket |
+| Hạ tầng | `docker/`, `.github/` | Docker images, Compose và CI |
 
-Mỗi component cần một primary và một backup trước khi bật `CODEOWNERS`. Trong lúc
-chưa có handles thật, branch protection và một non-author approval là rule áp dụng.
+Chi tiết kiến trúc nằm trong [`docs/architecture.md`](docs/architecture.md). Hướng
+dẫn vận hành cloud/online nằm trong [`docs/runbook.md`](docs/runbook.md).
 
-## 1. Mục tiêu đề thi và hệ quả thiết kế
-
-Theo tài liệu vòng Sơ tuyển:
-
-- Hệ thống xử lý **KIS**, **Q&A** và **TRAKE**; mỗi query nộp tối đa 100 answers.
-- Final score là trung bình `R@1`, `R@5`, `R@20`, `R@50`, `R@100`.
-- KIS/Q&A chỉ được tính khi đúng tổ hợp video-frame; Q&A còn phải đúng answer.
-- TRAKE chọn sai video nhận 0; khi đúng video, recall là tỷ lệ event frames khớp.
-  Ground-truth event windows thường hẹp, dưới khoảng 10 frames.
-- Video gốc là canonical source. Keyframes, Objects và CLIP features do ban tổ
-  chức cung cấp là dữ liệu hỗ trợ, không thay thế full-video refinement.
-
-Vì vậy pipeline phải giữ timestamp/frame identity chính xác, tìm video ở coarse
-stage rồi refine full FPS, và dùng temporal NMS/diversification để không lãng phí
-top-100 bằng nhiều frames kề nhau. Tối ưu chỉ `R@100` hoặc chỉ keyframes đều không
-đủ; cần precision đầu bảng lẫn coverage ở mọi cutoff.
-
-## 2. Kiến trúc tổng thể
-
-```mermaid
-flowchart LR
-  subgraph OFF["Offline indexing"]
-    V["Canonical videos"] --> F["FrameRef + sparse/dense frames"]
-    O["Organizer Objects"] --> M["Filter/NMS + SAM masks"]
-    F --> M --> D["DAM region descriptions (EN)"]
-    F --> S["SigLIP scene embeddings"]
-    F --> C["Vietnamese OCR + positions"]
-    V --> A["PhoWhisper timestamped segments"]
-    D --> I["Vector/lexical indexes"]
-    S --> I
-    C --> I
-    A --> I
-  end
-  subgraph ON["Online query"]
-    Q["Vietnamese query"] --> P["Versioned decomposition JSON"]
-    P --> R["Coarse video retrieval"]
-    I --> R --> X["Full-FPS refinement + fusion"]
-    X --> K["KIS ranked frames"]
-    X --> QA["Q&A answer stage"]
-    X --> T["TRAKE multi-video k-best DP"]
-  end
-```
-
-Chi tiết data flow, failure policy và scoring rationale nằm trong
-[`docs/architecture.md`](docs/architecture.md). Contract chính thức nằm trong
-[`docs/architecture.md`](docs/architecture.md).
-
-### Offline
-
-1. Ingest video và organizer map-keyframes để tạo stable `FrameRef` gồm
-   `video_id`, `frame_idx`, `pts_time_s`, `fps`, relative image path và kích thước.
-2. Dùng keyframes/coarse embeddings để phủ toàn corpus; chỉ giải mã hoặc embed
-   full FPS cho candidate videos/segments cần refine.
-3. Với object branch v1, đọc organizer bbox/class/score; lọc confidence/area,
-   NMS/deduplicate, dùng SAM biến bbox thành mask, rồi DAM mô tả từng region bằng
-   tiếng Anh tối đa 20 words. Giữ cả bbox, mask RLE, detector metadata và status.
-4. SigLIP2 mã hóa toàn cảnh frame. OCR lưu literal Vietnamese text cùng polygon/
-   bbox. PhoWhisper lưu segment transcript với `[start_ms, end_ms]`.
-5. ASR dùng cửa sổ 30 giây, stride 15 giây, nhưng không copy transcript vào mọi
-   frame. Online join segment với frame timestamp để tránh phình index và score lặp giả.
-6. Mỗi stage publish JSONL/index atomically và kèm `RunManifest`: resolved config,
-   Git SHA, model revisions, input hashes, seed, runtime và counters.
-
-### Online
-
-Fixed few-shot prompt chuyển raw Vietnamese query thành `aic26.query.v1`:
-
-```json
-{
-  "schema_version": "aic26.query.v1",
-  "task_type": "kis | qa | trake",
-  "raw_query_vi": "...",
-  "scene_en": "one holistic English sentence",
-  "objects_en": ["one object/person plus visual attributes per item"],
-  "ocr_vi": ["literal written Vietnamese strings only"],
-  "audio_vi": ["literal spoken Vietnamese phrases only"],
-  "audio_events_en": [],
-  "question_vi": null,
-  "question_en": null,
-  "answer_sources": [],
-  "events": null
-}
-```
-
-Quy tắc bất biến: `scene_en` là **một string** cho SigLIP; mỗi
-`objects_en[i]` là **một query riêng** đối với DAM regions; `ocr_vi`/`audio_vi`
-giữ nguyên tiếng Việt và chỉ có khi query nêu literal written/spoken content. Không
-dịch hai field này và không tự suy diễn.
-
-Prompt cố định và đủ four few-shot examples nằm tại
-[`docs/query-decomposition.md`](docs/query-decomposition.md).
-
-Điểm khởi đầu cho fusion:
+## Luồng hệ thống
 
 ```text
-S = w_scene*S_scene + w_object*S_object + w_ocr*S_ocr + w_audio*S_audio
+ZIP/video/keyframe
+      │
+      ▼
+offline/scripts/prepare_data.py
+      │
+      ├── Object JSON → SAM → DAM captions
+      ├── Keyframes → SigLIP2 embeddings
+      ├── Keyframes → EasyOCR
+      ├── Videos → PhoWhisper segments
+      └── Videos → dense 5 FPS → SigLIP2
+      │
+      ▼
+artifact JSONL + NPY + manifest/checksum
+      │
+      ▼
+backend ingest → Qdrant aliases
+      │
+      ▼
+FastAPI → React search UI → video_id/frame_idx
 ```
 
-Modality không được query đề cập có weight 0; phần còn lại renormalize. Scene dùng
-cosine SigLIP2. Mỗi `objects_en[i]` là một slot riêng; object score dùng maximum-weight
-one-to-one assignment giữa query slots và regions, nên một bbox không được thỏa nhiều
-object khác nhau. OCR/ASR dùng literal/fuzzy/BM25 tiếng Việt. Mọi score phải được
-calibrate trên validation trước khi cộng.
+Không dùng CLIP vector do ban tổ chức cung cấp vì không có model manifest. ID nộp
+bài luôn là `video_id` và canonical `frame_idx`; không fallback sang filename hoặc
+`keyframe_n`.
 
-- KIS: coarse video search -> dense frame rerank -> temporal NMS -> tối đa 100
-  `(video_id, frame_idx)`.
-- Q&A: retrieval như KIS; answer model nhận `question_en` cùng visual context,
-  DAM captions, OCR và ASR gần timestamp. `question_en` không đi vào index.
-- TRAKE: top-level query tìm **nhiều** candidate videos. Mỗi event tạo một score
-  curve dense trong từng video; k-best DP chọn `t1 < ... < tn`, rồi merge/rank các
-  sequences giữa videos. Không khóa vào đúng một video quá sớm.
+## Cấu trúc repository
 
-## 3. Chuẩn bị dữ liệu
+```text
+backend/                   online API, retrieval, ingest, LLM
+frontend/                  React/Vite client
+offline/
+  configs/                 immutable model revisions và stage defaults
+  notebooks/               thin Colab/Kaggle launchers
+  requirements/            dependency profiles theo model
+  scripts/                 CLI entrypoints
+  src/aic2026/             contracts và pipeline implementation
+  tests/                   offline unit/integration tests
+docker/                    API/web Dockerfiles và Nginx config
+docs/                      architecture, runbook, model/query notes
+compose.yaml               Qdrant + API + web + ingest profile
+```
 
-Sáu ZIP gốc được giữ nguyên dưới `data/raw/` và bị Git ignore. Không giải nén trực
-tiếp vào repo. Lệnh chuẩn kiểm SHA-256, ZIP traversal, dung lượng trống và coverage,
-sau đó publish atomically subset đủ dữ liệu:
+`data/`, `artifacts/`, model weights, embeddings và submissions đều bị Git ignore.
+
+## 1. Cài môi trường phát triển
+
+Python hỗ trợ `>=3.10,<3.13`.
 
 ```bash
-python scripts/prepare_data.py \
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -r offline/requirements/dev.txt
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm ci
+npm test
+npm run build
+```
+
+## 2. Chuẩn bị dữ liệu
+
+Đặt sáu ZIP gốc trong `data/raw/`, không sửa nội dung archive. Sau đó chạy từ
+repository root:
+
+```bash
+python offline/scripts/prepare_data.py \
   --raw-root data/raw \
   --prepared-root data/prepared \
   --subset L21 \
   --resume
 ```
 
-Inventory L21 hiện có 29 video, 7.800 mapping/Object và 10 duplicate `frame_idx`;
-canonical frame manifest giữ keyframe thứ hai của mỗi cặp nên còn 7.790 frame.
-Archive CLIP BTC được checksum nhưng đánh dấu `ignored_by_policy` và không giải nén.
-Đặt `AIC_DATA_ROOT=data/prepared/L21` cho các stage tiếp theo.
+L21 đã được kiểm chứng với 29 video, 7.800 keyframe raw và 7.790 frame canonical
+sau khi giữ keyframe thứ hai của 10 cặp `frame_idx` trùng. Kết quả prepare nằm tại
+`data/prepared/L21/inventory.json`.
 
-## 4. Chạy object -> bbox/mask -> DAM trên cloud
+## 3. Chạy pipeline offline
 
-### Data layout cần cung cấp
-
-Repo không chứa dữ liệu cuộc thi. Mỗi video cần:
-
-- map CSV với đúng columns `n,pts_time,fps,frame_idx`;
-- keyframe image directory, filename stem là `n`;
-- organizer object JSON directory, cùng numbering với keyframes.
-
-Ba runtime roots luôn truyền qua env hoặc CLI:
-
-```text
-AIC_DATA_ROOT      source data read-only
-AIC_ARTIFACT_ROOT  generated JSONL/manifests
-AIC_CACHE_ROOT     model snapshots/cache
-```
-
-Các path ví dụ bên dưới là **platform setup placeholders**; sửa chúng theo nơi
-team mount data. Runner code không chứa `/content`, `/kaggle` hay path máy cá nhân.
-
-### Google Colab
-
-Cell 1 - mount Drive, lấy token read-only từ Colab Secrets và clone private repo.
-Không paste token vào cell:
-
-```python
-from google.colab import drive, userdata
-import os, subprocess
-
-drive.mount("/content/drive")
-token = userdata.get("AIC_GITHUB_TOKEN")
-clone_env = os.environ.copy()
-clone_env.update({
-    "GIT_CONFIG_COUNT": "1",
-    "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-    "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
-})
-subprocess.run(
-    ["git", "clone", "https://github.com/AIVIETNAM-AIO-Dewey/AIC-2026.git", "/content/AIC-2026"],
-    env=clone_env,
-    check=True,
-)
-del token, clone_env
-os.chdir("/content/AIC-2026")
-```
-
-Cell 2 - đặt paths bền qua các `%%bash` cells:
-
-```python
-%env AIC_DATA_ROOT=/content/drive/MyDrive/AIC2026/data
-%env AIC_ARTIFACT_ROOT=/content/drive/MyDrive/AIC2026/artifacts
-%env AIC_CACHE_ROOT=/content/aic2026-cache
-%env AIC_VIDEO_ID=replace_with_video_id
-```
-
-Cell 3 - install và preflight:
+Các stage dùng chung `AIC_DATA_ROOT`, `AIC_ARTIFACT_ROOT`, `AIC_CACHE_ROOT` và hỗ
+trợ `--config`, `--device`, `--seed`, `--resume`, `--limit`, `--video-id`.
 
 ```bash
-%%bash
-set -euo pipefail
-python -m pip install --no-deps -r requirements/object-description.txt
-python scripts/verify_environment.py \
-  --config configs/offline/object_description.yaml \
-  --device cuda --write-report
+# Frame manifest canonical
+python offline/scripts/build_frame_manifest.py --help
+
+# Organizer objects → SAM masks → DAM descriptions
+python offline/scripts/prepare_object_masks.py --help
+python offline/scripts/run_dam_descriptions.py --help
+
+# Các modality do từng member chạy độc lập
+python offline/scripts/run_scene_embeddings.py --help
+python offline/scripts/run_easyocr.py --help
+python offline/scripts/run_phowhisper_asr.py --help
+python offline/scripts/sample_dense_frames.py --help
+
+# Validate trước ingest
+python offline/scripts/validate_artifacts.py --help
 ```
 
-Cell 4 - chạy full object branch cho một video:
+Model IDs/revisions nằm trong
+[`offline/configs/models.yaml`](offline/configs/models.yaml). Object-description
+quick start trên cloud dùng:
+
+- [`offline/notebooks/colab_object_description.ipynb`](offline/notebooks/colab_object_description.ipynb)
+- [`offline/notebooks/kaggle_object_description.ipynb`](offline/notebooks/kaggle_object_description.ipynb)
+
+Không chạy DAM, PhoWhisper hoặc dense decode trong API container.
+
+## 4. Ingest và chạy ứng dụng online
+
+Tạo `.env` từ `.env.example`, sau đó:
 
 ```bash
-%%bash
-set -euo pipefail
-FRAME_MANIFEST="$AIC_ARTIFACT_ROOT/frame_manifests/$AIC_VIDEO_ID.jsonl"
-MASK_ARTIFACT="$AIC_ARTIFACT_ROOT/object_description/masks/$AIC_VIDEO_ID.jsonl"
-DESCRIPTION_ARTIFACT="$AIC_ARTIFACT_ROOT/object_description/descriptions/$AIC_VIDEO_ID.jsonl"
-MAP_CSV="$AIC_DATA_ROOT/map-keyframes/$AIC_VIDEO_ID.csv"
-FRAMES_DIR="$AIC_DATA_ROOT/keyframes/$AIC_VIDEO_ID"
-OBJECTS_DIR="$AIC_DATA_ROOT/objects/$AIC_VIDEO_ID"
-
-python scripts/build_frame_manifest.py \
-  --config configs/offline/object_description.yaml \
-  --video-id "$AIC_VIDEO_ID" \
-  --map-csv "$MAP_CSV" \
-  --frames-dir "$FRAMES_DIR" \
-  --output "$FRAME_MANIFEST" --resume
-
-python scripts/prepare_object_masks.py \
-  --config configs/offline/object_description.yaml \
-  --video-id "$AIC_VIDEO_ID" \
-  --frame-manifest "$FRAME_MANIFEST" \
-  --objects-dir "$OBJECTS_DIR" \
-  --device cuda --resume
-
-python scripts/run_dam_descriptions.py \
-  --config configs/offline/object_description.yaml \
-  --video-id "$AIC_VIDEO_ID" \
-  --mask-artifact "$MASK_ARTIFACT" \
-  --device cuda --resume
-
-python scripts/validate_artifacts.py \
-  --artifact "$DESCRIPTION_ARTIFACT" \
-  --manifest "${DESCRIPTION_ARTIFACT%.jsonl}.manifest.json" \
-  --require-captions
+docker compose up -d qdrant api web
+docker compose --profile ingest run --rm ingest
 ```
 
-`scripts/*` tự đọc ba `AIC_*_ROOT`; có thể truyền explicit
-`--data-root/--output-root/--cache-root` để override. Smoke test phải dùng một
-`AIC_ARTIFACT_ROOT` riêng (ví dụ `.../smoke`) và `--limit 2`; không resume full run
-từ artifact có giới hạn vì config hash cố ý không tương thích.
+Mở UI tại <http://localhost:8080>. API docs nằm tại
+<http://localhost:8000/docs> và readiness tại
+<http://localhost:8000/api/v1/capabilities>.
 
-### Kaggle
-
-Cell 1 - Internet-on clone bằng Kaggle Secret `AIC_GITHUB_TOKEN`; Internet-off
-copy source snapshot từ private Dataset. Notebook mẫu tự chọn nhánh phù hợp:
-
-```python
-from pathlib import Path
-import os, shutil, subprocess
-
-source = Path("/kaggle/input/aic2026-source/AIC-2026")
-target = Path("/kaggle/working/AIC-2026")
-if source.is_dir():
-    shutil.copytree(source, target, dirs_exist_ok=True)
-else:
-    from kaggle_secrets import UserSecretsClient
-    token = UserSecretsClient().get_secret("AIC_GITHUB_TOKEN")
-    clone_env = os.environ.copy()
-    clone_env.update({
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
-    })
-    subprocess.run(["git", "clone", "https://github.com/AIVIETNAM-AIO-Dewey/AIC-2026.git", str(target)], env=clone_env, check=True)
-    del token, clone_env
-os.chdir(target)
-```
-
-Cell 2 - sửa Dataset slug/video ID theo attachment của team:
-
-```python
-%env AIC_DATA_ROOT=/kaggle/input/aic2026-data
-%env AIC_ARTIFACT_ROOT=/kaggle/working/aic2026-artifacts
-%env AIC_CACHE_ROOT=/kaggle/working/aic2026-model-cache
-%env AIC_VIDEO_ID=replace_with_video_id
-```
-
-Cell 3 - install/preflight dùng `requirements/object-description.txt`, sau đó chạy đúng Cell 4
-của Colab:
+Nếu chạy frontend native:
 
 ```bash
-%%bash
-set -euo pipefail
-python -m pip install --no-deps -r requirements/object-description.txt
-python scripts/verify_environment.py \
-  --config configs/offline/object_description.yaml \
-  --device cuda --write-report
+cd frontend
+npm run dev
 ```
 
-Kaggle Internet-off dùng wheelhouse của `runtime-base.txt`, pinned DAM wheel và
-Hugging Face cache snapshot từ private Dataset; xem lệnh checksum cụ thể trong
-[`docs/runbook.md`](docs/runbook.md).
+Vite proxy `/api` sang `http://localhost:8000`. Search form luôn hiển thị nhưng bị
+khóa rõ ràng cho tới khi collection/model tương ứng sẵn sàng.
 
-Khi Kaggle Internet tắt, attach private Dataset chứa model snapshots đúng revisions
-trong `configs/models.yaml` và trỏ `AIC_CACHE_ROOT` vào snapshot read-only hoặc copy
-sang `/kaggle/working`. Không fallback sang `main`.
-
-Thin notebooks tương ứng: [`notebooks/colab_object_description.ipynb`](notebooks/colab_object_description.ipynb)
-và [`notebooks/kaggle_object_description.ipynb`](notebooks/kaggle_object_description.ipynb).
-
-### SigLIP2 scene embeddings (chạy local, Apple Silicon)
-
-Stage này không cần cloud GPU. Chỉ cần `keyframes/` và `map-keyframes/` dưới
-`AIC_DATA_ROOT`; không cần tải videos, objects hay CLIP features của ban tổ chức.
+## 5. Kiểm thử
 
 ```bash
-python -m pip install torch torchvision   # chỉ trong venv local, không thêm vào requirements/
-export AIC_DATA_ROOT=... AIC_ARTIFACT_ROOT=... AIC_CACHE_ROOT=... AIC_VIDEO_ID=L01_V001
+pytest offline/tests backend/tests -m "not gpu and not slow"
+ruff check offline/src offline/tests offline/scripts backend/src backend/tests
+ruff format --check offline/src offline/tests offline/scripts backend/src backend/tests
 
-python scripts/build_frame_manifest.py \
-  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
-  --map-csv "$AIC_DATA_ROOT/map-keyframes/$AIC_VIDEO_ID.csv" \
-  --frames-dir "$AIC_DATA_ROOT/keyframes/$AIC_VIDEO_ID" --resume
-
-python scripts/run_scene_embeddings.py \
-  --config configs/offline/scene_embedding.yaml --video-id "$AIC_VIDEO_ID" \
-  --frame-manifest "$AIC_ARTIFACT_ROOT/frame_manifests/$AIC_VIDEO_ID.jsonl" \
-  --device mps --resume
+cd frontend
+npm test
+npm run build
 ```
 
-Dùng `--device mps` một cách tường minh: `device: auto` không có nhánh MPS và sẽ
-âm thầm rơi về `cpu`. Đo trên M4 Pro: ~105 ảnh/giây ở `batch_size: 32`.
+CI không tải GPU model và không gọi OpenAI thật. GPU smoke test phải chạy riêng trên
+Colab T4 và Kaggle T4 trước full corpus.
 
-### Vector index (Qdrant)
+## Contracts quan trọng
 
-Backend ingest là đường nạp Qdrant duy nhất. Nó đọc JSONL metadata cùng NPY companion,
-explode DAM/OCR/ASR đúng granularity, kiểm checksum/revision rồi đổi alias atomically.
+- Frame: `video_id`, `frame_idx`, `keyframe_n`, `pts_time_s`, `frame_relpath`.
+- Object: một record/frame, mỗi region giữ bbox, COCO RLE mask và DAM caption.
+- Query: `aic26.query.v1`, scene/object/OCR/audio được tách thành signal độc lập.
+- Ingest: chỉ nhận manifest `completed`, checksum đúng và model revision đã pin.
+- API: mọi result bắt buộc có canonical `video_id` và `frame_idx`.
 
-```bash
-docker compose up -d qdrant
-python -m aic_backend.ingest.cli \
-  --artifact-root "$AIC_ARTIFACT_ROOT" --all --activate \
-  --e5-model-path "$AIC_ARTIFACT_ROOT/models/multilingual-e5-base"
-```
+## Quy tắc repository
 
-Các collection `frames_sparse`, `frames_dense`, `regions`, `ocr`, `asr` dùng UUIDv5
-ổn định và alias `*_current`. Payload luôn giữ canonical `video_id`, `frame_idx`,
-`pts_time_s`, `run_id`; không fallback sang filename hoặc `keyframe_n`.
-
-## 5. Output và validation
-
-Với `VIDEO_ID`, outputs cố định:
-
-```text
-frame_manifests/<VIDEO_ID>.jsonl
-object_description/masks/<VIDEO_ID>.jsonl
-object_description/descriptions/<VIDEO_ID>.jsonl
-scene_embeddings/<VIDEO_ID>.jsonl
-scene_embeddings/<VIDEO_ID>.f16.npy
-```
-
-Mỗi stage manifest đổi suffix `.jsonl` thành `.manifest.json`. Description JSONL
-dùng schema `aic26.object_regions.v1`; mỗi region giữ organizer detection, bbox
-normalized + pixel half-open, SAM/bbox-fallback mask RLE và caption status. Missing
-frame, duplicate ID, bbox/mask ngoài ảnh hoặc manifest không tương thích là hard
-failure. Shard description chỉ publish khi mọi caption `ok`; lỗi/OOM giữ `.partial`
-để `--resume` retry, và primary OOM retry được ghi trong manifest counters.
-
-## 6. Cấu trúc repo
-
-```text
-configs/       immutable model registry và pipeline defaults
-docs/          architecture, contracts, cloud/model runbooks
-notebooks/     thin Colab/Kaggle launchers, không chứa pipeline logic
-scripts/       CLI entry points
-src/aic2026/   reusable implementation và strict contracts
-backend/       FastAPI theo api/retrieval/ingest/llm
-frontend/      React/Vite readiness, KIS, Q&A và TRAKE UI
-docker/        CPU API/web images; Qdrant nằm trong compose.yaml
-tests/         CPU tests + tiny licensed fixtures
-data/raw/      archive gốc; data/prepared/ là atomic prepared subset (ignored)
-artifacts/     generated outputs (ignored)
-runs/          run metadata (ignored)
-```
-
-## 7. Làm việc nhóm, reproducibility và license
-
-- Một shared private repo, `main` protected, nhánh ngắn hạn, squash merge, ít nhất
-  một reviewer; contract/config/model changes cần subsystem owner review.
-- Không commit data, media, weights, embeddings, submissions, notebook outputs,
-  local paths hoặc secrets. Xem [`CONTRIBUTING.md`](CONTRIBUTING.md) và
-  [`SECURITY.md`](SECURITY.md).
-- DVC chưa bắt buộc. V1 dùng private cloud storage + manifests/checksums; chỉ thêm
-  DVC khi team chốt private remote và cần version derived datasets.
-- SAM weights/code là Apache-2.0. DAM source code là Apache-2.0 nhưng DAM weights
-  dùng NVIDIA Noncommercial License. Phải xác nhận tính phù hợp với điều lệ cuộc
-  thi trước production; xem [`docs/model-registry.md`](docs/model-registry.md).
-- Repo chưa khai báo open-source `LICENSE`; không được suy ra quyền phân phối code,
-  organizer data hoặc third-party weights cho đến khi team/ban tổ chức chốt.
-
-CPU checks dành cho development/PR, không chạy model:
-
-```bash
-python -m pip install -r requirements/dev.txt
-ruff check .
-ruff format --check .
-pytest -m "not gpu and not slow"
-```
-
-Cloud setup, cache, Internet-off và resume policy được mô tả tại
-[`docs/runbook.md`](docs/runbook.md).
+- Không commit data, video, model weight, artifact, secret hoặc submission.
+- Không push trực tiếp `main`; dùng branch nhỏ và squash merge.
+- Xem [`CONTRIBUTING.md`](CONTRIBUTING.md) và [`SECURITY.md`](SECURITY.md).
+- Model/license notes nằm trong [`docs/model-registry.md`](docs/model-registry.md).
+- Query parser prompt nằm trong
+  [`docs/query-decomposition.md`](docs/query-decomposition.md).

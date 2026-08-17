@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY src ./src
+COPY offline/src ./offline/src
 RUN pip install --no-cache-dir .
 COPY backend/pyproject.toml ./backend/pyproject.toml
 COPY backend/src ./backend/src

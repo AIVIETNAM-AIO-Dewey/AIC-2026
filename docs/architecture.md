@@ -102,7 +102,7 @@ là binary theo tổ hợp video-frame (và answer cho Q&A). TRAKE chỉ nhận 
 
 ## Data contracts
 
-Nguồn chuẩn là Pydantic models trong `src/aic2026/contracts`; JSONL dùng UTF-8,
+Nguồn chuẩn là Pydantic models trong `offline/src/aic2026/contracts`; JSONL dùng UTF-8,
 field thừa bị từ chối. `frame_uid` luôn là `<video_id>:<frame_idx>`. Keyframe
 artifact có `keyframe_n`; dense TRAKE frame để field này `null` và giữ decoded
 `frame_idx` 0-based cùng PTS thật.

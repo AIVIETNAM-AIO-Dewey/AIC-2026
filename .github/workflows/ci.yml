@@ -28,15 +28,15 @@ jobs:
           python -m pip install -e ".[dev]" -e "./backend[dev]"
       - name: Validate repository files
         run: |
-          python -m json.tool notebooks/colab_object_description.ipynb > /dev/null
-          python -m json.tool notebooks/kaggle_object_description.ipynb > /dev/null
-          python -c "import yaml; yaml.safe_load(open('configs/models.yaml', encoding='utf-8')); yaml.safe_load(open('configs/offline/object_description.yaml', encoding='utf-8'))"
+          python -m json.tool offline/notebooks/colab_object_description.ipynb > /dev/null
+          python -m json.tool offline/notebooks/kaggle_object_description.ipynb > /dev/null
+          python -c "import yaml; yaml.safe_load(open('offline/configs/models.yaml', encoding='utf-8')); yaml.safe_load(open('offline/configs/offline/object_description.yaml', encoding='utf-8'))"
       - name: Ruff
         run: |
-          ruff check src tests scripts backend/src backend/tests
-          ruff format --check src tests scripts backend/src backend/tests
+          ruff check offline/src offline/tests offline/scripts backend/src backend/tests
+          ruff format --check offline/src offline/tests offline/scripts backend/src backend/tests
       - name: CPU tests
-        run: pytest tests backend/tests -m "not gpu and not slow"
+        run: pytest offline/tests backend/tests -m "not gpu and not slow"
 
   frontend:
     runs-on: ubuntu-latest
