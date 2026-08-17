@@ -385,7 +385,22 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("❌ DRY-RUN FAILED: %d videos have missing source paths.", missing_count)
             return 1
 
-    # 3. Main Batch Execution Loop
+    # 3. Remote Destination Startup Pre-Flight Check
+    if args.rclone_dest and not args.dry_run:
+        config_path = find_rclone_config()
+        test_cmd = ["rclone", "mkdir", args.rclone_dest]
+        if config_path:
+            test_cmd.extend(["--config", config_path])
+        try:
+            t_res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
+            if t_res.returncode == 0:
+                logger.info("📡 Rclone destination %s verified reachable and writable!", args.rclone_dest)
+            else:
+                logger.warning("⚠️ Rclone destination check warning (code %d): %s", t_res.returncode, t_res.stderr.strip()[:200])
+        except Exception as exc:
+            logger.warning("⚠️ Rclone destination check exception: %s", exc)
+
+    # 4. Main Batch Execution Loop
     total_assigned = len(assigned_videos)
     completed_in_run = 0
     skipped_count = 0
