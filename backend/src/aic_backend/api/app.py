@@ -92,9 +92,7 @@ def create_app() -> FastAPI:
         if not qdrant_ready:
             kis_missing.append("qdrant")
         visual_ready = bool(collections["frames_sparse"] and models["siglip2_text"])
-        lexical_ready = bool(
-            collections["regions"] or collections["ocr"] or collections["asr"]
-        )
+        lexical_ready = bool(collections["regions"] or collections["ocr"] or collections["asr"])
         if not visual_ready and not lexical_ready:
             kis_missing.append("search_collection")
         kis_ready = qdrant_ready and (visual_ready or lexical_ready)

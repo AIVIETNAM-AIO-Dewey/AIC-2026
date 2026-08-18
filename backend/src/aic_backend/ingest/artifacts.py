@@ -297,9 +297,9 @@ def ingest(
                         "lexical": models.SparseVector(indices=indices, values=values)
                     }
                     if dense_encoder is not None:
-                        vectors_by_name["dense"] = dense_encoder.encode(
-                            [text], query=False
-                        )[0].tolist()
+                        vectors_by_name["dense"] = dense_encoder.encode([text], query=False)[
+                            0
+                        ].tolist()
                     points.append(
                         models.PointStruct(
                             id=str(point_id(collection=collection, source_id=source_id)),
