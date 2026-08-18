@@ -240,7 +240,7 @@ def ingest(
     client: Any,
     artifacts: list[ArtifactFile],
     *,
-    dense_encoder: Any,
+    dense_encoder: Any | None,
     activate: bool,
 ) -> dict[str, int]:
     from qdrant_client import models
@@ -263,7 +263,11 @@ def ingest(
             }
             sparse = None
         else:
-            vectors = {"dense": models.VectorParams(size=768, distance=models.Distance.COSINE)}
+            vectors = (
+                {"dense": models.VectorParams(size=768, distance=models.Distance.COSINE)}
+                if dense_encoder is not None
+                else {}
+            )
             sparse = {"lexical": models.SparseVectorParams()}
         client.create_collection(
             collection_name=version,
@@ -288,15 +292,18 @@ def ingest(
                     )
             else:
                 for source_id, payload, text in _text_points(source):
-                    dense = dense_encoder.encode([text], query=False)[0].tolist()
                     indices, values = sparse_vector(text)
+                    vectors_by_name: dict[str, Any] = {
+                        "lexical": models.SparseVector(indices=indices, values=values)
+                    }
+                    if dense_encoder is not None:
+                        vectors_by_name["dense"] = dense_encoder.encode(
+                            [text], query=False
+                        )[0].tolist()
                     points.append(
                         models.PointStruct(
                             id=str(point_id(collection=collection, source_id=source_id)),
-                            vector={
-                                "dense": dense,
-                                "lexical": models.SparseVector(indices=indices, values=values),
-                            },
+                            vector=vectors_by_name,
                             payload=payload,
                         )
                     )

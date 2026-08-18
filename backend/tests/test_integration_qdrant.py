@@ -177,3 +177,58 @@ def test_ocr_query_uses_trigram_candidates_edit_distance_and_structured_payload(
     assert hits[0].ocr is not None
     assert hits[0].ocr.lines[0].confidence == 0.856
     assert hits[0].ocr.model_revisions == ("PP-OCRv6-small@fixture",)
+
+
+@pytest.mark.integration
+def test_ocr_query_supports_sparse_only_ingest_without_e5(tmp_path: Path) -> None:
+    path = tmp_path / "ocr" / "L23_V001.jsonl"
+    path.parent.mkdir()
+    row = {
+        "video_id": "L23_V001",
+        "frame_uid": "L23_V001:1",
+        "frame_idx": 1,
+        "keyframe_n": 1,
+        "pts_time_s": 1.0,
+        "width": 1280,
+        "height": 720,
+        "source_image_sha256": "a" * 64,
+        "terminal_status": "success",
+        "full_text": "non sông liền một dải",
+        "texts": [],
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    manifest = path.with_suffix(".manifest.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "run_id": "preview-ocr",
+                "counters": {"frames": 1},
+                "models": [{"model_id": "PP-OCRv6-small", "revision": "fixture"}],
+                "outputs": [{"sha256": sha256_path(path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    qdrant = QdrantClient(":memory:")
+    counts = ingest(
+        qdrant,
+        [ArtifactFile("ocr", path, manifest)],
+        dense_encoder=None,
+        activate=True,
+    )
+    repository = QdrantRepository(qdrant, artifact_root=tmp_path, text_encoder=None)
+
+    hits = repository.search_text("ocr", "non song cung mot dai", limit=5)
+
+    assert counts == {"ocr": 1}
+    assert hits[0].frame_idx == 1
+
+
+def test_search_skips_missing_modality_aliases() -> None:
+    repository = QdrantRepository(
+        QdrantClient(":memory:"), artifact_root=Path("."), text_encoder=None
+    )
+
+    assert repository.search_text("ocr", "anything", limit=5) == []
+    assert repository.search_scene("anything", limit=5) == []

@@ -160,6 +160,20 @@ retrieve a close canonical OCR phrase without rewriting stored OCR text or hardc
 phrase. Collections created earlier retain exact-token compatibility, but must be
 re-ingested to gain the folded and trigram features.
 
+For an OCR-only local preview, text artifacts can be ingested without provisioning E5:
+
+```bash
+python -m aic_backend.ingest.cli \
+  --artifact-root artifacts \
+  --qdrant-url http://localhost:6333 \
+  --all --activate --lexical-only
+```
+
+This mode creates sparse-only text collections. Exact, accent-folded, trigram, and bounded
+edit-distance OCR retrieval remain available; dense text retrieval is intentionally absent.
+KIS fallback sends the raw query to every available modality and safely skips missing
+collection aliases.
+
 ## 4. Ingest và chạy ứng dụng online
 
 Tạo `.env` từ `.env.example`, sau đó:

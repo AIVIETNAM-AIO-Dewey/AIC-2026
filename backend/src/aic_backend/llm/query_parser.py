@@ -17,4 +17,11 @@ class QueryParsingService:
         except CapabilityUnavailable:
             if task_type != "kis":
                 raise
-            return QuerySpec(task_type="kis", raw_query_vi=raw_query_vi, scene_en=raw_query_vi)
+            return QuerySpec(
+                task_type="kis",
+                raw_query_vi=raw_query_vi,
+                scene_en=raw_query_vi,
+                objects_en=[raw_query_vi],
+                ocr_vi=[raw_query_vi],
+                audio_vi=[raw_query_vi],
+            )

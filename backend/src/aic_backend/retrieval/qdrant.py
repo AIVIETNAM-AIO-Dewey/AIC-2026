@@ -59,6 +59,12 @@ class QdrantRepository(RetrievalRepository):
         self.text_encoder = text_encoder
         self.scene_encoder = scene_encoder
 
+    def _has_alias(self, alias: str) -> bool:
+        try:
+            return alias in {item.alias_name for item in self.client.get_aliases().aliases}
+        except Exception:
+            return False
+
     @staticmethod
     def _candidate(point: Any, modality: str, object_slot: int | None = None) -> FrameCandidate:
         payload = point.payload or {}
@@ -84,7 +90,7 @@ class QdrantRepository(RetrievalRepository):
     def _query(
         self,
         collection: str,
-        vector: list[float],
+        vector: list[float] | None,
         *,
         modality: str,
         limit: int,
@@ -104,6 +110,8 @@ class QdrantRepository(RetrievalRepository):
                 ]
             )
         if lexical_text is None:
+            if vector is None:
+                return []
             response = self.client.query_points(
                 collection_name=collection,
                 query=vector,
@@ -114,21 +122,32 @@ class QdrantRepository(RetrievalRepository):
             )
         else:
             indexes, values = sparse_vector(lexical_text)
-            response = self.client.query_points(
-                collection_name=collection,
-                prefetch=[
-                    models.Prefetch(query=vector, using="dense", limit=limit * 2),
-                    models.Prefetch(
-                        query=models.SparseVector(indices=indexes, values=values),
-                        using="lexical",
-                        limit=limit * 2,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                query_filter=query_filter,
-                limit=limit,
-                with_payload=True,
-            )
+            lexical = models.SparseVector(indices=indexes, values=values)
+            if vector is None:
+                response = self.client.query_points(
+                    collection_name=collection,
+                    query=lexical,
+                    using="lexical",
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
+            else:
+                response = self.client.query_points(
+                    collection_name=collection,
+                    prefetch=[
+                        models.Prefetch(query=vector, using="dense", limit=limit * 2),
+                        models.Prefetch(
+                            query=lexical,
+                            using="lexical",
+                            limit=limit * 2,
+                        ),
+                    ],
+                    query=models.FusionQuery(fusion=models.Fusion.RRF),
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
         points = response.points
         candidates = [self._candidate(point, modality, object_slot) for point in points]
         if lexical_text is not None and modality == "ocr":
@@ -143,10 +162,11 @@ class QdrantRepository(RetrievalRepository):
         video_id: str | None = None,
         dense: bool = False,
     ) -> Sequence[FrameCandidate]:
-        if self.scene_encoder is None:
+        collection = "frames_dense_current" if dense else "frames_sparse_current"
+        if self.scene_encoder is None or not self._has_alias(collection):
             return []
         return self._query(
-            "frames_dense_current" if dense else "frames_sparse_current",
+            collection,
             self.scene_encoder.encode_texts([query])[0].tolist(),
             modality="scene",
             limit=limit,
@@ -162,15 +182,19 @@ class QdrantRepository(RetrievalRepository):
         video_id: str | None = None,
         object_slot: int | None = None,
     ) -> Sequence[FrameCandidate]:
-        if self.text_encoder is None:
-            return []
-        dense = self.text_encoder.encode([query], query=True)[0].tolist()
         collection = {
             "object": "regions_current",
             "ocr": "ocr_current",
             "asr": "asr_current",
             "dense": "frames_dense_current",
         }[modality]
+        if not self._has_alias(collection):
+            return []
+        dense = (
+            self.text_encoder.encode([query], query=True)[0].tolist()
+            if self.text_encoder is not None
+            else None
+        )
         # Fetch a bounded pool for trigram/dense recall. Edit distance never scans
         # the full collection in application memory.
         candidate_limit = min(max(limit * 4, limit), 400) if modality == "ocr" else limit

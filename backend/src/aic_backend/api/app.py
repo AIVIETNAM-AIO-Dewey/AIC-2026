@@ -91,11 +91,13 @@ def create_app() -> FastAPI:
         kis_missing = []
         if not qdrant_ready:
             kis_missing.append("qdrant")
-        if not collections["frames_sparse"]:
-            kis_missing.append("frames_sparse_current")
-        if not models["siglip2_text"]:
-            kis_missing.append("siglip2_text")
-        kis_ready = not kis_missing
+        visual_ready = bool(collections["frames_sparse"] and models["siglip2_text"])
+        lexical_ready = bool(
+            collections["regions"] or collections["ocr"] or collections["asr"]
+        )
+        if not visual_ready and not lexical_ready:
+            kis_missing.append("search_collection")
+        kis_ready = qdrant_ready and (visual_ready or lexical_ready)
         qa_missing = [*kis_missing] + ([] if openai_ready else ["gpt4o"])
         trake_missing = [*qa_missing]
         if not collections["frames_dense"]:
