@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   getCapabilities,
   search,
+  searchOcr,
   type Capabilities,
   type FrameHit,
   type SearchResponse,
@@ -10,6 +11,7 @@ import {
 } from "./api/client";
 import { SubmissionBasket } from "./components/SubmissionBasket";
 import { AnswerPanel } from "./features/qa/AnswerPanel";
+import { OcrProcessingPanel } from "./features/ocr/OcrProcessingPanel";
 import { ResultsGrid } from "./features/results/ResultsGrid";
 import { SearchForm } from "./features/search/SearchForm";
 import { Timeline } from "./features/trake/Timeline";
@@ -19,6 +21,7 @@ const unavailableTasks: Capabilities["tasks"] = {
   kis: { ready: false, missing: ["backend"] },
   qa: { ready: false, missing: ["backend"] },
   trake: { ready: false, missing: ["backend"] },
+  ocr: { ready: false, missing: ["backend"] },
 };
 
 export default function App() {
@@ -28,13 +31,22 @@ export default function App() {
   const [basket, setBasket] = useState<FrameHit[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [fuzzy, setFuzzy] = useState(true);
 
-  useEffect(() => {
+  const refreshCapabilities = () =>
     getCapabilities()
-      .then(setCapabilities)
+      .then((next) =>
+        setCapabilities({
+          ...next,
+          tasks: { ...unavailableTasks, ...next.tasks },
+        }),
+      )
       .catch((cause) => {
         setError(cause instanceof Error ? cause.message : "Backend chưa sẵn sàng");
       });
+
+  useEffect(() => {
+    refreshCapabilities();
   }, []);
 
   const toggle = (hit: FrameHit) =>
@@ -52,7 +64,9 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      setData(await search(task, query));
+      setData(
+        task === "ocr" ? await searchOcr(query, fuzzy) : await search(task, query),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Tìm kiếm thất bại");
     } finally {
@@ -79,7 +93,11 @@ export default function App() {
         onSearch={run}
         loading={loading}
         capabilities={taskCapabilities}
+        fuzzy={fuzzy}
+        setFuzzy={setFuzzy}
       />
+
+      {task === "ocr" && <OcrProcessingPanel onIndexed={refreshCapabilities} />}
 
       {capabilities && !capabilities.search_ready && (
         <section className="readiness" aria-label="Trạng thái hệ thống">
@@ -88,7 +106,7 @@ export default function App() {
             Form được giữ hiển thị để kiểm tra UI, nhưng chỉ hoạt động sau khi ingest
             artifact thật.
           </p>
-          {(["kis", "qa", "trake"] as TaskType[]).map((mode) => (
+          {(["kis", "qa", "trake", "ocr"] as TaskType[]).map((mode) => (
             <p key={mode}>
               <strong>{mode.toUpperCase()}:</strong>{" "}
               {capabilities.tasks[mode].ready
@@ -101,6 +119,11 @@ export default function App() {
 
       {error && <p role="alert">{error}</p>}
       {data?.degraded && <p>GPT-4o chưa sẵn sàng; KIS đang dùng truy vấn gốc.</p>}
+      {task === "ocr" && data?.ocr_search && (
+        <p className="search-strategy" role="status">
+          Query chuẩn hóa: <code>{data.ocr_search.normalized_query}</code> · {data.ocr_search.strategies.join(" → ")} · {data.ocr_search.latency_ms.toFixed(1)} ms
+        </p>
+      )}
       {data && resultCount === 0 && <p role="status">Không tìm thấy kết quả phù hợp.</p>}
 
       {task === "trake" ? (

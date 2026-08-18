@@ -9,6 +9,18 @@ Modality = Literal["scene", "object", "ocr", "asr", "dense"]
 
 
 @dataclass(frozen=True)
+class OcrMatch:
+    query: str
+    normalized_query: str
+    matched_text: str
+    lexical_score: float
+    fuzzy_similarity: float | None
+    final_score: float
+    match_type: Literal["exact", "accent_folded", "fuzzy", "trigram_candidate"]
+    fuzzy_enabled: bool
+
+
+@dataclass(frozen=True)
 class OcrLine:
     line_id: str
     raw_text: str
@@ -52,6 +64,7 @@ class FrameCandidate:
     region_id: str | None = None
     object_slot: int | None = None
     ocr: StructuredOcr | None = None
+    ocr_match: OcrMatch | None = None
 
     @property
     def frame_uid(self) -> str:
@@ -68,6 +81,7 @@ class SearchHit:
     modality_scores: dict[str, float] = field(default_factory=dict)
     evidence: tuple[Evidence, ...] = ()
     ocr: StructuredOcr | None = None
+    ocr_match: OcrMatch | None = None
 
     @property
     def frame_uid(self) -> str:

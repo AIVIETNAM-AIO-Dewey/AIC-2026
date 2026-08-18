@@ -10,13 +10,19 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from ..ingest.artifacts import ArtifactFile, ingest
+from ..ingest.sparse import fold_vietnamese
 from ..llm.gpt4o import CapabilityUnavailable, GPT4oAdapter
 from ..llm.query_parser import QueryParsingService
+from ..ocr import OcrJobManager
 from ..retrieval.models import SearchHit
+from ..retrieval.ocr_search import OcrSearchService
 from ..retrieval.search import SearchService
 from ..retrieval.trake import TrakeService
 from .deps import (
     get_gpt,
+    get_ocr_job_manager,
+    get_ocr_search_service,
     get_parser,
     get_repository,
     get_search_service,
@@ -27,6 +33,11 @@ from .schemas import (
     CapabilitiesResponse,
     EvidenceResponse,
     FrameHitResponse,
+    OcrJobRunRequest,
+    OcrJobsResponse,
+    OcrMatchResponse,
+    OcrSearchRequest,
+    OcrSearchResponse,
     SearchRequest,
     SearchResponse,
     StructuredOcrResponse,
@@ -48,6 +59,9 @@ def _hit(hit: SearchHit, rank: int) -> FrameHitResponse:
         modality_scores=hit.modality_scores,
         evidence=[EvidenceResponse(**item.__dict__) for item in hit.evidence],
         ocr=StructuredOcrResponse.model_validate(asdict(hit.ocr)) if hit.ocr else None,
+        ocr_match=(
+            OcrMatchResponse.model_validate(asdict(hit.ocr_match)) if hit.ocr_match else None
+        ),
     )
 
 
@@ -111,8 +125,86 @@ def create_app() -> FastAPI:
                 "kis": {"ready": kis_ready, "missing": kis_missing},
                 "qa": {"ready": not qa_missing, "missing": qa_missing},
                 "trake": {"ready": not trake_missing, "missing": trake_missing},
+                "ocr": {
+                    "ready": qdrant_ready and bool(collections["ocr"]),
+                    "missing": (
+                        []
+                        if qdrant_ready and collections["ocr"]
+                        else ["qdrant" if not qdrant_ready else "ocr_current"]
+                    ),
+                },
             },
         )
+
+    @app.post("/api/v1/ocr/search", response_model=OcrSearchResponse)
+    def ocr_search(
+        request: Request,
+        body: OcrSearchRequest,
+        repository=Depends(get_repository),
+        service: OcrSearchService = Depends(get_ocr_search_service),
+    ) -> OcrSearchResponse:
+        status = repository.status()
+        if not status["qdrant_ready"]:
+            raise HTTPException(status_code=503, detail="qdrant_unavailable")
+        if not status["collections"]["ocr"]:
+            raise HTTPException(status_code=503, detail="ocr_collection_unavailable")
+        started = time.perf_counter()
+        query = " ".join(body.query.split())
+        hits = service.retrieve(query, top_k=body.top_k, fuzzy=body.fuzzy)
+        return OcrSearchResponse(
+            request_id=request.state.request_id,
+            query=query,
+            normalized_query=" ".join(fold_vietnamese(query).split()),
+            fuzzy_enabled=body.fuzzy,
+            strategies=[
+                "exact_tokens",
+                "accent_folded_tokens",
+                "character_trigrams",
+                *(["levenshtein_rerank"] if body.fuzzy else []),
+            ],
+            latency_ms=(time.perf_counter() - started) * 1000,
+            results=[_hit(hit, rank) for rank, hit in enumerate(hits, 1)],
+        )
+
+    @app.get("/api/v1/ocr/jobs", response_model=OcrJobsResponse)
+    def ocr_jobs(manager: OcrJobManager = Depends(get_ocr_job_manager)) -> dict[str, object]:
+        return manager.status()
+
+    @app.post("/api/v1/ocr/jobs/run", response_model=OcrJobsResponse)
+    def run_ocr_job(
+        body: OcrJobRunRequest,
+        manager: OcrJobManager = Depends(get_ocr_job_manager),
+    ) -> dict[str, object]:
+        try:
+            return manager.start(body.manifest_id)
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/v1/ocr/jobs/index")
+    def index_ocr_job(
+        body: OcrJobRunRequest,
+        manager: OcrJobManager = Depends(get_ocr_job_manager),
+        repository=Depends(get_repository),
+    ) -> dict[str, object]:
+        if not manager.settings.ocr_jobs_enabled:
+            raise HTTPException(status_code=403, detail="ocr_jobs_disabled")
+        try:
+            output, manifest = manager.completed_artifact(body.manifest_id)
+            counts = ingest(
+                repository.client,
+                [ArtifactFile("ocr", output, manifest)],
+                dense_encoder=repository.text_encoder,
+                activate=True,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"status": "indexed", "manifest_id": body.manifest_id, "counts": counts}
 
     @app.post("/api/v1/search", response_model=SearchResponse)
     def search(

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..ingest.sparse import sparse_vector
-from .fuzzy import rerank_fuzzy_candidates
+from .fuzzy import explain_ocr_candidates, rerank_fuzzy_candidates
 from .models import Evidence, FrameCandidate, OcrLine, SearchHit, StructuredOcr
 from .ports import RetrievalRepository
 
@@ -97,6 +97,7 @@ class QdrantRepository(RetrievalRepository):
         video_id: str | None,
         object_slot: int | None = None,
         lexical_text: str | None = None,
+        fuzzy: bool = True,
     ) -> Sequence[FrameCandidate]:
         try:
             from qdrant_client import models
@@ -150,7 +151,7 @@ class QdrantRepository(RetrievalRepository):
                 )
         points = response.points
         candidates = [self._candidate(point, modality, object_slot) for point in points]
-        if lexical_text is not None and modality == "ocr":
+        if lexical_text is not None and modality == "ocr" and fuzzy:
             return rerank_fuzzy_candidates(lexical_text, candidates, limit=limit)
         return candidates[:limit]
 
@@ -181,6 +182,7 @@ class QdrantRepository(RetrievalRepository):
         limit: int,
         video_id: str | None = None,
         object_slot: int | None = None,
+        fuzzy: bool = True,
     ) -> Sequence[FrameCandidate]:
         collection = {
             "object": "regions_current",
@@ -197,16 +199,22 @@ class QdrantRepository(RetrievalRepository):
         )
         # Fetch a bounded pool for trigram/dense recall. Edit distance never scans
         # the full collection in application memory.
-        candidate_limit = min(max(limit * 4, limit), 400) if modality == "ocr" else limit
-        return self._query(
-            collection,
-            dense,
-            modality=modality,
-            limit=candidate_limit,
-            video_id=video_id,
-            object_slot=object_slot,
-            lexical_text=query,
-        )[:limit]
+        candidate_limit = min(max(limit * 4, 80), 400) if modality == "ocr" else limit
+        candidates = list(
+            self._query(
+                collection,
+                dense,
+                modality=modality,
+                limit=candidate_limit,
+                video_id=video_id,
+                object_slot=object_slot,
+                lexical_text=query,
+                fuzzy=fuzzy,
+            )
+        )
+        if modality == "ocr" and not fuzzy:
+            return explain_ocr_candidates(query, candidates, limit=limit)
+        return candidates[:limit]
 
     def frame_image_path(self, video_id: str, frame_idx: int) -> str | None:
         candidate = self.artifact_root / "dense_frames" / video_id / f"{frame_idx}.jpg"

@@ -29,6 +29,13 @@ def test_fuzzy_rerank_is_generic_bounded_and_deduplicates_frames() -> None:
     ]
     ranked = rerank_fuzzy_candidates("non song cung mot dai", candidates, limit=3)
     assert [row.frame_idx for row in ranked] == [2, 1, 3]
+    assert ranked[0].ocr_match is not None
+    assert ranked[0].ocr_match.match_type == "fuzzy"
+    assert ranked[0].ocr_match.lexical_score == 0.5
+    assert ranked[0].ocr_match.fuzzy_similarity is not None
+    assert rerank_fuzzy_candidates("non song cung mot dai", candidates, limit=1)[0].score == (
+        ranked[0].score
+    )
 
     generic = rerank_fuzzy_candidates("thanh pho ho chi minhh", candidates, limit=2)
     assert generic[0].frame_idx == 3
