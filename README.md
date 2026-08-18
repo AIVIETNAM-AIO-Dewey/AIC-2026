@@ -154,6 +154,12 @@ or ensemble. Each selected frame produces exactly one `success`, `empty`, or `er
 record. `polygon_xy` always uses native image coordinates; normalized coordinates are a
 derived field. The old EasyOCR runner remains available only for compatibility.
 
+OCR retrieval uses exact tokens plus generic Vietnamese accent folding and character
+trigrams in the existing Qdrant sparse vector. An accentless/noisy query can therefore
+retrieve a close canonical OCR phrase without rewriting stored OCR text or hardcoding a
+phrase. Collections created earlier retain exact-token compatibility, but must be
+re-ingested to gain the folded and trigram features.
+
 ## 4. Ingest và chạy ứng dụng online
 
 Tạo `.env` từ `.env.example`, sau đó:
