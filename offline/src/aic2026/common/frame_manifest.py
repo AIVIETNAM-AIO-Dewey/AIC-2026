@@ -11,6 +11,8 @@ from PIL import Image
 
 from aic2026.contracts import FrameRef
 
+from .io import sha256_file
+
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
@@ -159,6 +161,7 @@ def build_frame_refs(
                 pts_time_s=row.pts_time_s,
                 fps=row.fps,
                 frame_relpath=relative,
+                source_image_sha256=sha256_file(resolved),
                 width=width,
                 height=height,
             )

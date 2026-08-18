@@ -1,5 +1,27 @@
 export type TaskType = "kis" | "qa" | "trake";
 
+export type OcrLine = {
+  line_id: string;
+  raw_text: string;
+  normalized_text: string;
+  confidence: number | null;
+  accepted: boolean;
+  polygon_xy: [number, number][] | null;
+  polygon_clamped: boolean;
+  reading_order: number;
+};
+
+export type StructuredOcr = {
+  terminal_status: "success" | "empty" | "error";
+  full_text: string;
+  width: number;
+  height: number;
+  run_id: string;
+  model_revisions: string[];
+  source_image_sha256: string | null;
+  lines: OcrLine[];
+};
+
 export type FrameHit = {
   rank: number;
   score: number;
@@ -10,6 +32,7 @@ export type FrameHit = {
   image_url: string;
   modality_scores: Record<string, number>;
   evidence: { modality: string; text?: string; score: number }[];
+  ocr?: StructuredOcr | null;
 };
 
 export type Sequence = {

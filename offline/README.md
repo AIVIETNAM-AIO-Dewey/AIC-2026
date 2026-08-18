@@ -21,3 +21,17 @@ python offline/scripts/prepare_data.py \
 
 Xem `README.md` ở repository root cho luồng end-to-end và `docs/runbook.md` cho
 hướng dẫn cloud chi tiết.
+
+## PP-OCRv6-small
+
+```bash
+python -m pip install -r offline/requirements/ppocrv6.txt
+python offline/scripts/run_ppocrv6.py --preflight-only \
+  --cache-root "$AIC_CACHE_ROOT"
+python offline/scripts/run_ppocrv6.py --help
+```
+
+Model files phải được provision sẵn theo layout/checksum trong
+`configs/offline/ocr_ppocrv6.yaml`; runner không tự tải model. Output là
+`aic26.ocr.v2` JSONL với đúng một trạng thái `success`, `empty` hoặc `error` cho mỗi
+frame. EasyOCR runner cũ chỉ được giữ để tương thích với artifact trước đây.

@@ -74,3 +74,30 @@ def test_kis_response_uses_video_id_and_frame_idx_without_filename_fallback():
     assert response.status_code == 200
     hit = response.json()["results"][0]
     assert hit["video_id"] == "L21_V011" and hit["frame_idx"] == 24925
+
+
+def test_capabilities_allow_ocr_only_kis_without_text_encoder():
+    class OcrOnlyRepo(Repo):
+        def status(self):
+            return {
+                "qdrant_ready": True,
+                "collections": {
+                    "frames_sparse": False,
+                    "frames_dense": False,
+                    "regions": False,
+                    "ocr": True,
+                    "asr": False,
+                },
+                "models": {"siglip2_text": False, "e5_text": False},
+            }
+
+    app = create_app()
+    app.dependency_overrides = {
+        get_repository: OcrOnlyRepo,
+        get_gpt: lambda: Gpt(),
+    }
+
+    response = TestClient(app).get("/api/v1/capabilities")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"]["kis"] == {"ready": True, "missing": []}

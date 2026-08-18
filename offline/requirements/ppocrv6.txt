@@ -1,0 +1,4 @@
+-r runtime-base.txt
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2

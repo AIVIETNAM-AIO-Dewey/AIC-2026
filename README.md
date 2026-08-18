@@ -25,7 +25,7 @@ offline/scripts/prepare_data.py
       │
       ├── Object JSON → SAM → DAM captions
       ├── Keyframes → SigLIP2 embeddings
-      ├── Keyframes → EasyOCR
+      ├── Keyframes → PP-OCRv6-small (offline, local weights)
       ├── Videos → PhoWhisper segments
       └── Videos → dense 5 FPS → SigLIP2
       │
@@ -113,7 +113,7 @@ python offline/scripts/run_dam_descriptions.py --help
 
 # Các modality do từng member chạy độc lập
 python offline/scripts/run_scene_embeddings.py --help
-python offline/scripts/run_easyocr.py --help
+python offline/scripts/run_ppocrv6.py --help
 python offline/scripts/run_phowhisper_asr.py --help
 python offline/scripts/sample_dense_frames.py --help
 
@@ -129,6 +129,50 @@ quick start trên cloud dùng:
 - [`offline/notebooks/kaggle_object_description.ipynb`](offline/notebooks/kaggle_object_description.ipynb)
 
 Không chạy DAM, PhoWhisper hoặc dense decode trong API container.
+
+PP-OCRv6-small là OCR mặc định được khuyến nghị. Model weights không nằm trong Git:
+operator phải provision detector và recognizer đúng checksum dưới `AIC_CACHE_ROOT`, rồi
+chạy model-free preflight trước khi inference:
+
+```bash
+python -m pip install -r offline/requirements/ppocrv6.txt
+python offline/scripts/run_ppocrv6.py --preflight-only \
+  --cache-root /path/to/aic-cache
+
+python offline/scripts/run_ppocrv6.py \
+  --data-root data/prepared \
+  --output-root artifacts \
+  --cache-root /path/to/aic-cache \
+  --video-id L21_V011 \
+  --frame-manifest artifacts/frame_manifests/L21_V011.jsonl
+```
+
+Expected model layout and every file checksum are pinned in
+[`ocr_ppocrv6.yaml`](offline/configs/offline/ocr_ppocrv6.yaml). The adapter forbids
+network access during construction and inference and does not download, fallback, retry,
+or ensemble. Each selected frame produces exactly one `success`, `empty`, or `error`
+record. `polygon_xy` always uses native image coordinates; normalized coordinates are a
+derived field. The old EasyOCR runner remains available only for compatibility.
+
+OCR retrieval uses exact tokens plus generic Vietnamese accent folding and character
+trigrams in the existing Qdrant sparse vector. An accentless/noisy query can therefore
+retrieve a close canonical OCR phrase without rewriting stored OCR text or hardcoding a
+phrase. Collections created earlier retain exact-token compatibility, but must be
+re-ingested to gain the folded and trigram features.
+
+For an OCR-only local preview, text artifacts can be ingested without provisioning E5:
+
+```bash
+python -m aic_backend.ingest.cli \
+  --artifact-root artifacts \
+  --qdrant-url http://localhost:6333 \
+  --all --activate --lexical-only
+```
+
+This mode creates sparse-only text collections. Exact, accent-folded, trigram, and bounded
+edit-distance OCR retrieval remain available; dense text retrieval is intentionally absent.
+KIS fallback sends the raw query to every available modality and safely skips missing
+collection aliases.
 
 ## 4. Ingest và chạy ứng dụng online
 
@@ -172,6 +216,7 @@ Colab T4 và Kaggle T4 trước full corpus.
 
 - Frame: `video_id`, `frame_idx`, `keyframe_n`, `pts_time_s`, `frame_relpath`.
 - Object: một record/frame, mỗi region giữ bbox, COCO RLE mask và DAM caption.
+- OCR: một terminal record/keyframe; chỉ accepted text từ success record được ingest.
 - Query: `aic26.query.v1`, scene/object/OCR/audio được tách thành signal độc lập.
 - Ingest: chỉ nhận manifest `completed`, checksum đúng và model revision đã pin.
 - API: mọi result bắt buộc có canonical `video_id` và `frame_idx`.

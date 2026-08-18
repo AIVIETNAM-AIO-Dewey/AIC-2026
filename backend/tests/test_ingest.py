@@ -85,6 +85,48 @@ def test_dam_artifact_expands_one_point_per_successful_region(tmp_path: Path) ->
     assert points[0][1]["frame_idx"] == 24925
 
 
+def test_ocr_ingest_skips_terminal_errors_and_rejected_lines(tmp_path: Path) -> None:
+    path = tmp_path / "ocr" / "L21_V011.jsonl"
+    path.parent.mkdir()
+    base = {
+        "video_id": "L21_V011",
+        "frame_uid": "L21_V011:24925",
+        "frame_idx": 24925,
+        "keyframe_n": 262,
+        "pts_time_s": 997.0,
+        "width": 1280,
+        "height": 720,
+        "source_image_sha256": "a" * 64,
+    }
+    rows = [
+        {
+            **base,
+            "terminal_status": "success",
+            "texts": [
+                {"normalized_text": "non sông liền một dải", "accepted": True},
+                {"normalized_text": "low confidence", "accepted": False},
+            ],
+        },
+        {
+            **base,
+            "frame_uid": "L21_V011:24926",
+            "frame_idx": 24926,
+            "terminal_status": "error",
+            "texts": [{"normalized_text": "must not index", "accepted": True}],
+        },
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    artifact = ArtifactFile("ocr", path, _manifest(path, [path], frames=2))
+
+    points = list(_text_points(validate_artifact(artifact)))
+
+    assert len(points) == 1
+    assert points[0][2] == "non sông liền một dải"
+    assert points[0][1]["ocr_frame"]["width"] == 1280
+    assert len(points[0][1]["ocr_frame"]["lines"]) == 2
+    assert points[0][1]["ocr_frame"]["model_revisions"] == ["fixture/model@abc123"]
+
+
 def test_legacy_asr_gets_checksummed_staging_receipt(tmp_path: Path) -> None:
     path = tmp_path / "asr_segments" / "L21_V011.jsonl"
     path.parent.mkdir()

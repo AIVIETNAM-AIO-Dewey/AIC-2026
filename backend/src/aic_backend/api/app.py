@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -28,6 +29,7 @@ from .schemas import (
     FrameHitResponse,
     SearchRequest,
     SearchResponse,
+    StructuredOcrResponse,
     SubmissionRenderRequest,
     TrakeEventResponse,
     TrakeSequenceResponse,
@@ -45,6 +47,7 @@ def _hit(hit: SearchHit, rank: int) -> FrameHitResponse:
         image_url=f"/api/v1/frames/{hit.video_id}/{hit.frame_idx}/image",
         modality_scores=hit.modality_scores,
         evidence=[EvidenceResponse(**item.__dict__) for item in hit.evidence],
+        ocr=StructuredOcrResponse.model_validate(asdict(hit.ocr)) if hit.ocr else None,
     )
 
 
@@ -88,11 +91,11 @@ def create_app() -> FastAPI:
         kis_missing = []
         if not qdrant_ready:
             kis_missing.append("qdrant")
-        if not collections["frames_sparse"]:
-            kis_missing.append("frames_sparse_current")
-        if not models["siglip2_text"]:
-            kis_missing.append("siglip2_text")
-        kis_ready = not kis_missing
+        visual_ready = bool(collections["frames_sparse"] and models["siglip2_text"])
+        lexical_ready = bool(collections["regions"] or collections["ocr"] or collections["asr"])
+        if not visual_ready and not lexical_ready:
+            kis_missing.append("search_collection")
+        kis_ready = qdrant_ready and (visual_ready or lexical_ready)
         qa_missing = [*kis_missing] + ([] if openai_ready else ["gpt4o"])
         trake_missing = [*qa_missing]
         if not collections["frames_dense"]:

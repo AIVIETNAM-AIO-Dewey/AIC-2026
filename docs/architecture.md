@@ -109,7 +109,8 @@ artifact có `keyframe_n`; dense TRAKE frame để field này `null` và giữ d
 
 - `aic26.object_regions.v1`: một record/frame, region có bbox, SAM RLE và DAM caption.
 - `aic26.scene_embeddings.v1`: JSONL metadata có `row` + NPY companion L2-normalized.
-- `aic26.ocr.v1`: raw/normalized Vietnamese, confidence và polygon theo keyframe.
+- `aic26.ocr.v2`: terminal success/empty/error, accepted/rejected text, confidence nullable
+  và polygon native-coordinate theo keyframe. `aic26.ocr.v1` chỉ còn read compatibility.
 - `aic26.asr_segments.v1`: segment timestamped tham chiếu danh sách keyframe.
 - `aic26.query.v1`: decomposition versioned cho KIS/Q&A/TRAKE.
 - `aic26.run_manifest.v1`: config, input/output hash, model revision, seed và counters.

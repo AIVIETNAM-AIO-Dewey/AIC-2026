@@ -166,12 +166,40 @@ def _text_points(artifact: ValidatedArtifact) -> Iterator[tuple[str, dict[str, A
                 }
                 yield str(region["region_id"]), payload, payload["text"]
         elif artifact.source.collection == "ocr":
+            if row.get("terminal_status", "success") != "success":
+                continue
             base = _base_payload(row, artifact.run_id, artifact.source.path)
+            lines = []
             for index, span in enumerate(row.get("texts", [])):
-                text = span.get("normalized_text") or span.get("raw_text")
-                if text:
-                    source_id = f"{row['frame_uid']}:ocr:{index}"
-                    yield source_id, {**base, "text": text, "ocr": span}, text
+                raw_text = str(span.get("raw_text", ""))
+                normalized_text = str(span.get("normalized_text") or raw_text)
+                lines.append(
+                    {
+                        "line_id": str(span.get("line_id", f"line-{index:04d}")),
+                        "raw_text": raw_text,
+                        "normalized_text": normalized_text,
+                        "confidence": span.get("confidence"),
+                        "accepted": span.get("accepted", True) is True,
+                        "polygon_xy": span.get("polygon_xy"),
+                        "polygon_clamped": span.get("polygon_clamped", False) is True,
+                        "reading_order": int(span.get("reading_order", index)),
+                    }
+                )
+            ocr_frame = {
+                "terminal_status": row.get("terminal_status", "success"),
+                "full_text": row.get("full_text")
+                or " ".join(line["normalized_text"] for line in lines if line["accepted"]),
+                "width": int(row["width"]),
+                "height": int(row["height"]),
+                "run_id": artifact.run_id,
+                "model_revisions": list(artifact.model_revisions),
+                "source_image_sha256": row.get("source_image_sha256"),
+                "lines": lines,
+            }
+            text = str(ocr_frame["full_text"])
+            if text:
+                source_id = f"{row['frame_uid']}:ocr"
+                yield source_id, {**base, "text": text, "ocr_frame": ocr_frame}, text
         elif artifact.source.collection == "asr":
             text = row.get("transcript_normalized") or row.get("transcript_raw")
             if not text:
@@ -212,7 +240,7 @@ def ingest(
     client: Any,
     artifacts: list[ArtifactFile],
     *,
-    dense_encoder: Any,
+    dense_encoder: Any | None,
     activate: bool,
 ) -> dict[str, int]:
     from qdrant_client import models
@@ -235,7 +263,11 @@ def ingest(
             }
             sparse = None
         else:
-            vectors = {"dense": models.VectorParams(size=768, distance=models.Distance.COSINE)}
+            vectors = (
+                {"dense": models.VectorParams(size=768, distance=models.Distance.COSINE)}
+                if dense_encoder is not None
+                else {}
+            )
             sparse = {"lexical": models.SparseVectorParams()}
         client.create_collection(
             collection_name=version,
@@ -260,15 +292,18 @@ def ingest(
                     )
             else:
                 for source_id, payload, text in _text_points(source):
-                    dense = dense_encoder.encode([text], query=False)[0].tolist()
                     indices, values = sparse_vector(text)
+                    vectors_by_name: dict[str, Any] = {
+                        "lexical": models.SparseVector(indices=indices, values=values)
+                    }
+                    if dense_encoder is not None:
+                        vectors_by_name["dense"] = dense_encoder.encode([text], query=False)[
+                            0
+                        ].tolist()
                     points.append(
                         models.PointStruct(
                             id=str(point_id(collection=collection, source_id=source_id)),
-                            vector={
-                                "dense": dense,
-                                "lexical": models.SparseVector(indices=indices, values=values),
-                            },
+                            vector=vectors_by_name,
                             payload=payload,
                         )
                     )

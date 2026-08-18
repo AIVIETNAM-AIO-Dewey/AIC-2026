@@ -16,6 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--e5-model-path", type=Path)
+    parser.add_argument(
+        "--lexical-only",
+        action="store_true",
+        help="Ingest text collections with sparse lexical/trigram vectors and no E5 model.",
+    )
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args(argv)
     if not args.all:
@@ -32,9 +37,13 @@ def main(argv: list[str] | None = None) -> int:
         collections = sorted({item.source.collection for item in report})
         print({"artifacts": len(report), "collections": collections})
         return 0
-    if args.e5_model_path is None:
-        parser.error("--e5-model-path is required unless --check-only is used")
-    encoder = E5OnnxEncoder.from_pretrained(model_path=args.e5_model_path)
+    if args.e5_model_path is None and not args.lexical_only:
+        parser.error("--e5-model-path or --lexical-only is required unless --check-only is used")
+    encoder = (
+        E5OnnxEncoder.from_pretrained(model_path=args.e5_model_path)
+        if args.e5_model_path is not None
+        else None
+    )
     print(
         ingest(
             QdrantClient(url=args.qdrant_url),

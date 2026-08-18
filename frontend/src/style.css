@@ -58,12 +58,33 @@ article, aside, form, .readiness {
   color: #52617a;
   text-align: center;
 }
-article img {
+.frame-preview {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
   background: #dbe4f0;
-  object-fit: cover;
 }
+.frame-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.ocr-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.ocr-polygon {
+  fill: #22d3ee24;
+  stroke: #06b6d4;
+  stroke-width: 2;
+}
+.ocr-polygon.rejected { fill: #f59e0b24; stroke: #f59e0b; }
+.ocr-details { margin-top: .4rem; color: #334155; }
+.ocr-details small { overflow-wrap: anywhere; }
 article strong, article small { display: block; margin-top: .35rem; }
 textarea { width: 90%; min-height: 5rem; }
 

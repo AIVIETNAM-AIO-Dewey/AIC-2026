@@ -37,6 +37,7 @@ class FrameRef(StrictModel):
     pts_time_s: float = Field(ge=0)
     fps: PositiveFloat
     frame_relpath: str = Field(min_length=1)
+    source_image_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     width: PositiveInt
     height: PositiveInt
 
