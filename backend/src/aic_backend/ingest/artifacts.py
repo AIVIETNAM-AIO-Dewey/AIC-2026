@@ -169,13 +169,37 @@ def _text_points(artifact: ValidatedArtifact) -> Iterator[tuple[str, dict[str, A
             if row.get("terminal_status", "success") != "success":
                 continue
             base = _base_payload(row, artifact.run_id, artifact.source.path)
+            lines = []
             for index, span in enumerate(row.get("texts", [])):
-                if span.get("accepted", True) is not True:
-                    continue
-                text = span.get("normalized_text") or span.get("raw_text")
-                if text:
-                    source_id = f"{row['frame_uid']}:ocr:{index}"
-                    yield source_id, {**base, "text": text, "ocr": span}, text
+                raw_text = str(span.get("raw_text", ""))
+                normalized_text = str(span.get("normalized_text") or raw_text)
+                lines.append(
+                    {
+                        "line_id": str(span.get("line_id", f"line-{index:04d}")),
+                        "raw_text": raw_text,
+                        "normalized_text": normalized_text,
+                        "confidence": span.get("confidence"),
+                        "accepted": span.get("accepted", True) is True,
+                        "polygon_xy": span.get("polygon_xy"),
+                        "polygon_clamped": span.get("polygon_clamped", False) is True,
+                        "reading_order": int(span.get("reading_order", index)),
+                    }
+                )
+            ocr_frame = {
+                "terminal_status": row.get("terminal_status", "success"),
+                "full_text": row.get("full_text")
+                or " ".join(line["normalized_text"] for line in lines if line["accepted"]),
+                "width": int(row["width"]),
+                "height": int(row["height"]),
+                "run_id": artifact.run_id,
+                "model_revisions": list(artifact.model_revisions),
+                "source_image_sha256": row.get("source_image_sha256"),
+                "lines": lines,
+            }
+            text = str(ocr_frame["full_text"])
+            if text:
+                source_id = f"{row['frame_uid']}:ocr"
+                yield source_id, {**base, "text": text, "ocr_frame": ocr_frame}, text
         elif artifact.source.collection == "asr":
             text = row.get("transcript_normalized") or row.get("transcript_raw")
             if not text:

@@ -21,6 +21,28 @@ class EvidenceResponse(BaseModel):
     score: float
 
 
+class OcrLineResponse(BaseModel):
+    line_id: str
+    raw_text: str
+    normalized_text: str
+    confidence: float | None
+    accepted: bool
+    polygon_xy: list[tuple[float, float]] | None
+    polygon_clamped: bool
+    reading_order: int
+
+
+class StructuredOcrResponse(BaseModel):
+    terminal_status: Literal["success", "empty", "error"]
+    full_text: str
+    width: int
+    height: int
+    run_id: str
+    model_revisions: list[str]
+    source_image_sha256: str | None
+    lines: list[OcrLineResponse]
+
+
 class FrameHitResponse(BaseModel):
     rank: int
     score: float
@@ -31,6 +53,7 @@ class FrameHitResponse(BaseModel):
     image_url: str
     modality_scores: dict[str, float]
     evidence: list[EvidenceResponse]
+    ocr: StructuredOcrResponse | None = None
 
 
 class TrakeEventResponse(BaseModel):

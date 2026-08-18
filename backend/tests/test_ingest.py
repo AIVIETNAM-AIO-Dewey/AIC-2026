@@ -94,6 +94,9 @@ def test_ocr_ingest_skips_terminal_errors_and_rejected_lines(tmp_path: Path) -> 
         "frame_idx": 24925,
         "keyframe_n": 262,
         "pts_time_s": 997.0,
+        "width": 1280,
+        "height": 720,
+        "source_image_sha256": "a" * 64,
     }
     rows = [
         {
@@ -119,6 +122,9 @@ def test_ocr_ingest_skips_terminal_errors_and_rejected_lines(tmp_path: Path) -> 
 
     assert len(points) == 1
     assert points[0][2] == "non sông liền một dải"
+    assert points[0][1]["ocr_frame"]["width"] == 1280
+    assert len(points[0][1]["ocr_frame"]["lines"]) == 2
+    assert points[0][1]["ocr_frame"]["model_revisions"] == ["fixture/model@abc123"]
 
 
 def test_legacy_asr_gets_checksummed_staging_receipt(tmp_path: Path) -> None:

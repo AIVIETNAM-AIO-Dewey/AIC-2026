@@ -1,4 +1,5 @@
 import type { FrameHit } from "../../api/client";
+import { OcrOverlay } from "./OcrOverlay";
 
 export function ResultsGrid({
   hits,
@@ -17,13 +18,25 @@ export function ResultsGrid({
         );
         return (
           <article key={`${hit.video_id}:${hit.frame_idx}`}>
-            <img src={hit.image_url} alt={`${hit.video_id} frame ${hit.frame_idx}`} />
+            <div className="frame-preview">
+              <img src={hit.image_url} alt={`${hit.video_id} frame ${hit.frame_idx}`} />
+              {hit.ocr ? <OcrOverlay ocr={hit.ocr} /> : null}
+            </div>
             <strong>
               #{hit.rank} · {hit.video_id}
             </strong>
             <small>
               frame_idx {hit.frame_idx} · {hit.pts_time_s.toFixed(2)}s
             </small>
+            {hit.ocr ? (
+              <details className="ocr-details">
+                <summary>
+                  OCR {hit.ocr.terminal_status} · {hit.ocr.lines.length} dòng
+                </summary>
+                <small>{hit.ocr.full_text || "Không có text"}</small>
+                <small>Model: {hit.ocr.model_revisions.join(", ")}</small>
+              </details>
+            ) : null}
             <small>
               {Object.entries(hit.modality_scores)
                 .map(([name, score]) => `${name}: ${score.toFixed(3)}`)

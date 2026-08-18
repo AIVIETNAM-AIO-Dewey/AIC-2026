@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -28,6 +29,7 @@ from .schemas import (
     FrameHitResponse,
     SearchRequest,
     SearchResponse,
+    StructuredOcrResponse,
     SubmissionRenderRequest,
     TrakeEventResponse,
     TrakeSequenceResponse,
@@ -45,6 +47,7 @@ def _hit(hit: SearchHit, rank: int) -> FrameHitResponse:
         image_url=f"/api/v1/frames/{hit.video_id}/{hit.frame_idx}/image",
         modality_scores=hit.modality_scores,
         evidence=[EvidenceResponse(**item.__dict__) for item in hit.evidence],
+        ocr=StructuredOcrResponse.model_validate(asdict(hit.ocr)) if hit.ocr else None,
     )
 
 

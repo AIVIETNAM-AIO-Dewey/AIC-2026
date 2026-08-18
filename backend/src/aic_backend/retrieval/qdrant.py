@@ -7,8 +7,42 @@ from pathlib import Path
 from typing import Any
 
 from ..ingest.sparse import sparse_vector
-from .models import Evidence, FrameCandidate, SearchHit
+from .fuzzy import rerank_fuzzy_candidates
+from .models import Evidence, FrameCandidate, OcrLine, SearchHit, StructuredOcr
 from .ports import RetrievalRepository
+
+
+def _structured_ocr(value: Any) -> StructuredOcr | None:
+    if not isinstance(value, dict):
+        return None
+    lines = []
+    for item in value.get("lines", []):
+        polygon = item.get("polygon_xy")
+        points = tuple((float(point[0]), float(point[1])) for point in polygon) if polygon else None
+        lines.append(
+            OcrLine(
+                line_id=str(item["line_id"]),
+                raw_text=str(item.get("raw_text", "")),
+                normalized_text=str(item.get("normalized_text", "")),
+                confidence=(
+                    float(item["confidence"]) if item.get("confidence") is not None else None
+                ),
+                accepted=bool(item.get("accepted", True)),
+                polygon_xy=points,
+                polygon_clamped=bool(item.get("polygon_clamped", False)),
+                reading_order=int(item.get("reading_order", 0)),
+            )
+        )
+    return StructuredOcr(
+        terminal_status=value["terminal_status"],
+        full_text=str(value.get("full_text", "")),
+        width=int(value["width"]),
+        height=int(value["height"]),
+        run_id=str(value["run_id"]),
+        model_revisions=tuple(str(item) for item in value.get("model_revisions", [])),
+        source_image_sha256=value.get("source_image_sha256"),
+        lines=tuple(lines),
+    )
 
 
 class QdrantRepository(RetrievalRepository):
@@ -28,6 +62,7 @@ class QdrantRepository(RetrievalRepository):
     @staticmethod
     def _candidate(point: Any, modality: str, object_slot: int | None = None) -> FrameCandidate:
         payload = point.payload or {}
+        structured = _structured_ocr(payload.get("ocr_frame"))
         return FrameCandidate(
             video_id=str(payload["video_id"]),
             frame_idx=int(payload["frame_idx"]),
@@ -37,6 +72,7 @@ class QdrantRepository(RetrievalRepository):
             modality=modality,  # type: ignore[arg-type]
             object_slot=object_slot,
             region_id=payload.get("region_id"),
+            ocr=structured,
             evidence=Evidence(
                 modality=modality,
                 text=payload.get("text"),
@@ -94,7 +130,10 @@ class QdrantRepository(RetrievalRepository):
                 with_payload=True,
             )
         points = response.points
-        return [self._candidate(point, modality, object_slot) for point in points]
+        candidates = [self._candidate(point, modality, object_slot) for point in points]
+        if lexical_text is not None and modality == "ocr":
+            return rerank_fuzzy_candidates(lexical_text, candidates, limit=limit)
+        return candidates[:limit]
 
     def search_scene(
         self,
@@ -132,15 +171,18 @@ class QdrantRepository(RetrievalRepository):
             "asr": "asr_current",
             "dense": "frames_dense_current",
         }[modality]
+        # Fetch a bounded pool for trigram/dense recall. Edit distance never scans
+        # the full collection in application memory.
+        candidate_limit = min(max(limit * 4, limit), 400) if modality == "ocr" else limit
         return self._query(
             collection,
             dense,
             modality=modality,
-            limit=limit,
+            limit=candidate_limit,
             video_id=video_id,
             object_slot=object_slot,
             lexical_text=query,
-        )
+        )[:limit]
 
     def frame_image_path(self, video_id: str, frame_idx: int) -> str | None:
         candidate = self.artifact_root / "dense_frames" / video_id / f"{frame_idx}.jpg"

@@ -9,6 +9,30 @@ Modality = Literal["scene", "object", "ocr", "asr", "dense"]
 
 
 @dataclass(frozen=True)
+class OcrLine:
+    line_id: str
+    raw_text: str
+    normalized_text: str
+    confidence: float | None
+    accepted: bool
+    polygon_xy: tuple[tuple[float, float], ...] | None
+    polygon_clamped: bool = False
+    reading_order: int = 0
+
+
+@dataclass(frozen=True)
+class StructuredOcr:
+    terminal_status: Literal["success", "empty", "error"]
+    full_text: str
+    width: int
+    height: int
+    run_id: str
+    model_revisions: tuple[str, ...]
+    source_image_sha256: str | None
+    lines: tuple[OcrLine, ...] = ()
+
+
+@dataclass(frozen=True)
 class Evidence:
     modality: Modality
     text: str | None = None
@@ -27,6 +51,7 @@ class FrameCandidate:
     evidence: Evidence | None = None
     region_id: str | None = None
     object_slot: int | None = None
+    ocr: StructuredOcr | None = None
 
     @property
     def frame_uid(self) -> str:
@@ -42,6 +67,7 @@ class SearchHit:
     score: float
     modality_scores: dict[str, float] = field(default_factory=dict)
     evidence: tuple[Evidence, ...] = ()
+    ocr: StructuredOcr | None = None
 
     @property
     def frame_uid(self) -> str:

@@ -111,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             reader=reader,
             limit=args.limit,
+            resume=args.resume,
         )
         manifest = complete_manifest(
             manifest,

@@ -31,9 +31,15 @@ def weighted_rrf(
         weight = weights.get(modality, 0.0)
         if not weight:
             continue
+        seen_in_modality: set[str] = set()
         for rank, candidate in enumerate(candidates, start=1):
             value = weight / (k + rank)
             uid = candidate.frame_uid
+            if uid in seen_in_modality:
+                if candidate.evidence:
+                    evidence_by_uid[uid].append(candidate.evidence)
+                continue
+            seen_in_modality.add(uid)
             score_by_uid[uid] += value
             modality_by_uid[uid][modality] = max(
                 modality_by_uid[uid].get(modality, 0.0), candidate.score
@@ -51,6 +57,14 @@ def weighted_rrf(
                 score=score_by_uid[uid],
                 modality_scores=modality_by_uid[uid],
                 evidence=tuple(evidence_by_uid[uid]),
+                ocr=next(
+                    (
+                        candidate.ocr
+                        for candidate in ranked.get("ocr", ())
+                        if candidate.frame_uid == uid and candidate.ocr
+                    ),
+                    None,
+                ),
             )
             for uid, sample in sample_by_uid.items()
         ),

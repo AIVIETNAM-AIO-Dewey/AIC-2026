@@ -28,6 +28,8 @@ def test_attached_mapping_shape_is_modeled_without_time_recalculation(tmp_path: 
         (3, 265, 10.6),
     ]
     assert refs[0].frame_uid == "L21_V011:0"
+    assert refs[0].source_image_sha256 is not None
+    assert len(refs[0].source_image_sha256) == 64
 
 
 def test_duplicate_mapping_keys_fail(tmp_path: Path) -> None:

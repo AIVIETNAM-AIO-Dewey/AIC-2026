@@ -108,3 +108,72 @@ def test_artifact_ingest_to_api_preserves_canonical_frame_id(tmp_path: Path) -> 
     assert response.status_code == 200
     hit = response.json()["results"][0]
     assert (hit["video_id"], hit["frame_idx"]) == ("L21_V011", 24925)
+
+
+@pytest.mark.integration
+def test_ocr_query_uses_trigram_candidates_edit_distance_and_structured_payload(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ocr" / "L21_V011.jsonl"
+    path.parent.mkdir()
+    texts = ["NON SÔNG LIỀN MỘT DẢI", "XE BUÝT TRÊN ĐƯỜNG PHỐ"]
+    rows = []
+    for offset, text in enumerate(texts):
+        rows.append(
+            {
+                "video_id": "L21_V011",
+                "frame_uid": f"L21_V011:{24925 + offset}",
+                "frame_idx": 24925 + offset,
+                "keyframe_n": 262 + offset,
+                "pts_time_s": 997.0 + offset,
+                "width": 1280,
+                "height": 720,
+                "source_image_sha256": f"{offset + 1:064x}",
+                "terminal_status": "success",
+                "full_text": text.lower(),
+                "texts": [
+                    {
+                        "line_id": "line-0000",
+                        "raw_text": text,
+                        "normalized_text": text.lower(),
+                        "confidence": 0.856,
+                        "accepted": True,
+                        "polygon_xy": [[100, 200], [600, 200], [600, 260], [100, 260]],
+                        "reading_order": 0,
+                    }
+                ],
+            }
+        )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    manifest = path.with_suffix(".manifest.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "run_id": "ppocrv6-small-fixture",
+                "counters": {"frames": 2},
+                "models": [{"model_id": "PP-OCRv6-small", "revision": "fixture"}],
+                "outputs": [{"sha256": sha256_path(path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    qdrant = QdrantClient(":memory:")
+    ingest(
+        qdrant,
+        [ArtifactFile("ocr", path, manifest)],
+        dense_encoder=DenseEncoder(),
+        activate=True,
+    )
+    repository = QdrantRepository(
+        qdrant,
+        artifact_root=tmp_path,
+        text_encoder=DenseEncoder(),
+    )
+
+    hits = repository.search_text("ocr", "non song cung mot dai", limit=2)
+
+    assert hits[0].frame_idx == 24925
+    assert hits[0].ocr is not None
+    assert hits[0].ocr.lines[0].confidence == 0.856
+    assert hits[0].ocr.model_revisions == ("PP-OCRv6-small@fixture",)

@@ -108,6 +108,8 @@ class OcrFrameRecord(FrameRef):
             raise ValueError("OCR records require an organizer keyframe_n")
         if self.width < 2 or self.height < 2:
             raise ValueError("OCR geometry requires frame dimensions of at least 2x2")
+        if self.source_image_sha256 is None:
+            raise ValueError("OCR records require the source image SHA-256")
         ids = [line.line_id for line in self.texts]
         source_orders = [line.source_order for line in self.texts]
         reading_orders = [line.reading_order for line in self.texts]
