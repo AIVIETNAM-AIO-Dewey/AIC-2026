@@ -11,7 +11,7 @@ from .models import (
     RunManifest,
     SegmentationResult,
 )
-from .ocr import OcrFrameRecord, OcrText
+from .ocr import LegacyOcrFrameRecord, OcrError, OcrFrameRecord, OcrText
 from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperator
 from .scene_embedding import SCENE_EMBEDDING_SCHEMA, SceneEmbeddingRecord
 
@@ -24,9 +24,11 @@ __all__ = [
     "CaptionResult",
     "DetectorMetadata",
     "FrameRef",
+    "LegacyOcrFrameRecord",
     "MaskRLE",
     "ObjectFrameRecord",
     "ObjectRegion",
+    "OcrError",
     "OcrFrameRecord",
     "OcrText",
     "QueryEvent",

@@ -17,6 +17,7 @@ from aic2026.contracts import (  # noqa: E402
     AsrSegmentRecord,
     AsrVideoManifest,
     FrameRef,
+    LegacyOcrFrameRecord,
     ObjectFrameRecord,
     OcrFrameRecord,
     RunManifest,
@@ -82,8 +83,13 @@ def main(argv: list[str] | None = None) -> int:
                 current_type = "asr_segments"
                 record_id = record.segment_id
                 file_segments += 1
-            elif raw.get("schema_version") == "aic26.ocr.v1":
+            elif raw.get("schema_version") == "aic26.ocr.v2":
                 record = OcrFrameRecord.model_validate(raw)
+                current_type = "ocr"
+                file_run_ids.add(record.run_id)
+                record_id = record.frame_uid
+            elif raw.get("schema_version") == "aic26.ocr.v1":
+                record = LegacyOcrFrameRecord.model_validate(raw)
                 current_type = "ocr"
                 file_run_ids.add(record.run_id)
                 record_id = record.frame_uid

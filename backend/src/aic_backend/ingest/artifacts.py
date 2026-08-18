@@ -166,8 +166,12 @@ def _text_points(artifact: ValidatedArtifact) -> Iterator[tuple[str, dict[str, A
                 }
                 yield str(region["region_id"]), payload, payload["text"]
         elif artifact.source.collection == "ocr":
+            if row.get("terminal_status", "success") != "success":
+                continue
             base = _base_payload(row, artifact.run_id, artifact.source.path)
             for index, span in enumerate(row.get("texts", [])):
+                if span.get("accepted", True) is not True:
+                    continue
                 text = span.get("normalized_text") or span.get("raw_text")
                 if text:
                     source_id = f"{row['frame_uid']}:ocr:{index}"

@@ -84,6 +84,32 @@ khi config hash/model revision/input checksum khớp.
 Smoke artifacts có `--limit` phải nằm trong output tree riêng. Full run không được
 resume từ chúng; dùng output tree mới để config hash và ETA không bị lẫn.
 
+## PP-OCRv6-small offline
+
+PP-OCRv6 không dùng Hugging Face cache và không tự tải weights. Trước khi chạy, copy
+đúng sáu file detector/recognizer vào layout sau dưới `AIC_CACHE_ROOT`:
+
+```text
+ocr/ppocrv6-small/
+  detector/{inference.json,inference.pdiparams,inference.yml}
+  recognizer/{inference.json,inference.pdiparams,inference.yml}
+```
+
+Checksum và kích thước chính xác được khóa trong
+`offline/configs/offline/ocr_ppocrv6.yaml`. Luôn chạy preflight trước:
+
+```bash
+python -m pip install -r offline/requirements/ppocrv6.txt
+python offline/scripts/run_ppocrv6.py --preflight-only \
+  --cache-root "$AIC_CACHE_ROOT"
+```
+
+Preflight phải PASS trước khi PaddleOCR được construct. Cấu hình đã duyệt hiện chỉ
+cho phép `ppocrv6-small` trên CPU; medium/GPU cần identity và acceptance riêng, không
+được tự fallback. Khi chạy full, manifest đầu vào vẫn là canonical keyframe manifest
+như các offline stage khác. Một frame lỗi chỉ tạo terminal error record và không làm
+mất identity/coverage của các frame còn lại.
+
 Description shard chỉ được đổi từ `.partial` sang final khi mọi region có caption
 `ok`. Nếu một region lỗi/OOM, sidecar ở trạng thái failed và `--resume` cắt partial
 về prefix thành công trước đó rồi retry từ frame lỗi; không xóa final artifact để

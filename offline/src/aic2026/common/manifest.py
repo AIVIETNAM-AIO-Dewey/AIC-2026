@@ -68,6 +68,9 @@ def _runtime_platform() -> dict[str, Any]:
         "pyyaml",
         "jsonschema",
         "tqdm",
+        "paddlepaddle",
+        "paddleocr",
+        "paddlex",
     ):
         try:
             report["packages"][name] = importlib.metadata.version(name)

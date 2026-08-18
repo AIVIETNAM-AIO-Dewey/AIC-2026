@@ -1,0 +1,47 @@
+schema_version: "2.0"
+run:
+  run_id: ppocrv6-small-v1
+seed: 2026
+device: cpu
+model:
+  id: ppocrv6-small
+  revision: 01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f619d06
+  source_registry_sha256: 9b221b4dd366c850e8a8bf6b4f11ca13becb921d51dddf2dcabdd41a1eaab5f7
+  configuration_sha256: 01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f619d06
+  device: cpu
+  confidence_threshold: 0.50
+  null_confidence: retain_without_imputation
+  download_allowed: false
+  fallback: false
+  ensemble: false
+  packages:
+    paddlepaddle: 3.3.1
+    paddleocr: 3.7.0
+    paddlex: 3.7.2
+  components:
+    detector:
+      model_name: PP-OCRv6_small_det
+      path: ocr/ppocrv6-small/detector
+      files:
+        - path: inference.json
+          bytes: 229307
+          sha256: 89240f689a4a77aad75ef55a8df0a15c8e1d4980a327d17e58f24bbadde5aeab
+        - path: inference.pdiparams
+          bytes: 9817888
+          sha256: 5043d4ccc8d63402ccea8feefcee4db57077431a873e78d2191836a178a492da
+        - path: inference.yml
+          bytes: 885
+          sha256: 193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516
+    recognizer:
+      model_name: PP-OCRv6_small_rec
+      path: ocr/ppocrv6-small/recognizer
+      files:
+        - path: inference.json
+          bytes: 208004
+          sha256: f0bf53c853937a917affdd74467472167727f8ab0f0f7bded01c4a16c27e46e6
+        - path: inference.pdiparams
+          bytes: 21074618
+          sha256: 406e1e689c9a7fbb04178007a3fe10cf852afe7bf8bb3bc6dbb9d532b13bd907
+        - path: inference.yml
+          bytes: 150579
+          sha256: ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1
