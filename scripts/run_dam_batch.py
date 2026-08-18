@@ -408,22 +408,32 @@ def main(argv: list[str] | None = None) -> int:
 
     remote_completed_videos: set[str] = set()
     if args.rclone_dest and not args.no_resume:
-        try:
-            res = subprocess.run(
-                ["rclone", "lsf", args.rclone_dest, "--fast-list", "--tpslimit", "5"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if res.returncode == 0:
-                for fname in res.stdout.splitlines():
-                    fname = fname.strip()
-                    if fname.endswith(".jsonl"):
-                        remote_completed_videos.add(fname[:-6])
-                if remote_completed_videos:
-                    logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
-        except Exception as exc:
-            logger.info("Remote pre-fetch skipped (will compute from scratch): %s", exc)
+        config_path = find_rclone_config()
+        lsf_cmd = ["rclone", "lsf", args.rclone_dest, "--fast-list", "--tpslimit", "5"]
+        if config_path:
+            lsf_cmd.extend(["--config", config_path])
+        for attempt in range(1, 4):
+            try:
+                res = subprocess.run(
+                    lsf_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                if res.returncode == 0:
+                    for fname in res.stdout.splitlines():
+                        fname = fname.strip()
+                        if fname.endswith(".jsonl"):
+                            remote_completed_videos.add(fname[:-6])
+                    if remote_completed_videos:
+                        logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
+                    break
+                else:
+                    logger.warning("Remote pre-fetch attempt %d/3 warning (code %d). Retrying in 5s...", attempt, res.returncode)
+                    time.sleep(5)
+            except Exception as exc:
+                logger.warning("Remote pre-fetch attempt %d/3 exception: %s. Retrying in 5s...", attempt, exc)
+                time.sleep(5)
 
     for idx, video_id in enumerate(assigned_videos, start=1):
         video_start_time = time.time()
@@ -437,7 +447,22 @@ def main(argv: list[str] | None = None) -> int:
         description_manifest = description_artifact.with_suffix(".manifest.json")
 
         # Check if already completed (Resume from local SSD or Google Drive)
-        if not args.no_resume and (video_id in remote_completed_videos or is_video_completed(description_artifact, description_manifest)):
+        is_done = video_id in remote_completed_videos or is_video_completed(description_artifact, description_manifest)
+        if not args.no_resume and not is_done and not remote_completed_videos and args.rclone_dest:
+            # Fallback direct check for this specific video if global pre-fetch was empty
+            config_path = find_rclone_config()
+            chk_cmd = ["rclone", "lsf", f"{args.rclone_dest.rstrip('/')}/{video_id}.jsonl"]
+            if config_path:
+                chk_cmd.extend(["--config", config_path])
+            try:
+                chk_res = subprocess.run(chk_cmd, capture_output=True, text=True, timeout=15)
+                if chk_res.returncode == 0 and video_id in chk_res.stdout:
+                    is_done = True
+                    remote_completed_videos.add(video_id)
+            except Exception:
+                pass
+
+        if not args.no_resume and is_done:
             logger.info("  [SKIP - ALREADY COMPLETED IN GDRIVE/LOCAL] %s", video_id)
             skipped_count += 1
             if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
