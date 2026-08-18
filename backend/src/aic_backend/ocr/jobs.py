@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
 
@@ -183,6 +183,6 @@ class OcrJobManager:
             text=True,
         )
         self._active_id = manifest_id
-        self._started_at = datetime.now(UTC).isoformat()
+        self._started_at = datetime.now(timezone.utc).isoformat()
         self._last_exit_code = None
         return self.status()
