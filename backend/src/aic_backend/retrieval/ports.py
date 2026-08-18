@@ -28,6 +28,7 @@ class RetrievalRepository(Protocol):
         limit: int,
         video_id: str | None = None,
         object_slot: int | None = None,
+        fuzzy: bool = True,
     ) -> Sequence[FrameCandidate]: ...
 
     def frame_image_path(self, video_id: str, frame_idx: int) -> str | None: ...

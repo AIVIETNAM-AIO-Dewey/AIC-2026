@@ -43,6 +43,17 @@ class StructuredOcrResponse(BaseModel):
     lines: list[OcrLineResponse]
 
 
+class OcrMatchResponse(BaseModel):
+    query: str
+    normalized_query: str
+    matched_text: str
+    lexical_score: float
+    fuzzy_similarity: float | None
+    final_score: float
+    match_type: Literal["exact", "accent_folded", "fuzzy", "trigram_candidate"]
+    fuzzy_enabled: bool
+
+
 class FrameHitResponse(BaseModel):
     rank: int
     score: float
@@ -54,6 +65,7 @@ class FrameHitResponse(BaseModel):
     modality_scores: dict[str, float]
     evidence: list[EvidenceResponse]
     ocr: StructuredOcrResponse | None = None
+    ocr_match: OcrMatchResponse | None = None
 
 
 class TrakeEventResponse(BaseModel):
@@ -79,6 +91,46 @@ class SearchResponse(BaseModel):
     answer: str | None = None
     confidence: float | None = None
     evidence_frame_uids: list[str] = Field(default_factory=list)
+
+
+class OcrSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=25, ge=1, le=100)
+    fuzzy: bool = True
+
+
+class OcrSearchResponse(BaseModel):
+    request_id: str
+    task_type: Literal["ocr"] = "ocr"
+    query: str
+    normalized_query: str
+    fuzzy_enabled: bool
+    strategies: list[str]
+    latency_ms: float
+    results: list[FrameHitResponse] = Field(default_factory=list)
+
+
+class OcrJobRunRequest(BaseModel):
+    manifest_id: str = Field(min_length=1, max_length=100)
+
+
+class OcrDatasetStatusResponse(BaseModel):
+    manifest_id: str
+    status: Literal["not_started", "running", "interrupted", "failed", "completed"]
+    total_frames: int
+    processed_frames: int
+    remaining_frames: int
+    counters: dict[str, int]
+    output_exists: bool
+
+
+class OcrJobsResponse(BaseModel):
+    enabled: bool
+    model_id: str
+    active_manifest_id: str | None
+    started_at: str | None
+    last_exit_code: int | None
+    datasets: list[OcrDatasetStatusResponse]
 
 
 class SubmissionRenderRequest(BaseModel):

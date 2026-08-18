@@ -197,6 +197,29 @@ npm run dev
 Vite proxy `/api` sang `http://localhost:8000`. Search form luôn hiển thị nhưng bị
 khóa rõ ràng cho tới khi collection/model tương ứng sẵn sàng.
 
+### OCR UI
+
+Tab **OCR** chỉ tìm trong `ocr_current`, không trộn scene/object/ASR. Accent folding và
+character trigram luôn bật; công tắc **Fuzzy OCR** bật hoặc tắt riêng bước Levenshtein
+rerank. Mỗi result hiển thị lexical score, fuzzy similarity, final score, lý do match,
+structured text và polygon native-coordinate.
+
+Panel **Process / resume OCR dataset** chỉ nhận manifest có sẵn trong
+`artifacts/frame_manifests`; browser không được truyền command hoặc filesystem path. Runner
+mặc định bị khóa. Chỉ bật trên máy operator đã provision đúng model checksum:
+
+```bash
+AIC_OCR_JOBS_ENABLED=true
+AIC_OCR_DATA_ROOT=/path/to/prepared/subset
+AIC_OCR_CACHE_ROOT=/path/to/aic-cache
+AIC_OCR_CONFIG_PATH=./offline/configs/offline/ocr_ppocrv6.yaml
+```
+
+Runner giữ semantics của CLI: một process tại một thời điểm, resume theo prefix + image
+SHA, không download/fallback/ensemble. Sau khi artifact hoàn tất, operator bấm **Index để
+tìm kiếm** để validate artifact, tạo versioned Qdrant OCR collection và chuyển alias
+`ocr_current`. API/container production nên giữ `AIC_OCR_JOBS_ENABLED=false`.
+
 ## 5. Kiểm thử
 
 ```bash

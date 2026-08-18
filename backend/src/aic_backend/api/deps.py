@@ -6,6 +6,8 @@ from functools import lru_cache
 
 from ..llm.gpt4o import GPT4oAdapter
 from ..llm.query_parser import QueryParsingService
+from ..ocr import OcrJobManager
+from ..retrieval.ocr_search import OcrSearchService
 from ..retrieval.qdrant import QdrantRepository
 from ..retrieval.search import SearchService
 from ..retrieval.trake import TrakeService
@@ -61,6 +63,15 @@ def get_gpt() -> GPT4oAdapter:
 
 def get_search_service() -> SearchService:
     return SearchService(get_repository())
+
+
+def get_ocr_search_service() -> OcrSearchService:
+    return OcrSearchService(get_repository())
+
+
+@lru_cache
+def get_ocr_job_manager() -> OcrJobManager:
+    return OcrJobManager(get_settings())
 
 
 def get_parser() -> QueryParsingService:

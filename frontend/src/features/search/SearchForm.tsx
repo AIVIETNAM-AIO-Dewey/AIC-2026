@@ -6,10 +6,20 @@ type Props = {
   onSearch: (query: string) => void;
   loading: boolean;
   capabilities: Record<TaskType, TaskCapability>;
+  fuzzy: boolean;
+  setFuzzy: (enabled: boolean) => void;
 };
 
-export function SearchForm({ task, setTask, onSearch, loading, capabilities }: Props) {
-  const activeCapability = capabilities[task];
+export function SearchForm({
+  task,
+  setTask,
+  onSearch,
+  loading,
+  capabilities,
+  fuzzy,
+  setFuzzy,
+}: Props) {
+  const activeCapability = capabilities[task] ?? { ready: false, missing: ["backend"] };
 
   return (
     <form
@@ -20,30 +30,46 @@ export function SearchForm({ task, setTask, onSearch, loading, capabilities }: P
       }}
     >
       <div role="tablist" aria-label="Loại truy vấn">
-        {(["kis", "qa", "trake"] as TaskType[]).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            role="tab"
-            aria-selected={task === mode}
-            disabled={!capabilities[mode].ready}
-            title={capabilities[mode].missing.join(", ")}
-            onClick={() => setTask(mode)}
-          >
-            {mode.toUpperCase()}
-          </button>
-        ))}
+        {(["kis", "qa", "trake", "ocr"] as TaskType[]).map((mode) => {
+          const capability = capabilities[mode] ?? { ready: false, missing: ["backend"] };
+          return (
+            <button
+              key={mode}
+              type="button"
+              role="tab"
+              aria-selected={task === mode}
+              disabled={!capability.ready}
+              title={capability.missing.join(", ")}
+              onClick={() => setTask(mode)}
+            >
+              {mode.toUpperCase()}
+            </button>
+          );
+        })}
       </div>
       <input
         name="query"
         aria-label="Vietnamese query"
-        placeholder="Nhập truy vấn tiếng Việt"
+        placeholder={task === "ocr" ? "Nhập chữ cần tìm trong frame" : "Nhập truy vấn tiếng Việt"}
         disabled={!activeCapability.ready}
         required
       />
       <button disabled={loading || !activeCapability.ready}>
         {loading ? "Đang tìm…" : "Tìm kiếm"}
       </button>
+      {task === "ocr" && (
+        <label className="fuzzy-toggle">
+          <input
+            type="checkbox"
+            checked={fuzzy}
+            onChange={(event) => setFuzzy(event.target.checked)}
+          />
+          <span>
+            <strong>Fuzzy OCR</strong>
+            <small>Levenshtein rerank cho chữ OCR sai; accent folding và trigram luôn bật.</small>
+          </span>
+        </label>
+      )}
       {!activeCapability.ready && (
         <small className="form-hint" role="status">
           {activeCapability.missing.length > 0

@@ -65,6 +65,14 @@ def weighted_rrf(
                     ),
                     None,
                 ),
+                ocr_match=next(
+                    (
+                        candidate.ocr_match
+                        for candidate in ranked.get("ocr", ())
+                        if candidate.frame_uid == uid and candidate.ocr_match
+                    ),
+                    None,
+                ),
             )
             for uid, sample in sample_by_uid.items()
         ),

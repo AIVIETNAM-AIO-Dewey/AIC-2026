@@ -22,3 +22,7 @@ class Settings(BaseSettings):
     openai_timeout_s: float = Field(default=30.0, gt=0)
     enable_image_answers: bool = True
     collection_suffix: str = "current"
+    ocr_jobs_enabled: bool = False
+    ocr_data_root: Path = Path("data/prepared")
+    ocr_cache_root: Path = Path("artifacts/models")
+    ocr_config_path: Path = Path("offline/configs/offline/ocr_ppocrv6.yaml")

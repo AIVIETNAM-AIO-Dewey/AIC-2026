@@ -6,7 +6,7 @@
 
 body { margin: 0; }
 main { max-width: 1200px; margin: auto; padding: 2rem; }
-button, input, textarea { margin: .35rem; padding: .55rem .75rem; font: inherit; }
+button, input, textarea, select { margin: .35rem; padding: .55rem .75rem; font: inherit; }
 button:disabled { cursor: not-allowed; opacity: .48; }
 
 .hero { margin-bottom: 1.5rem; }
@@ -29,6 +29,29 @@ form {
 form [role="tablist"] { grid-column: 1 / -1; }
 form input { min-width: 0; }
 .form-hint { grid-column: 1 / -1; padding: 0 .35rem; color: #9a3412; }
+.fuzzy-toggle {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: start;
+  gap: .35rem;
+  padding: .35rem;
+}
+.fuzzy-toggle input { width: 1.1rem; height: 1.1rem; }
+.fuzzy-toggle span, .fuzzy-toggle small { display: block; }
+.fuzzy-toggle small { color: #52617a; margin-top: .15rem; }
+.ocr-processing {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #cbd5e1;
+  border-radius: .65rem;
+  background: #fff;
+}
+.ocr-processing summary { cursor: pointer; font-weight: 750; }
+.ocr-job-controls { display: grid; gap: .55rem; margin-top: .8rem; }
+.ocr-job-controls label { display: grid; gap: .2rem; }
+.ocr-job-controls progress { width: 100%; }
+.operator-note { color: #9a3412; }
+.search-strategy { padding: .7rem 1rem; border-left: .3rem solid #2563eb; background: #eff6ff; }
 
 .grid {
   display: grid;
@@ -85,6 +108,16 @@ article, aside, form, .readiness {
 .ocr-polygon.rejected { fill: #f59e0b24; stroke: #f59e0b; }
 .ocr-details { margin-top: .4rem; color: #334155; }
 .ocr-details small { overflow-wrap: anywhere; }
+.ocr-match {
+  margin-top: .6rem;
+  padding: .6rem;
+  border-left: .25rem solid #6366f1;
+  border-radius: .35rem;
+  background: #eef2ff;
+}
+.ocr-match[data-match="exact"] { border-color: #16a34a; background: #f0fdf4; }
+.ocr-match[data-match="accent_folded"] { border-color: #0891b2; background: #ecfeff; }
+.ocr-match[data-match="fuzzy"] { border-color: #d97706; background: #fffbeb; }
 article strong, article small { display: block; margin-top: .35rem; }
 textarea { width: 90%; min-height: 5rem; }
 

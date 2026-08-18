@@ -37,6 +37,25 @@ export function ResultsGrid({
                 <small>Model: {hit.ocr.model_revisions.join(", ")}</small>
               </details>
             ) : null}
+            {hit.ocr_match ? (
+              <div className="ocr-match" data-match={hit.ocr_match.match_type}>
+                <strong>{hit.ocr_match.match_type.replace("_", " ")}</strong>
+                <small>Lexical: {hit.ocr_match.lexical_score.toFixed(3)}</small>
+                <small>
+                  Levenshtein: {hit.ocr_match.fuzzy_similarity === null ? "tắt" : hit.ocr_match.fuzzy_similarity.toFixed(3)}
+                </small>
+                <small>Final: {hit.ocr_match.final_score.toFixed(3)}</small>
+                <small>
+                  Lý do: {hit.ocr_match.match_type === "exact"
+                    ? "cụm chữ khớp trực tiếp"
+                    : hit.ocr_match.match_type === "accent_folded"
+                      ? "khớp sau khi bỏ dấu"
+                      : hit.ocr_match.match_type === "fuzzy"
+                        ? "lỗi OCR gần truy vấn theo edit distance"
+                        : "ứng viên gần theo character trigram"}
+                </small>
+              </div>
+            ) : null}
             <small>
               {Object.entries(hit.modality_scores)
                 .map(([name, score]) => `${name}: ${score.toFixed(3)}`)
