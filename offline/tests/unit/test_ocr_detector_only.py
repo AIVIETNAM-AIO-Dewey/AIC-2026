@@ -64,6 +64,7 @@ def detector_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
             "revision": DETECTOR_REVISION,
             "source_registry_sha256": detector_only.PINNED_SOURCE_REGISTRY_SHA256,
             "device": "cpu",
+            "enable_mkldnn": False,
             "download_allowed": False,
             "fallback": False,
             "ensemble": False,
@@ -126,6 +127,7 @@ def test_detector_constructs_without_recognizer_and_parses_pinned_output(
         "model_name": "PP-OCRv6_small_det",
         "model_dir": detector.verification["model_path"],
         "device": "cpu",
+        "enable_mkldnn": False,
     }
     assert Path(kwargs_seen["model_dir"]).is_relative_to(tmp_path / "ocr" / "model-snapshots")
     assert detector.verification["model_snapshot_verified"] is True

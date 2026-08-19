@@ -33,7 +33,7 @@ DETECTOR_REVISION = "01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f6
 PINNED_SOURCE_REGISTRY_SHA256 = "9b221b4dd366c850e8a8bf6b4f11ca13becb921d51dddf2dcabdd41a1eaab5f7"
 # Hash of the exact ``model`` mapping in configs/offline/ocr_phase1.yaml.
 PINNED_DETECTOR_PORT_CONFIG_SHA256 = (
-    "d142f698e77808093e82c133837ec0e37f33b123dc037de21f5dfc9c252b87b1"
+    "577d38c2e6b6ea373f32a10b1ce90ef33db3b609b672a32cd7825b734c8ab535"
 )
 DETECTOR_TREE_SHA256 = "5ee508811bc9f799f68d83fafa7a60ee0f94e0ee5415c07d328895b6b41340bd"
 RUNTIME_IDENTITY_SHA256 = "c89e9fcf8a6c1065f4cbd9ea20e06646130db601663a232eb6bfda58390a0723"
@@ -167,6 +167,7 @@ def identity_from_locked_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "revision": DETECTOR_REVISION,
         "source_registry_sha256": PINNED_SOURCE_REGISTRY_SHA256,
         "device": "cpu",
+        "enable_mkldnn": False,
         "download_allowed": False,
         "fallback": False,
         "ensemble": False,
@@ -608,6 +609,7 @@ class PaddleOcrV6Detector:
             "model_name": DETECTOR_ID,
             "model_dir": verification["model_path"],
             "device": model["device"],
+            "enable_mkldnn": model["enable_mkldnn"],
         }
         try:
             with network_forbidden():

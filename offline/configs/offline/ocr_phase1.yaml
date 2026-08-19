@@ -9,6 +9,7 @@ model:
   revision: 01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f619d06
   source_registry_sha256: 9b221b4dd366c850e8a8bf6b4f11ca13becb921d51dddf2dcabdd41a1eaab5f7
   device: cpu
+  enable_mkldnn: false
   download_allowed: false
   fallback: false
   ensemble: false
