@@ -194,7 +194,6 @@ def test_ocr_query_supports_sparse_only_ingest_without_e5(tmp_path: Path) -> Non
         "source_image_sha256": "a" * 64,
         "terminal_status": "success",
         "full_text": "non sông liền một dải",
-        "texts": [],
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     manifest = path.with_suffix(".manifest.json")

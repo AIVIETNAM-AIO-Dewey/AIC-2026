@@ -1,8 +1,10 @@
-"""Pinned, offline-only PP-OCRv6-small adapter.
+"""Pinned, local-only PP-OCRv6-small adapter.
 
 Model packages and every local detector/recognizer file are verified before
-PaddleOCR is imported or constructed. Constructor and inference run with
-socket access disabled; there is no download, fallback, retry, or ensemble.
+PaddleOCR is imported or constructed. Constructor and inference use a Python
+best-effort socket guard; production jobs must additionally disable Internet
+at the execution-environment level. There is no download, fallback, retry, or
+ensemble.
 """
 
 from __future__ import annotations
@@ -74,7 +76,11 @@ def installed_package_versions() -> dict[str, str]:
 
 @contextmanager
 def network_forbidden() -> Iterator[None]:
-    """Temporarily reject socket connections in this process."""
+    """Best-effort guard for Python sockets created while this context is active.
+
+    This cannot constrain pre-existing sockets, native code, or subprocesses;
+    production isolation must disable Internet outside the Python process.
+    """
 
     def denied(*_args: Any, **_kwargs: Any) -> Any:
         raise PaddleOcrV6Error("network access is forbidden during PP-OCRv6 execution")
@@ -88,6 +94,12 @@ def network_forbidden() -> Iterator[None]:
                 denied()
 
             def connect_ex(self, *_args: Any, **_kwargs: Any) -> int:
+                denied()
+
+            def sendto(self, *_args: Any, **_kwargs: Any) -> int:
+                denied()
+
+            def sendmsg(self, *_args: Any, **_kwargs: Any) -> int:
                 denied()
 
         socket.socket = BlockedSocket  # type: ignore[assignment,misc]

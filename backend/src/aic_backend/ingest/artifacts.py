@@ -14,7 +14,7 @@ import numpy as np
 from aic2026.common.io import atomic_write_json, sha256_path
 
 from .ids import point_id
-from .sparse import sparse_vector
+from .sparse import fold_vietnamese, sparse_vector
 
 
 @dataclass(frozen=True)
@@ -131,11 +131,57 @@ def discover_artifacts(root: Path) -> list[ArtifactFile]:
         directory = root / dirname
         if not directory.exists():
             continue
-        for path in sorted(directory.glob("*.jsonl")):
+        paths = (
+            _discover_ocr_paths(directory)
+            if collection == "ocr"
+            else sorted(directory.glob("*.jsonl"))
+        )
+        for path in paths:
             manifest = path.with_suffix(".manifest.json")
             if manifest.exists():
                 found.append(ArtifactFile(collection, path, manifest))
     return found
+
+
+def _discover_ocr_paths(directory: Path) -> list[Path]:
+    """Discover legacy and exactly one-level run-versioned OCR artifacts."""
+
+    root = directory.resolve()
+    discovered: list[Path] = []
+    resolved_paths: set[Path] = set()
+    logical_keys: set[tuple[str, str]] = set()
+    for path in sorted(directory.rglob("*.jsonl")):
+        relative = path.relative_to(directory)
+        if len(relative.parts) not in {1, 2}:
+            raise ValueError(f"Unsafe OCR artifact layout: {path}")
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"OCR artifact escapes artifact root: {path}") from error
+        if resolved in resolved_paths:
+            raise ValueError(f"Duplicate OCR artifact path: {path}")
+        manifest = path.with_suffix(".manifest.json")
+        if not manifest.is_file():
+            raise ValueError(f"OCR artifact manifest is missing: {path}")
+        manifest_resolved = manifest.resolve()
+        try:
+            manifest_resolved.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"OCR manifest escapes artifact root: {manifest}") from error
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(f"OCR manifest run_id is missing: {manifest}")
+        if len(relative.parts) == 2 and relative.parts[0] != run_id:
+            raise ValueError(f"OCR artifact directory differs from manifest run_id: {path}")
+        logical_key = (run_id, path.name)
+        if logical_key in logical_keys:
+            raise ValueError(f"Duplicate OCR artifact identity: {run_id}/{path.name}")
+        resolved_paths.add(resolved)
+        logical_keys.add(logical_key)
+        discovered.append(path)
+    return discovered
 
 
 def _base_payload(row: dict[str, Any], run_id: str, source: Path) -> dict[str, Any]:
@@ -169,13 +215,22 @@ def _text_points(artifact: ValidatedArtifact) -> Iterator[tuple[str, dict[str, A
             if row.get("terminal_status", "success") != "success":
                 continue
             base = _base_payload(row, artifact.run_id, artifact.source.path)
+            has_structured_texts = "texts" in row
+            raw_spans = row.get("texts", [])
+            if not isinstance(raw_spans, list):
+                raise ValueError("OCR texts must be a list when present")
             lines = []
-            for index, span in enumerate(row.get("texts", [])):
+            line_ids: set[str] = set()
+            for index, span in enumerate(raw_spans):
+                line_id = str(span.get("line_id", f"line-{index:04d}"))
+                if line_id in line_ids:
+                    raise ValueError(f"duplicate OCR line_id within frame: {line_id}")
+                line_ids.add(line_id)
                 raw_text = str(span.get("raw_text", ""))
                 normalized_text = str(span.get("normalized_text") or raw_text)
                 lines.append(
                     {
-                        "line_id": str(span.get("line_id", f"line-{index:04d}")),
+                        "line_id": line_id,
                         "raw_text": raw_text,
                         "normalized_text": normalized_text,
                         "confidence": span.get("confidence"),
@@ -196,10 +251,36 @@ def _text_points(artifact: ValidatedArtifact) -> Iterator[tuple[str, dict[str, A
                 "source_image_sha256": row.get("source_image_sha256"),
                 "lines": lines,
             }
-            text = str(ocr_frame["full_text"])
-            if text:
-                source_id = f"{row['frame_uid']}:ocr"
-                yield source_id, {**base, "text": text, "ocr_frame": ocr_frame}, text
+            # Index accepted lines independently so geometry/confidence remain useful
+            # retrieval evidence. Search services deduplicate the resulting candidates
+            # by frame_uid, while the full frame payload remains available for overlays.
+            indexed_lines = 0
+            for line in lines:
+                text = str(line["normalized_text"])
+                if not line["accepted"] or not text:
+                    continue
+                source_id = f"{row['frame_uid']}:ocr:{line['line_id']}"
+                payload = {
+                    **base,
+                    "text": text,
+                    "folded_text": fold_vietnamese(text),
+                    "ocr_line": line,
+                    "ocr_frame": ocr_frame,
+                }
+                indexed_lines += 1
+                yield source_id, payload, text
+            # Read-only compatibility for v1/preview artifacts that published only
+            # frame-level full_text. New v2 artifacts always take the line path above.
+            if not has_structured_texts and indexed_lines == 0 and ocr_frame["full_text"]:
+                text = str(ocr_frame["full_text"])
+                source_id = f"{row['frame_uid']}:ocr:legacy-frame"
+                payload = {
+                    **base,
+                    "text": text,
+                    "folded_text": fold_vietnamese(text),
+                    "ocr_frame": ocr_frame,
+                }
+                yield source_id, payload, text
         elif artifact.source.collection == "asr":
             text = row.get("transcript_normalized") or row.get("transcript_raw")
             if not text:

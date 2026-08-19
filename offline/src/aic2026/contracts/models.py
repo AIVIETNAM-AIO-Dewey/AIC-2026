@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import math
-import re
 from datetime import datetime
-from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import (
@@ -17,6 +15,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from .paths import require_safe_relative_path
 
 
 class StrictModel(BaseModel):
@@ -46,15 +46,7 @@ class FrameRef(StrictModel):
         expected = f"{self.video_id}:{self.frame_idx}"
         if self.frame_uid != expected:
             raise ValueError(f"frame_uid must equal {expected!r}")
-        normalized_path = self.frame_relpath.replace("\\", "/")
-        if (
-            normalized_path.startswith("/")
-            or re.match(r"^[A-Za-z]:/", normalized_path)
-            or ".." in PurePosixPath(normalized_path).parts
-        ):
-            raise ValueError(
-                "frame_relpath must be relative, never a machine-specific absolute path"
-            )
+        require_safe_relative_path(self.frame_relpath, field_name="frame_relpath")
         return self
 
 

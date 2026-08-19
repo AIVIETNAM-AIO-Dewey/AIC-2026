@@ -148,9 +148,11 @@ python offline/scripts/run_ppocrv6.py \
 ```
 
 Expected model layout and every file checksum are pinned in
-[`ocr_ppocrv6.yaml`](offline/configs/offline/ocr_ppocrv6.yaml). The adapter forbids
-network access during construction and inference and does not download, fallback, retry,
-or ensemble. Each selected frame produces exactly one `success`, `empty`, or `error`
+[`ocr_ppocrv6.yaml`](offline/configs/offline/ocr_ppocrv6.yaml). The adapter uses a
+best-effort Python socket guard during construction and inference; it is not a network
+sandbox and cannot constrain native code, subprocesses, or sockets opened beforehand.
+Production/Kaggle execution must disable Internet at the environment level. The adapter
+does not download, fallback, retry, or ensemble. Each selected frame produces exactly one `success`, `empty`, or `error`
 record. `polygon_xy` always uses native image coordinates; normalized coordinates are a
 derived field. The old EasyOCR runner remains available only for compatibility.
 

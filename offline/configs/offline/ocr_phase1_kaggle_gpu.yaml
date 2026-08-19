@@ -1,0 +1,12 @@
+schema_version: "aic26.ocr_phase1.kaggle_gpu_profile.v1"
+status: blocked_unverified_runtime
+device: gpu
+detector_model_root: /kaggle/input/aic2026-ocr-models
+paddlex_runtime_cache_root: /kaggle/working/aic2026-paddlex-cache
+internet_policy: execution_environment_internet_disabled
+verified_packages: null
+runtime_identity_sha256: null
+blockers:
+  - Paddle GPU wheel has not been verified against the target Kaggle CUDA/cuDNN image.
+  - PaddleOCR/PaddleX/OpenCV GPU pilot has not produced a signed-off runtime identity.
+  - This profile is documentation-only and cannot be passed to the Phase 1 runner.
