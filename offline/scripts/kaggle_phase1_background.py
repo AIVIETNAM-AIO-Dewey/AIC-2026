@@ -30,7 +30,7 @@ PADDLE_INSTALL_TIMEOUT_SECONDS = 20 * 60
 ENV_COPY_TIMEOUT_SECONDS = 15 * 60
 GPU_PROBE_TIMEOUT_SECONDS = 120
 SMOKE_TIMEOUT_SECONDS = 10 * 60
-MANIFEST_TIMEOUT_SECONDS = 20 * 60
+MANIFEST_TIMEOUT_SECONDS = 90 * 60
 PLANNER_TIMEOUT_SECONDS = 5 * 60
 MAX_WORKER_FAILURES = 2
 RUN_ID = "ppocrv6-small-det-gpt4o-mini-high-v1-phase1"
@@ -148,9 +148,7 @@ def probe_environment() -> None:
 
 def restore_environment() -> bool:
     candidates = [
-        item
-        for item in find_input_directories(ENV_ROOT.name)
-        if environment_marker_matches(item)
+        item for item in find_input_directories(ENV_ROOT.name) if environment_marker_matches(item)
     ]
     if not candidates:
         return False
@@ -356,13 +354,18 @@ def setup_environment() -> None:
 def build_manifest() -> None:
     if MANIFEST.is_file() and sum(1 for _ in MANIFEST.open("rb")) == EXPECTED_FRAMES:
         return
+    map_directories = find_input_directories("map-keyframes", maximum_depth=8)
+    if not map_directories:
+        raise FileNotFoundError("no mounted map-keyframes directory was found")
     helper = WORK_ROOT / "build_source_manifest.py"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(
         textwrap.dedent(
             f"""
+            import os
             import re
             import sys
+            from concurrent.futures import ThreadPoolExecutor
             from pathlib import Path
 
             repo = Path({str(REPO)!r})
@@ -373,9 +376,10 @@ def build_manifest() -> None:
 
             root = Path("/kaggle/input").resolve()
             output = Path({str(MANIFEST)!r})
+            map_directories = [Path(value) for value in {list(map(str, map_directories))!r}]
             video_re = re.compile(r"^[A-Za-z0-9]+_V[0-9]+$")
             candidates = {{}}
-            for map_dir in root.rglob("map-keyframes"):
+            for map_dir in map_directories:
                 if not map_dir.is_dir():
                     continue
                 for map_csv in map_dir.glob("*.csv"):
@@ -387,7 +391,7 @@ def build_manifest() -> None:
             if len(candidates) != {EXPECTED_VIDEOS}:
                 raise SystemExit(f"expected {EXPECTED_VIDEOS} videos, found {{len(candidates)}}")
 
-            records = []
+            choices_by_video = []
             for video_id in sorted(candidates, key=natural_key):
                 choices = sorted(
                     candidates[video_id],
@@ -397,15 +401,23 @@ def build_manifest() -> None:
                     ),
                 )
                 map_csv, frames = choices[0]
-                records.extend(
-                    build_frame_refs(
-                        video_id=video_id,
-                        map_csv=map_csv,
-                        frames_dir=frames,
-                        data_root=root,
-                    )
+                choices_by_video.append((video_id, map_csv, frames))
+
+            def build_one(choice):
+                video_id, map_csv, frames = choice
+                return video_id, build_frame_refs(
+                    video_id=video_id,
+                    map_csv=map_csv,
+                    frames_dir=frames,
+                    data_root=root,
                 )
-                print(f"manifest {{video_id}}: {{len(records)}}", flush=True)
+
+            records = []
+            worker_count = min(8, max(2, (os.cpu_count() or 2) * 2))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for video_id, video_records in executor.map(build_one, choices_by_video):
+                    records.extend(video_records)
+                    print(f"manifest {{video_id}}: {{len(records)}}", flush=True)
             records.sort(key=lambda item: (natural_key(item.video_id), item.frame_idx))
             if len(records) != {EXPECTED_FRAMES}:
                 raise SystemExit(
@@ -721,9 +733,7 @@ def publish_checkpoint(shard: Path) -> None:
         log(f"checkpoint failed for {shard_id}: {error}")
 
 
-def run_workers(
-    shards: list[Path], started: float, prior_checkpoints: dict[str, Path]
-) -> None:
+def run_workers(shards: list[Path], started: float, prior_checkpoints: dict[str, Path]) -> None:
     pending = [item for item in shards if not completed(item.name.removesuffix(".frames.jsonl"))]
     status: dict[str, object] = {"source_commit": SOURCE_COMMIT, "total_shards": len(shards)}
     failures: dict[str, int] = {}
@@ -736,9 +746,7 @@ def run_workers(
                 WORK_ROOT / "phase1" / RUN_ID / shard_id / "detections.jsonl.receipt.json"
             )
             resume_from = None if detection_receipt.is_file() else prior_checkpoints.get(shard_id)
-            shard_id, command, log_path = command_for(
-                shard, gpu, resume_from=resume_from
-            )
+            shard_id, command, log_path = command_for(shard, gpu, resume_from=resume_from)
             handle = log_path.open("ab", buffering=0)
             process = subprocess.Popen(
                 command,
