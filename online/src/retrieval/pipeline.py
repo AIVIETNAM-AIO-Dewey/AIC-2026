@@ -38,6 +38,10 @@ class VideoRetrievalEngine:
         self.models = models or ModelRegistry()
 
         # Initialize Sub-Components
+        from online.src.index.qdrant_indexer import QdrantIndexer
+        indexer = QdrantIndexer(client=self.client, models=self.models)
+        indexer.init_collections(force_recreate=False)
+
         self.parser = QueryParser()
         self.stage1 = Stage1Funnel(client=self.client, models=self.models)
         self.stage2 = Stage2Reranker(models=self.models, keyframes_root=self.keyframes_root)

@@ -75,19 +75,27 @@ def search_endpoint(req: SearchRequest):
     return engine.search(query=req.parsed_query, top_k=req.top_k)
 
 
-# Keyframe image serving with safe fallback
+# Keyframe image serving with robust fallback
 @app.get("/keyframes/{video_id}/{filename}")
 def get_keyframe_image(video_id: str, filename: str):
+    # Direct match
     img_path = KEYFRAMES_ROOT / video_id / filename
     if img_path.exists():
         return FileResponse(img_path)
 
-    # Alternate filename check (001.jpg vs 1.jpg)
+    # Alternate formatting (001.jpg, 01.jpg, 1.jpg, 0001.jpg)
     try:
-        n = int(filename.split(".")[0])
-        alt_path = KEYFRAMES_ROOT / video_id / f"{n}.jpg"
-        if alt_path.exists():
-            return FileResponse(alt_path)
+        stem = filename.split(".")[0]
+        n = int(stem)
+        candidates = [
+            KEYFRAMES_ROOT / video_id / f"{n:03d}.jpg",
+            KEYFRAMES_ROOT / video_id / f"{n:04d}.jpg",
+            KEYFRAMES_ROOT / video_id / f"{n}.jpg",
+            KEYFRAMES_ROOT / video_id / f"{n:02d}.jpg",
+        ]
+        for c in candidates:
+            if c.exists():
+                return FileResponse(c)
     except Exception:
         pass
 

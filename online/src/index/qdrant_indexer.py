@@ -31,10 +31,11 @@ class QdrantIndexer:
         self,
         qdrant_db_path: str = "/Users/khoale/Downloads/AIC_HCM/qdrant_db",
         models: Optional[ModelRegistry] = None,
+        client: Optional[QdrantClient] = None,
     ) -> None:
         self.qdrant_db_path = Path(qdrant_db_path)
         self.qdrant_db_path.mkdir(parents=True, exist_ok=True)
-        self.client = QdrantClient(path=str(self.qdrant_db_path))
+        self.client = client or QdrantClient(path=str(self.qdrant_db_path))
         self.models = models or ModelRegistry()
         logger.info(f"Connected to embedded Qdrant at: {self.qdrant_db_path}")
 
