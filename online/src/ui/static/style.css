@@ -325,6 +325,78 @@ body {
   border-color: var(--border-active);
 }
 
+/* TRAKE Timeline Events */
+.trake-timeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px dashed rgba(0, 242, 254, 0.3);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+
+.timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timeline-header h4 {
+  font-size: 0.85rem;
+  color: #00F2FE;
+  font-weight: 600;
+  margin: 0;
+}
+
+.timeline-events-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.trake-event-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.trake-event-chip:hover {
+  border-color: var(--border-active);
+  background: rgba(0, 242, 254, 0.03);
+}
+
+.chip-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  padding: 2px 8px;
+  background: var(--primary-gradient);
+  color: #050B14;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 6px;
+}
+
+.chip-desc {
+  font-size: 0.8rem;
+  color: #E2E8F0;
+  line-height: 1.3;
+}
+
+.chip-meta {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 4px;
+}
+
 /* Weights Control */
 .weights-control {
   display: grid;

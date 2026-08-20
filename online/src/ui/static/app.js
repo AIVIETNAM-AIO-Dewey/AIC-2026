@@ -130,6 +130,27 @@ function populateInspector(parsed) {
   valDam.innerText = `${sliderDam.value}%`;
   valAsr.innerText = `${sliderAsr.value}%`;
   valOcr.innerText = `${sliderOcr.value}%`;
+
+  // Render TRAKE timeline events if present
+  const trakeContainer = document.getElementById("trakeTimelineContainer");
+  const trakeGrid = document.getElementById("timelineEventsGrid");
+  if (trakeContainer && trakeGrid) {
+    if (parsed.trake_events && parsed.trake_events.length > 0) {
+      trakeGrid.innerHTML = parsed.trake_events.map(ev => `
+        <div class="trake-event-chip">
+          <span class="chip-badge">Event E${ev.order}</span>
+          <div class="chip-desc"><strong>VN:</strong> ${ev.description}</div>
+          <div class="chip-meta">
+            <div>🎬 <em>${ev.scene_en}</em></div>
+            <div>🔍 [${(ev.objects_en || []).join(", ")}]</div>
+          </div>
+        </div>
+      `).join("");
+      trakeContainer.style.display = "flex";
+    } else {
+      trakeContainer.style.display = "none";
+    }
+  }
 }
 
 function collectInspectorPayload() {

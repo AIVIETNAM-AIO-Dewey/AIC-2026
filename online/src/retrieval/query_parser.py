@@ -61,14 +61,19 @@ class QueryParser:
         from google.genai import types
 
         system_instruction = (
-            "You are an expert query parser for a High-Speed Video Retrieval Search Engine.\n"
+            "You are an expert query parser for a High-Speed Multimodal Video Retrieval Search Engine.\n"
             "Given a user query (in Vietnamese, English, or Vietlish), decompose it into a clean structured JSON object:\n"
             "1. 'global_scene_en': High-level background, lighting, camera angle, setting (in English for SigLIP).\n"
-            "2. 'objects_en': List of specific visual objects, people, clothing, vehicles, accessories (in English for DAM).\n"
-            "3. 'ocr_keywords': Exact on-screen text, brand logos, numbers, license plates (original text).\n"
+            "2. 'objects_en': List of specific visual objects, people, clothing, vehicles, ingredients, accessories (in English for DAM).\n"
+            "3. 'ocr_keywords': Exact on-screen text, brand logos, numbers, subtitles (original text).\n"
             "4. 'speech_vi': Spoken dialogue, voiceover topic, interview quotes (in Vietnamese for ASR).\n"
-            "5. 'is_temporal_trake': Boolean, true if the query describes a chronological sequence of events (First A, then B, after that C).\n"
-            "6. 'trake_events': List of sequential sub-events if is_temporal_trake is true.\n"
+            "5. 'is_temporal_trake': Boolean, true if the query describes a chronological sequence of events (e.g., E1, E2, E3, E4 or First A, then B, after that C).\n"
+            "6. 'trake_events': If is_temporal_trake is true or task_type is TRAKE, a list of sequential event objects. For EACH event, produce:\n"
+            "   - 'order': Integer sequence number (1, 2, 3, ...)\n"
+            "   - 'description': Original Vietnamese text of this specific sub-event\n"
+            "   - 'scene_en': Visual setting and background in English for SigLIP\n"
+            "   - 'objects_en': Key objects, tools, ingredients, actions in English for DAM\n"
+            "   - 'speech_vi': Spoken words if any\n"
             "7. 'vqa_question': If task_type is VQA, summarize the exact question being asked."
         )
 
@@ -96,7 +101,7 @@ class QueryParser:
             if isinstance(ev, dict):
                 trake_events.append(
                     TRAKEEvent(
-                        event_index=idx,
+                        order=ev.get("order", idx),
                         description=ev.get("description", ""),
                         scene_en=ev.get("scene_en", ""),
                         objects_en=ev.get("objects_en", []),
@@ -119,18 +124,18 @@ class QueryParser:
             task_type=task_type,
             language="vi" if re.search(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", query_text, re.I) else "en",
             original_query=query_text,
-            global_scene_en=data.get("global_scene_en", query_text),
-            objects_en=data.get("objects_en", [query_text]),
-            ocr_keywords=data.get("ocr_keywords", []),
-            speech_vi=data.get("speech_vi", ""),
+            global_scene_en=data.get("global_scene_en") or query_text,
+            objects_en=data.get("objects_en") or [query_text],
+            ocr_keywords=data.get("ocr_keywords") or [],
+            speech_vi=data.get("speech_vi") or "",
             is_temporal_trake=bool(data.get("is_temporal_trake", task_type == "TRAKE")),
             trake_events=trake_events,
-            vqa_question=data.get("vqa_question", query_text if task_type == "VQA" else ""),
+            vqa_question=data.get("vqa_question") or (query_text if task_type == "VQA" else ""),
             weights=weights,
         )
 
     def _parse_local(self, query_text: str, task_type: TaskType) -> ParsedQuery:
-        """Fast offline rule-based parser."""
+        """Fast offline rule-based parser with E1-E4 and sequential splitting."""
         is_vi = bool(re.search(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", query_text, re.I))
         
         # 1. Extract text in quotes for OCR
@@ -151,22 +156,38 @@ class QueryParser:
         if not objects:
             objects = [query_text]
 
-        # 4. Check for TRAKE sequence prepositions
-        is_trake = task_type == "TRAKE" or bool(re.search(r"đầu tiên|sau đó|tiếp theo|sau đấy|first|then|after that", query_text, re.I))
+        # 4. Check for TRAKE sequence (E1: ... E2: ... or chronological keywords)
+        is_trake = task_type == "TRAKE" or bool(re.search(r"E\d+:|đầu tiên|sau đó|tiếp theo|sau đấy|first|then|after that", query_text, re.I))
         trake_events = []
         if is_trake:
-            steps = re.split(r"sau đó|tiếp theo|sau đấy|then|after that", query_text, flags=re.I)
-            for idx, step in enumerate(steps, 1):
-                clean_step = step.strip()
-                if clean_step:
-                    trake_events.append(
-                        TRAKEEvent(
-                            event_index=idx,
-                            description=clean_step,
-                            scene_en=clean_step,
-                            objects_en=[clean_step],
+            # Check for E1: E2: format
+            e_matches = re.findall(r"(?:E(\d+):|\b(\d+)\.\s*)(.*?)(?=(?:E\d+:|\b\d+\.\s*|$))", query_text, re.DOTALL | re.I)
+            if e_matches:
+                for idx_str1, idx_str2, content in e_matches:
+                    order = int(idx_str1 or idx_str2 or len(trake_events) + 1)
+                    clean = content.strip().strip(".")
+                    if clean:
+                        trake_events.append(
+                            TRAKEEvent(
+                                order=order,
+                                description=clean,
+                                scene_en=clean,
+                                objects_en=[clean],
+                            )
                         )
-                    )
+            else:
+                steps = re.split(r"sau đó|tiếp theo|sau đấy|then|after that", query_text, flags=re.I)
+                for idx, step in enumerate(steps, 1):
+                    clean_step = step.strip()
+                    if clean_step:
+                        trake_events.append(
+                            TRAKEEvent(
+                                order=idx,
+                                description=clean_step,
+                                scene_en=clean_step,
+                                objects_en=[clean_step],
+                            )
+                        )
 
         weights = {"vis": 0.45, "dam": 0.40, "asr": 0.15, "ocr": 0.0}
 

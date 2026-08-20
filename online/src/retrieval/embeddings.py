@@ -161,7 +161,7 @@ class ModelRegistry:
     def warmup(self) -> None:
         """Pre-load all model weights into device memory for zero-latency first query."""
         logger.info(f"⚡ Pre-warming models on {self.device}...")
-        self.encode_bge_m3_text(["warmup test"])
+        self.encode_bge_m3(["warmup test"])
         self.encode_siglip_text(["warmup test"])
         self.rerank_pairs([("query", "document")])
         logger.info("✅ All models loaded and warmed up in GPU memory!")
