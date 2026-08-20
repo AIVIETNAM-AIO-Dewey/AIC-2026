@@ -120,7 +120,14 @@ def build_frame_refs(
     data_root: Path,
     limit: int | None = None,
     drop_duplicate_frame_idx: bool = True,
+    validate_source_images: bool = True,
 ) -> list[FrameRef]:
+    """Build frame refs, optionally deferring source decode/hash to the consumer.
+
+    The deferred mode still reads each image header for authoritative dimensions,
+    but does not verify or hash the complete image payload.
+    """
+
     rows = read_frame_map(map_csv, drop_duplicate_frame_idx=drop_duplicate_frame_idx)
     indexed = _index_frames(frames_dir)
     # Deliberately discarded keyframes still have an image on disk, so they must
@@ -151,7 +158,8 @@ def build_frame_refs(
             raise ValueError(f"Frame is outside data root: {resolved}") from error
         with Image.open(resolved) as image:
             width, height = image.size
-            image.verify()
+            if validate_source_images:
+                image.verify()
         refs.append(
             FrameRef(
                 video_id=video_id,
@@ -161,7 +169,7 @@ def build_frame_refs(
                 pts_time_s=row.pts_time_s,
                 fps=row.fps,
                 frame_relpath=relative,
-                source_image_sha256=sha256_file(resolved),
+                source_image_sha256=(sha256_file(resolved) if validate_source_images else None),
                 width=width,
                 height=height,
             )

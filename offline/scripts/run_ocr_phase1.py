@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"detect", "run"}:
         frame_manifest = _required(args.frame_manifest, "--frame-manifest")
         data_root = _required(args.data_root, "--data-root")
-        # Source files and detector identity are both validated before construction.
+        # Validate manifest structure now; each source is decoded and bound when used.
         frames = load_frame_manifest(frame_manifest, data_root)
         detections = paths["detections"]
         detect_resume = _resume_existing_stage(args.resume, detections)
@@ -302,7 +302,6 @@ def main(argv: list[str] | None = None) -> int:
         if receipt_path.exists():
             receipt = OcrPhase1Receipt.model_validate_json(receipt_path.read_text(encoding="utf-8"))
         if _detector_required(receipt, len(frames)):
-            validate_frame_sources(frame_manifest, data_root)
             cache_root = _required(args.cache_root, "--cache-root")
             runtime_cache_root = _required(args.runtime_cache_root, "--runtime-cache-root")
             detector = PaddleOcrV6Detector.create(

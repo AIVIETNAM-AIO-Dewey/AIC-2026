@@ -523,6 +523,53 @@ def test_frame_preflight_rejects_duplicate_checksum_dimension_and_corrupt_input(
         validate_frame_sources(corrupt_manifest, corrupt_root)
 
 
+def test_lazy_manifest_hashes_source_once_and_materializes_detection_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path, (2,))
+    raw_ref = json.loads(manifest.read_text(encoding="utf-8"))
+    raw_ref["source_image_sha256"] = None
+    write_jsonl_atomic(manifest, [raw_ref])
+    source = (tmp_path / raw_ref["frame_relpath"]).resolve()
+    original_read_bytes = Path.read_bytes
+    source_reads = 0
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal source_reads
+        if path.resolve() == source:
+            source_reads += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    output = tmp_path / "detections.jsonl"
+    run_detect_crop(
+        frame_manifest=manifest,
+        data_root=tmp_path,
+        output=output,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        detector=FakeDetector(),
+        crop_config=CropConfig(),
+    )
+
+    record = OcrDetectionFrameRecord.model_validate_json(output.read_text(encoding="utf-8"))
+    assert source_reads == 1
+    assert record.source_image_sha256 == sha256_file(source)
+
+    Image.new("RGB", (32, 18), "magenta").save(source)
+    with pytest.raises(ValueError, match="differs from detection provenance"):
+        run_detect_crop(
+            frame_manifest=manifest,
+            data_root=tmp_path,
+            output=output,
+            run_id="phase1-test",
+            config_sha256=CONFIG_HASH,
+            detector=None,
+            crop_config=CropConfig(),
+            resume=True,
+        )
+
+
 class SnapshotDetector:
     def __init__(self, mutate_path: Path | None = None) -> None:
         self.seen: np.ndarray | None = None
@@ -1225,7 +1272,9 @@ def test_per_frame_detection_cap_fails_before_any_crop(
     assert not output.exists()
 
 
-def _multi_video_manifest(root: Path, counts: dict[str, int]) -> Path:
+def _multi_video_manifest(
+    root: Path, counts: dict[str, int], *, include_source_hashes: bool = True
+) -> Path:
     refs = []
     for video_id, count in counts.items():
         for frame_idx in range(count):
@@ -1241,7 +1290,7 @@ def _multi_video_manifest(root: Path, counts: dict[str, int]) -> Path:
                     pts_time_s=frame_idx / 25,
                     fps=25,
                     frame_relpath=path.relative_to(root).as_posix(),
-                    source_image_sha256=sha256_file(path),
+                    source_image_sha256=(sha256_file(path) if include_source_hashes else None),
                     width=32,
                     height=18,
                 )
@@ -1433,6 +1482,69 @@ def test_global_whole_video_shards_have_exact_coverage_and_unique_trajectories(
             data_root=tmp_path,
             crop_config=CropConfig(),
         )
+
+
+def test_global_verifier_accepts_lazy_manifests_bound_by_detection_records(
+    tmp_path: Path,
+) -> None:
+    source = _multi_video_manifest(tmp_path, {"video1": 1}, include_source_hashes=False)
+    tracking = TrackingConfig(maximum_frames_per_shard=1)
+    global_path, global_manifest = plan_frame_shards(
+        source_manifest=source,
+        output_dir=tmp_path / "shards",
+        config_sha256=CONFIG_HASH,
+        tracking_config=tracking,
+    )
+    shard = global_manifest.shards[0]
+    frame_manifest = global_path.parent / shard.manifest_relpath
+    artifact_root = tmp_path / "artifacts" / shard.shard_id
+    detections = artifact_root / "detections.jsonl"
+    trajectories = artifact_root / "trajectories.jsonl"
+    representatives = artifact_root / "representatives.jsonl"
+    run_detect_crop(
+        frame_manifest=frame_manifest,
+        data_root=tmp_path,
+        output=detections,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        detector=FakeDetector(),
+        crop_config=CropConfig(),
+        tracking_config=tracking,
+        shard_id=shard.shard_id,
+        shard_manifest_sha256=shard.manifest_sha256,
+    )
+    run_tracking(
+        detections=detections,
+        output=trajectories,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        tracking_config=tracking,
+    )
+    run_representative_selection(
+        trajectories=trajectories,
+        output=representatives,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        tracking_config=tracking,
+    )
+
+    assert verify_global_shards(
+        source_manifest=source,
+        global_manifest=global_path,
+        expected_config_sha256=CONFIG_HASH,
+        tracking_config=tracking,
+        expected_run_id="phase1-test",
+        expected_identity=IDENTITY,
+        shard_bundles={
+            shard.shard_id: OcrShardArtifactBundle(
+                detections=detections,
+                trajectories=trajectories,
+                representatives=representatives,
+            )
+        },
+        data_root=tmp_path,
+        crop_config=CropConfig(),
+    ) == {"shards": 1, "videos": 1, "frames": 1, "trajectories": 1}
 
 
 def test_shard_planner_rejects_single_video_over_frame_limit(tmp_path: Path) -> None:

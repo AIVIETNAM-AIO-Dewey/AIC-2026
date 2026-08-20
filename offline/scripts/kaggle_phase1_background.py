@@ -378,13 +378,16 @@ def setup_environment() -> None:
 def build_manifest() -> None:
     if MANIFEST.is_file() and sum(1 for _ in MANIFEST.open("rb")) == EXPECTED_FRAMES:
         return
-    dataset_roots = tuple(find_dataset_mount(slug) for slug in ("aic-test-dataset", "aic-26-video"))
-    log("resolved dataset roots: " + ", ".join(map(str, dataset_roots)))
-    log("discovering map-keyframes only inside mounted dataset roots")
-    map_directories = find_input_directories("map-keyframes", maximum_depth=8, roots=dataset_roots)
-    if not map_directories:
-        raise FileNotFoundError("no mounted map-keyframes directory was found")
-    log(f"found {len(map_directories)} map-keyframes directories")
+    map_dataset = find_dataset_mount("aic-test-dataset")
+    frame_dataset = find_dataset_mount("aic-26-video")
+    map_directory = map_dataset / "data/map-keyframes"
+    frame_collection = frame_dataset / "Keyframes/Keyframes"
+    if not map_directory.is_dir() or not frame_collection.is_dir():
+        raise FileNotFoundError(
+            f"canonical map/frame roots are missing: {map_directory}, {frame_collection}"
+        )
+    log(f"resolved map directory: {map_directory}")
+    log(f"resolved frame collection: {frame_collection}")
     helper = WORK_ROOT / "build_source_manifest.py"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(
@@ -404,32 +407,35 @@ def build_manifest() -> None:
 
             root = Path("/kaggle/input").resolve()
             output = Path({str(MANIFEST)!r})
-            map_directories = [Path(value) for value in {list(map(str, map_directories))!r}]
+            map_directory = Path({str(map_directory)!r})
+            frame_collection = Path({str(frame_collection)!r})
             video_re = re.compile(r"^[A-Za-z0-9]+_V[0-9]+$")
-            candidates = {{}}
-            for map_dir in map_directories:
-                if not map_dir.is_dir():
-                    continue
-                for map_csv in map_dir.glob("*.csv"):
-                    if not video_re.fullmatch(map_csv.stem):
+            maps = {{
+                item.stem: item
+                for item in map_directory.glob("*.csv")
+                if video_re.fullmatch(item.stem)
+            }}
+            frames = {{}}
+            for keyframe_root in sorted(frame_collection.glob("Keyframes_L*/keyframes")):
+                for video_dir in keyframe_root.iterdir():
+                    if not video_dir.is_dir() or not video_re.fullmatch(video_dir.name):
                         continue
-                    frames = map_dir.parent / "keyframes" / map_csv.stem
-                    if frames.is_dir():
-                        candidates.setdefault(map_csv.stem, []).append((map_csv, frames))
-            if len(candidates) != {EXPECTED_VIDEOS}:
-                raise SystemExit(f"expected {EXPECTED_VIDEOS} videos, found {{len(candidates)}}")
+                    if video_dir.name in frames:
+                        raise SystemExit(f"duplicate visible frame directory: {{video_dir.name}}")
+                    frames[video_dir.name] = video_dir
+            if len(maps) != {EXPECTED_VIDEOS} or len(frames) != {EXPECTED_VIDEOS}:
+                raise SystemExit(
+                    f"expected {EXPECTED_VIDEOS} maps/frames, found {{len(maps)}}/{{len(frames)}}"
+                )
+            if set(maps) != set(frames):
+                raise SystemExit(
+                    f"map/frame membership drift: missing={{sorted(set(maps) - set(frames))[:5]}}, "
+                    f"extra={{sorted(set(frames) - set(maps))[:5]}}"
+                )
 
             choices_by_video = []
-            for video_id in sorted(candidates, key=natural_key):
-                choices = sorted(
-                    candidates[video_id],
-                    key=lambda pair: (
-                        0 if "aic-test-dataset" in pair[0].as_posix() else 1,
-                        pair[0].as_posix(),
-                    ),
-                )
-                map_csv, frames = choices[0]
-                choices_by_video.append((video_id, map_csv, frames))
+            for video_id in sorted(maps, key=natural_key):
+                choices_by_video.append((video_id, maps[video_id], frames[video_id]))
 
             def build_one(choice):
                 video_id, map_csv, frames = choice
@@ -438,6 +444,7 @@ def build_manifest() -> None:
                     map_csv=map_csv,
                     frames_dir=frames,
                     data_root=root,
+                    validate_source_images=False,
                 )
 
             records = []

@@ -62,7 +62,12 @@ class _Detector:
         ]
 
 
-def _source_manifest(root: Path, videos: dict[str, int] | None = None) -> Path:
+def _source_manifest(
+    root: Path,
+    videos: dict[str, int] | None = None,
+    *,
+    include_source_hashes: bool = True,
+) -> Path:
     videos = videos or {"video1": 2}
     refs = []
     for video_id, count in videos.items():
@@ -79,7 +84,7 @@ def _source_manifest(root: Path, videos: dict[str, int] | None = None) -> Path:
                     pts_time_s=frame_idx / 25,
                     fps=25.0,
                     frame_relpath=image.relative_to(root).as_posix(),
-                    source_image_sha256=sha256_file(image),
+                    source_image_sha256=(sha256_file(image) if include_source_hashes else None),
                     width=32,
                     height=18,
                 )
@@ -89,8 +94,14 @@ def _source_manifest(root: Path, videos: dict[str, int] | None = None) -> Path:
     return source
 
 
-def _planned(root: Path, videos: dict[str, int] | None = None, maximum: int = 10):
-    source = _source_manifest(root, videos)
+def _planned(
+    root: Path,
+    videos: dict[str, int] | None = None,
+    maximum: int = 10,
+    *,
+    include_source_hashes: bool = True,
+):
+    source = _source_manifest(root, videos, include_source_hashes=include_source_hashes)
     tracking = TrackingConfig(maximum_frames_per_shard=maximum)
     global_manifest, manifest = plan_frame_shards(
         source_manifest=source,
@@ -198,7 +209,7 @@ def _verify_kwargs(values: dict) -> dict:
 def test_partial_checkpoint_discards_uncommitted_tail_and_resumes_byte_identically(
     tmp_path: Path,
 ) -> None:
-    source, global_path, manifest, tracking = _planned(tmp_path)
+    source, global_path, manifest, tracking = _planned(tmp_path, include_source_hashes=False)
     shard = manifest.shards[0]
     frame_manifest = global_path.parent / shard.manifest_relpath
     interrupted_root = tmp_path / "interrupted"

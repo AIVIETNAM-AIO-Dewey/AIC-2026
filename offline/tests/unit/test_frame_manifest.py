@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import aic2026.common.frame_manifest as frame_manifest_module
 import pytest
 from aic2026.common.frame_manifest import build_frame_refs, read_frame_map
 from PIL import Image
@@ -30,6 +31,31 @@ def test_attached_mapping_shape_is_modeled_without_time_recalculation(tmp_path: 
     assert refs[0].frame_uid == "L21_V011:0"
     assert refs[0].source_image_sha256 is not None
     assert len(refs[0].source_image_sha256) == 64
+
+
+def test_deferred_source_validation_reads_dimensions_without_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = tmp_path / "keyframes" / "L21_V011"
+    frames.mkdir(parents=True)
+    for keyframe_n in (1, 2, 3):
+        Image.new("RGB", (16, 9)).save(frames / f"{keyframe_n:06d}.jpg")
+
+    def fail_if_hashed(_path: Path) -> str:
+        raise AssertionError("deferred source was hashed")
+
+    monkeypatch.setattr(frame_manifest_module, "sha256_file", fail_if_hashed)
+
+    refs = build_frame_refs(
+        video_id="L21_V011",
+        map_csv=FIXTURES / "frame_map.csv",
+        frames_dir=frames,
+        data_root=tmp_path,
+        validate_source_images=False,
+    )
+
+    assert [(ref.width, ref.height) for ref in refs] == [(16, 9)] * 3
+    assert all(ref.source_image_sha256 is None for ref in refs)
 
 
 def test_duplicate_mapping_keys_fail(tmp_path: Path) -> None:

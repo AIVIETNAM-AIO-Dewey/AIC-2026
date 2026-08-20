@@ -275,7 +275,7 @@ def verify_global_shards(
     crop_config: CropConfig,
     _test_fault_injector: Callable[[str], None] | None = None,
 ) -> dict[str, int]:
-    """Production gate using one immutable baseline for all replayed inputs."""
+    """Production gate replaying source bytes against materialized detections."""
 
     from aic2026.contracts import OcrDetectionFrameRecord, OcrTrajectoryRecord
 
@@ -293,8 +293,9 @@ def verify_global_shards(
     if not isinstance(crop_config, CropConfig):
         raise TypeError("crop_config must be CropConfig")
 
-    # Capture every byte-bearing verification input before any structural or
-    # semantic verification.  This tuple is never replaced or extended later.
+    # Capture committed manifests/artifacts plus legacy manifest-bound sources.
+    # Lazy sources are read once during semantic replay and checked against the
+    # SHA-256 already materialized in their detection frame record.
     source_resolved = source_manifest.resolve()
     global_resolved = global_manifest.resolve()
     _, _, source_frames = _frame_manifest_snapshot(source_resolved)
@@ -329,13 +330,18 @@ def verify_global_shards(
                 (artifact_resolved, receipt_path_for(artifact_resolved).resolve())
             )
     source_root = data_root.resolve()
+    source_paths: list[Path] = []
     for frame in source_frames:
         source_image = (source_root / frame.frame_relpath).resolve()
         try:
             source_image.relative_to(source_root)
         except ValueError as error:
             raise ValueError(f"frame path escapes data root: {frame.frame_uid}") from error
-        baseline_paths.append(source_image)
+        source_paths.append(source_image)
+        if frame.source_image_sha256 is not None:
+            baseline_paths.append(source_image)
+    if len(source_paths) != len(set(source_paths)):
+        raise ValueError("global verifier source frame paths collide")
     if len(baseline_paths) != len(set(baseline_paths)):
         raise ValueError("global verifier inputs contain colliding file paths")
     try:
@@ -343,14 +349,12 @@ def verify_global_shards(
     except OSError as error:
         raise ValueError("global verifier baseline input is unavailable") from error
     baseline_hashes = dict(baseline)
-    for frame in source_frames:
-        source_image = (source_root / frame.frame_relpath).resolve()
+    for frame, source_image in zip(source_frames, source_paths, strict=True):
         if (
-            frame.source_image_sha256 is None
-            or baseline_hashes[source_image] != frame.source_image_sha256
+            frame.source_image_sha256 is not None
+            and baseline_hashes[source_image] != frame.source_image_sha256
         ):
             raise ValueError(f"source image checksum drift: {frame.frame_uid}")
-
     counts = verify_global_shard_structure(
         source_manifest=source_resolved,
         global_manifest=global_resolved,
@@ -404,16 +408,12 @@ def verify_global_shards(
         if {record.frame_uid for record in detection_records} != set(shard_frames):
             raise ValueError("detection bundle frame membership differs from shard")
         for record in detection_records:
-            if record.video_id not in shard.video_ids or record != OcrDetectionFrameRecord(
-                **shard_frames[record.frame_uid].model_dump(),
-                run_id=record.run_id,
-                detector_revision=record.detector_revision,
-                detector_tree_sha256=record.detector_tree_sha256,
-                runtime_identity_sha256=record.runtime_identity_sha256,
-                config_sha256=record.config_sha256,
-                canonical_image_sha256=record.canonical_image_sha256,
-                detections=record.detections,
-            ):
+            frame = shard_frames[record.frame_uid]
+            expected_frame = frame.model_dump()
+            actual_frame = {key: getattr(record, key) for key in expected_frame}
+            if frame.source_image_sha256 is None:
+                expected_frame["source_image_sha256"] = record.source_image_sha256
+            if record.video_id not in shard.video_ids or actual_frame != expected_frame:
                 raise ValueError("detection frame provenance is foreign to its shard")
         trajectories = _load_records(bundle.trajectories, OcrTrajectoryRecord)
         for trajectory in trajectories:
@@ -424,7 +424,10 @@ def verify_global_shards(
                     or member.video_id != frame.video_id
                     or member.frame_idx != frame.frame_idx
                     or member.frame_relpath != frame.frame_relpath
-                    or member.source_image_sha256 != frame.source_image_sha256
+                    or (
+                        frame.source_image_sha256 is not None
+                        and member.source_image_sha256 != frame.source_image_sha256
+                    )
                 ):
                     raise ValueError("trajectory member is foreign or missing from its shard")
             if trajectory.trajectory_id in global_trajectory_ids:

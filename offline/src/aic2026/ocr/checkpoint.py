@@ -524,7 +524,7 @@ def publish_checkpoint(
         global_manifest,
         global_shard_receipt_path(global_manifest),
         *[(global_manifest.parent / item.manifest_relpath).resolve() for item in manifest.shards],
-        *[path for _, path in source_frames],
+        *[path for ref, path in source_frames if ref.source_image_sha256 is not None],
     ]
     structural_baseline = [(path, sha256_file(path)) for path in structural_paths]
     stage, next_frame, counts, captured_artifacts = _validate_and_capture_state(
@@ -784,7 +784,8 @@ def verify_checkpoint_bundle(
     ):
         raise ValueError("checkpoint source/global/shard/video ownership binding drift")
 
-    # Capture one immutable baseline before any byte or semantic verification.
+    # Baseline committed bundle/manifest bytes and legacy manifest-bound sources.
+    # Lazy source bytes are checked once against the detection prefix during replay.
     baseline_paths = [marker]
     baseline_paths += [_safe_child(bundle, item.bundle_relpath) for item in checkpoint.files]
     baseline_paths += [
@@ -800,7 +801,7 @@ def verify_checkpoint_bundle(
     global_root = global_manifest.parent.resolve()
     baseline_paths += [(global_root / item.manifest_relpath).resolve() for item in manifest.shards]
     _, frames = _load_frame_manifest_with_hash(frame_manifest, data_root)
-    baseline_paths += [path for _, path in frames]
+    baseline_paths += [path for ref, path in frames if ref.source_image_sha256 is not None]
     baseline = [(path, sha256_file(path)) for path in baseline_paths]
 
     bundled = _validate_checkpoint_files(bundle, checkpoint)
@@ -887,8 +888,7 @@ def verify_checkpoint_bundle(
     if checkpoint.counts != expected_counts or checkpoint.next_frame_uid != next_frame:
         raise ValueError("checkpoint counts or next-frame position differ from semantic replay")
 
-    # Final immutable-baseline recheck covers every bundle byte and every current
-    # manifest/source image used by semantic replay.
+    # Recheck the committed baseline after semantic replay.
     verify_global_shard_structure(
         source_manifest=source_manifest,
         global_manifest=global_manifest,

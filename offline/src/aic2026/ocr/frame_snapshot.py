@@ -29,6 +29,7 @@ class CanonicalFrameError(ValueError):
 class CanonicalFrameSnapshot:
     image: Image.Image
     bgr: np.ndarray
+    source_image_sha256: str
     canonical_image_sha256: str
 
 
@@ -51,7 +52,7 @@ def decode_canonical_frame(ref: FrameRef, path: Path) -> CanonicalFrameSnapshot:
             "source_unavailable", f"source image is unavailable: {ref.frame_uid}"
         ) from error
     source_hash = hashlib.sha256(payload).hexdigest()
-    if source_hash != ref.source_image_sha256:
+    if ref.source_image_sha256 is not None and source_hash != ref.source_image_sha256:
         raise CanonicalFrameError(
             "source_checksum_drift", f"source image checksum drift: {ref.frame_uid}"
         )
@@ -82,5 +83,6 @@ def decode_canonical_frame(ref: FrameRef, path: Path) -> CanonicalFrameSnapshot:
     return CanonicalFrameSnapshot(
         image=image,
         bgr=bgr,
+        source_image_sha256=source_hash,
         canonical_image_sha256=_canonical_pixel_hash(image),
     )

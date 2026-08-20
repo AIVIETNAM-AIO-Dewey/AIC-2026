@@ -206,14 +206,12 @@ def _load_frame_manifest_with_hash(
     root = data_root.resolve()
     validated: list[tuple[FrameRef, Path]] = []
     for ref in refs:
-        if ref.source_image_sha256 is None:
-            raise ValueError(f"frame lacks source image checksum: {ref.frame_uid}")
         path = (root / ref.frame_relpath).resolve()
         try:
             path.relative_to(root)
         except ValueError as error:
             raise ValueError(f"frame path escapes data root: {ref.frame_uid}") from error
-        if not path.is_file():
+        if ref.source_image_sha256 is not None and not path.is_file():
             raise ValueError(f"source image is missing: {ref.frame_uid}")
         validated.append((ref, path))
     return manifest_hash, validated
@@ -235,8 +233,10 @@ def validate_frame_sources(frame_manifest: Path, data_root: Path) -> dict[str, i
 
 
 def _verify_all_frame_source_hashes(frames: list[tuple[FrameRef, Path]]) -> None:
+    """Recheck sources bound by legacy manifests; lazy refs bind bytes in detections."""
+
     for ref, path in frames:
-        if sha256_file(path) != ref.source_image_sha256:
+        if ref.source_image_sha256 is not None and sha256_file(path) != ref.source_image_sha256:
             raise ValueError(f"source image checksum drift: {ref.frame_uid}")
 
 
@@ -279,10 +279,11 @@ def _record_for_frame(
                 crop=crop.provenance,
             )
         )
-    if sha256_file(path) != ref.source_image_sha256:
+    if ref.source_image_sha256 is not None and sha256_file(path) != ref.source_image_sha256:
         raise ValueError(f"source image changed during detector/crop use: {ref.frame_uid}")
+    materialized_ref = ref.model_copy(update={"source_image_sha256": snapshot.source_image_sha256})
     return OcrDetectionFrameRecord(
-        **ref.model_dump(),
+        **materialized_ref.model_dump(),
         run_id=run_id,
         detector_revision=identity.detector_revision,
         detector_tree_sha256=identity.detector_tree_sha256,
@@ -342,6 +343,8 @@ def _validate_detection_prefix(
     for index, (record, (ref, path)) in enumerate(zip(records, frames, strict=False)):
         expected_frame = ref.model_dump()
         actual_frame = {key: getattr(record, key) for key in expected_frame}
+        if ref.source_image_sha256 is None:
+            expected_frame["source_image_sha256"] = record.source_image_sha256
         if actual_frame != expected_frame:
             raise ValueError(f"partial artifact is not a valid frame prefix at record {index}")
         if (
@@ -353,6 +356,8 @@ def _validate_detection_prefix(
         ):
             raise ValueError(f"partial artifact identity drift at record {index}")
         snapshot = decode_canonical_frame(ref, path)
+        if record.source_image_sha256 != snapshot.source_image_sha256:
+            raise ValueError("source image checksum differs from detection provenance")
         if record.canonical_image_sha256 != snapshot.canonical_image_sha256:
             raise ValueError("canonical source pixel hash mismatch")
         for detection in record.detections:
