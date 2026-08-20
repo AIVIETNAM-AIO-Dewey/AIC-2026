@@ -1,5 +1,5 @@
 schema_version: "1.0"
-last_verified_utc: "2026-08-18"
+last_verified_utc: "2026-08-20"
 
 policy:
   immutable_revision_required: true
@@ -46,10 +46,15 @@ models:
     status: locked
 
   vietnamese_ocr:
-    family: PP-OCRv6-small
-    provider: PaddleOCR
-    model_id: PP-OCRv6_small_det+PP-OCRv6_small_rec
-    revision: 01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f619d06
+    role: local Vietnamese/English recognition over verified Phase-1 representative crops
+    family: VietOCR-vgg-seq2seq
+    provider: pbcquoc/vietocr
+    model_id: pbcquoc/vietocr-vgg-seq2seq
+    revision: 0921503a41375a0584268e23ef3d414ea478a8fe8777865c7745d38f2d0bc5db
+    checkpoint_bytes: 89575371
+    config_path: offline/configs/offline/vietocr_vgg_seq2seq.yaml
+    config_sha256: bfa01046e74d8a8e7c2494377eb5f83d04d0d30fcef5c4d95fc0e1780e306c45
+    implementation_version: 0.3.13
     license: Apache-2.0
     local_files_required: true
     automatic_download: false

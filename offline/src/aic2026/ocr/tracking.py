@@ -60,6 +60,9 @@ class TrackingConfig:
     maximum_candidate_evaluations_per_frame: int = 2_000_000
     maximum_candidate_edges_per_frame: int = 250_000
     maximum_candidate_edges_per_component: int = 250_000
+    # Detection JSONL/receipt durability cadence. Production configs use 32 to
+    # avoid an fsync + atomic receipt publication for every individual frame.
+    detection_receipt_commit_interval_frames: int = 1
     version: str = "aic26.ocr_tracking.pilot.v3"
 
     def __post_init__(self) -> None:
@@ -73,6 +76,7 @@ class TrackingConfig:
             self.maximum_candidate_evaluations_per_frame,
             self.maximum_candidate_edges_per_frame,
             self.maximum_candidate_edges_per_component,
+            self.detection_receipt_commit_interval_frames,
         )
         if any(type(value) is not int for value in integer_fields):
             raise ValueError("tracking counts and frame gap must be true integers")
@@ -86,6 +90,7 @@ class TrackingConfig:
             or self.maximum_candidate_evaluations_per_frame < 1
             or self.maximum_candidate_edges_per_frame < 1
             or self.maximum_candidate_edges_per_component < 1
+            or self.detection_receipt_commit_interval_frames < 1
         ):
             raise ValueError(
                 "tracking counts/gap must be positive and representative cap must be 3"
@@ -138,6 +143,9 @@ class TrackingConfig:
             "maximum_detections_per_frame": self.maximum_detections_per_frame,
             "maximum_detections_per_shard": self.maximum_detections_per_shard,
             "maximum_frames_per_shard": self.maximum_frames_per_shard,
+            "detection_receipt_commit_interval_frames": (
+                self.detection_receipt_commit_interval_frames
+            ),
         }
         payload = json.dumps(limits, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -298,8 +298,6 @@ def _write_jsonl_line(stream: Any, record: BaseModel) -> bytes:
         json.dumps(record.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")) + "\n"
     )
     stream.write(serialized)
-    stream.flush()
-    os.fsync(stream.fileno())
     return serialized.encode("utf-8")
 
 
@@ -676,15 +674,43 @@ def _run_detect_crop(
             fault_injector,
         )
 
-    committed_detection_count = _detection_counts(completed)["detections"]
-    if committed_detection_count > tracking_config.maximum_detections_per_shard:
+    processed_detection_count = _detection_counts(completed)["detections"]
+    if processed_detection_count > tracking_config.maximum_detections_per_shard:
         raise ValueError(
-            f"shard {shard_id} committed detection count {committed_detection_count} "
+            f"shard {shard_id} committed detection count {processed_detection_count} "
             f"exceeds limit {tracking_config.maximum_detections_per_shard}; "
             "stateful video subsharding "
             "is required"
         )
     partial_digest = _sha256_state(partial)
+    uncommitted_frames = 0
+
+    def commit_durable_prefix(stream: Any) -> None:
+        nonlocal uncommitted_frames
+        stream.flush()
+        os.fsync(stream.fileno())
+        if fault_injector is not None:
+            fault_injector("after_record_fsync_before_receipt")
+        _write_receipt(
+            receipt_path,
+            _make_receipt(
+                run_id=run_id,
+                stage="detect_crop",
+                status="running",
+                input_hash=input_hash,
+                config_sha256=config_sha256,
+                identity=identity,
+                record_counts=_detection_counts(completed),
+                output_hash=partial_digest.hexdigest(),
+                committed_bytes=partial.stat().st_size,
+                shard_id=shard_id,
+                shard_manifest_sha256=shard_manifest_sha256,
+                resource_limits_sha256=tracking_config.resource_limits_sha256,
+            ),
+            fault_injector,
+        )
+        uncommitted_frames = 0
+
     with partial.open("a", encoding="utf-8", newline="\n") as stream:
         for ref, path in frames[len(completed) :]:
             record = _record_for_frame(
@@ -697,10 +723,10 @@ def _run_detect_crop(
                 crop_config=crop_config,
                 maximum_detections_per_frame=tracking_config.maximum_detections_per_frame,
                 remaining_detections_in_shard=(
-                    tracking_config.maximum_detections_per_shard - committed_detection_count
+                    tracking_config.maximum_detections_per_shard - processed_detection_count
                 ),
             )
-            next_detection_count = committed_detection_count + len(record.detections)
+            next_detection_count = processed_detection_count + len(record.detections)
             if next_detection_count > tracking_config.maximum_detections_per_shard:
                 raise ValueError(
                     f"shard {shard_id} detection count {next_detection_count} exceeds limit "
@@ -709,28 +735,13 @@ def _run_detect_crop(
                     "If one video exceeds the limit, stateful video subsharding is required"
                 )
             partial_digest.update(_write_jsonl_line(stream, record))
-            if fault_injector is not None:
-                fault_injector("after_record_fsync_before_receipt")
             completed.append(record)
-            committed_detection_count = next_detection_count
-            _write_receipt(
-                receipt_path,
-                _make_receipt(
-                    run_id=run_id,
-                    stage="detect_crop",
-                    status="running",
-                    input_hash=input_hash,
-                    config_sha256=config_sha256,
-                    identity=identity,
-                    record_counts=_detection_counts(completed),
-                    output_hash=partial_digest.hexdigest(),
-                    committed_bytes=partial.stat().st_size,
-                    shard_id=shard_id,
-                    shard_manifest_sha256=shard_manifest_sha256,
-                    resource_limits_sha256=tracking_config.resource_limits_sha256,
-                ),
-                fault_injector,
-            )
+            processed_detection_count = next_detection_count
+            uncommitted_frames += 1
+            if uncommitted_frames == tracking_config.detection_receipt_commit_interval_frames:
+                commit_durable_prefix(stream)
+        if uncommitted_frames:
+            commit_durable_prefix(stream)
     os.replace(partial, output)
     _fsync_directory(output.parent)
     if fault_injector is not None:

@@ -65,6 +65,7 @@ tracking:
   maximum_candidate_evaluations_per_frame: 2000000
   maximum_candidate_edges_per_frame: 250000
   maximum_candidate_edges_per_component: 250000
+  detection_receipt_commit_interval_frames: 32
   version: aic26.ocr_tracking.pilot.v3
 quality:
   version: aic26.ocr_detection_quality.v1

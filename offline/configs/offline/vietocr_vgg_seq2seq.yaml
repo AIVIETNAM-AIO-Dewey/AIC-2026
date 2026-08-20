@@ -1,0 +1,36 @@
+# Local inference configuration merged from pbcquoc/vietocr's base.yml and
+# vgg-seq2seq.yml. The runner replaces device and weights with explicit local values.
+vocab: 'aAàÀảẢãÃáÁạẠăĂằẰẳẲẵẴắẮặẶâÂầẦẩẨẫẪấẤậẬbBcCdDđĐeEèÈẻẺẽẼéÉẹẸêÊềỀểỂễỄếẾệỆfFgGhHiIìÌỉỈĩĨíÍịỊjJkKlLmMnNoOòÒỏỎõÕóÓọỌôÔồỒổỔỗỖốỐộỘơƠờỜởỞỡỠớỚợỢpPqQrRsStTuUùÙủỦũŨúÚụỤưƯừỪửỬữỮứỨựỰvVwWxXyYỳỲỷỶỹỸýÝỵỴzZ0123456789!"#$%&''()*+,-./:;<=>?@[\]^_`{|}~ '
+device: cpu
+weights: REQUIRED_LOCAL_WEIGHTS
+backbone: vgg19_bn
+cnn:
+  # The complete local VietOCR checkpoint supplies every model parameter.
+  # Keep torchvision from downloading an unused ImageNet VGG initialization.
+  pretrained: false
+  ss:
+    - [2, 2]
+    - [2, 2]
+    - [2, 1]
+    - [2, 1]
+    - [1, 1]
+  ks:
+    - [2, 2]
+    - [2, 2]
+    - [2, 1]
+    - [2, 1]
+    - [1, 1]
+  hidden: 256
+seq_modeling: seq2seq
+transformer:
+  encoder_hidden: 256
+  decoder_hidden: 256
+  img_channel: 256
+  decoder_embedded: 256
+  dropout: 0.1
+dataset:
+  image_height: 32
+  image_min_width: 32
+  image_max_width: 512
+predictor:
+  beamsearch: false

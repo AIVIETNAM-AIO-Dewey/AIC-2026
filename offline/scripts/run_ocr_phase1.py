@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from _common import read_config  # noqa: E402
 from aic2026.contracts import OcrPhase1Receipt  # noqa: E402
 from aic2026.ocr import (  # noqa: E402
+    SUPPORTED_EXECUTION_PROFILES,
     CheckpointArtifactPaths,
     CropConfig,
     PaddleOcrV6Detector,
@@ -90,8 +91,8 @@ def _settings(
     config = read_config(args.config)
     if config.get("schema_version") != "aic26.ocr_phase1.config.v1":
         raise ValueError("unsupported OCR Phase 1 config schema")
-    if config.get("execution_profile") != "cpu_pinned":
-        raise ValueError("runnable OCR Phase 1 config requires execution_profile=cpu_pinned")
+    if config.get("execution_profile") not in SUPPORTED_EXECUTION_PROFILES:
+        raise ValueError("runnable OCR Phase 1 config requires a supported pinned profile")
     crop = CropConfig(**config.get("crop", {}))
     tracking = TrackingConfig(**config.get("tracking", {}))
     run = config.get("run")

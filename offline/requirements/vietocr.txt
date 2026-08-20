@@ -1,0 +1,2 @@
+# Install in a Phase-2-only environment. Keep it separate from Paddle Phase 1.
+vietocr==0.3.13

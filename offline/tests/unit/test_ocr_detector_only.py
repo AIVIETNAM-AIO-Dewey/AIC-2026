@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import aic2026.ocr.detector_only as detector_only
@@ -32,13 +33,29 @@ PACKAGES = {
     "Pillow": "11.1.0",
     "numpy": "1.26.4",
 }
+GPU_PACKAGES = {
+    "paddlepaddle-gpu": "3.3.1",
+    **{name: version for name, version in PACKAGES.items() if name != "paddlepaddle"},
+}
+GPU_RUNTIME_EVIDENCE = {
+    "device": "gpu:0",
+    "cuda_build": "12.6",
+    "cudnn_version": 91000,
+    "gpu_device_count": 1,
+    "gpu_device_name": "Kaggle test GPU",
+    "gpu_kernel_probe_passed": True,
+    "paddlex_device_fallback_disabled": True,
+}
 
 
 def _create_detector(**kwargs: Any) -> PaddleOcrV6Detector:
+    gpu_profile = kwargs["config"]["execution_profile"] == "kaggle_gpu_pinned"
     return PaddleOcrV6Detector._create_for_test(
         **kwargs,
-        package_versions=PACKAGES,
+        package_versions=GPU_PACKAGES if gpu_profile else PACKAGES,
         opencv_providers=["opencv-contrib-python"],
+        paddle_providers=["paddlepaddle-gpu" if gpu_profile else "paddlepaddle"],
+        gpu_runtime_probe=(lambda _device: GPU_RUNTIME_EVIDENCE) if gpu_profile else None,
     )
 
 
@@ -80,6 +97,19 @@ def detector_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(
         detector_only,
         "PINNED_DETECTOR_PORT_CONFIG_SHA256",
+        detector_only._canonical_hash(config["model"]),
+    )
+    return config
+
+
+def gpu_detector_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    config = detector_config(tmp_path, monkeypatch)
+    config["execution_profile"] = "kaggle_gpu_pinned"
+    config["model"]["device"] = "gpu:0"
+    config["model"]["packages"] = GPU_PACKAGES
+    monkeypatch.setattr(
+        detector_only,
+        "PINNED_KAGGLE_GPU_DETECTOR_PORT_CONFIG_SHA256",
         detector_only._canonical_hash(config["model"]),
     )
     return config
@@ -143,6 +173,74 @@ def test_detector_constructs_without_recognizer_and_parses_pinned_output(
         detector.verification = {"detector_tree_sha256": "0" * 64}
     with pytest.raises(TypeError):
         detector.verification["detector_tree_sha256"] = "0" * 64
+
+
+def test_kaggle_gpu_profile_constructs_on_gpu_with_no_fallback_and_probe_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = gpu_detector_config(tmp_path, monkeypatch)
+    kwargs_seen: dict[str, Any] = {}
+
+    def constructor(**kwargs: Any) -> FakeEngine:
+        kwargs_seen.update(kwargs)
+        assert os.environ["PADDLE_PDX_DISABLE_DEVICE_FALLBACK"] == "True"
+        return FakeEngine()
+
+    detector = _create_detector(
+        config=config,
+        cache_root=tmp_path,
+        constructor=constructor,
+    )
+
+    assert kwargs_seen["device"] == "gpu:0"
+    assert kwargs_seen["enable_mkldnn"] is False
+    assert dict(detector.verification["gpu_runtime"]) == {
+        **GPU_RUNTIME_EVIDENCE,
+        "probe_boundaries": ("before_constructor", "after_constructor"),
+    }
+    assert detector.verification["paddle_provider"] == "paddlepaddle-gpu"
+    assert detector.verification["execution_profile"] == "kaggle_gpu_pinned"
+
+
+def test_gpu_runtime_probe_executes_cuda_kernel_and_rejects_cpu_wheel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = "cpu"
+
+    class FakeTensor:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def __add__(self, value: float) -> FakeTensor:
+            return FakeTensor(self.value + value)
+
+        def numpy(self) -> np.ndarray:
+            return np.asarray([self.value], dtype=np.float32)
+
+    def set_device(device: str) -> None:
+        nonlocal selected
+        selected = device
+
+    fake_paddle = SimpleNamespace(
+        device=SimpleNamespace(
+            is_compiled_with_cuda=lambda: True,
+            get_cudnn_version=lambda: 91000,
+            get_device=lambda: selected,
+            cuda=SimpleNamespace(
+                device_count=lambda: 1,
+                get_device_name=lambda _index: "Kaggle test GPU",
+            ),
+        ),
+        version=SimpleNamespace(cuda=lambda: "12.6"),
+        set_device=set_device,
+        ones=lambda _shape, dtype: FakeTensor(1.0) if dtype == "float32" else None,
+    )
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+    assert detector_only._verify_gpu_runtime("gpu:0") == GPU_RUNTIME_EVIDENCE
+
+    fake_paddle.device.is_compiled_with_cuda = lambda: False
+    with pytest.raises(DetectorOnlyError, match="not compiled with CUDA"):
+        detector_only._verify_gpu_runtime("gpu:0")
 
 
 def test_direct_fake_engine_and_caller_supplied_evidence_cannot_construct_detector() -> None:
@@ -406,12 +504,21 @@ def test_runtime_package_mismatch_and_cache_symlink_escape_fail_before_construct
             config,
             package_versions={**PACKAGES, "Pillow": "11.2.0"},
             opencv_providers=["opencv-contrib-python"],
+            paddle_providers=["paddlepaddle"],
         )
     with pytest.raises(DetectorOnlyError, match="cv2 must come only"):
         detector_only._verify_runtime_identity(
             config,
             package_versions=PACKAGES,
             opencv_providers=["opencv-python"],
+            paddle_providers=["paddlepaddle"],
+        )
+    with pytest.raises(DetectorOnlyError, match="paddle must come only"):
+        detector_only._verify_runtime_identity(
+            config,
+            package_versions=PACKAGES,
+            opencv_providers=["opencv-contrib-python"],
+            paddle_providers=["paddlepaddle-gpu"],
         )
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
@@ -446,7 +553,7 @@ def test_locked_identity_is_lightweight_but_production_preflight_inspects_runtim
     config_path = Path(__file__).resolve().parents[2] / "configs" / "offline" / "ocr_phase1.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    def absent() -> dict[str, str]:
+    def absent(_distributions: tuple[str, ...]) -> dict[str, str]:
         raise DetectorOnlyError("Paddle is absent")
 
     monkeypatch.setattr(detector_only, "_installed_package_versions", absent)
@@ -478,12 +585,12 @@ def test_preimported_paddlex_cache_fails_even_when_environment_is_changed_to_req
         )
 
 
-def test_execution_profile_must_be_cpu_pinned(
+def test_execution_profile_must_be_supported_and_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = detector_config(tmp_path, monkeypatch)
     config["execution_profile"] = "gpu_pinned"
-    with pytest.raises(DetectorOnlyError, match="execution_profile=cpu_pinned"):
+    with pytest.raises(DetectorOnlyError, match="supported pinned execution profile"):
         detector_only.identity_from_locked_config(config)
 
 
@@ -547,7 +654,7 @@ def test_read_only_model_root_and_writable_runtime_cache_are_separate_and_set_pr
         )
 
 
-def test_phase1_package_mapping_matches_direct_requirements_and_gpu_profile_is_blocked() -> None:
+def test_phase1_package_mapping_and_cpu_gpu_production_profiles_are_exactly_pinned() -> None:
     offline_root = Path(__file__).resolve().parents[2]
     config = yaml.safe_load(
         (offline_root / "configs" / "offline" / "ocr_phase1.yaml").read_text(encoding="utf-8")
@@ -570,10 +677,19 @@ def test_phase1_package_mapping_matches_direct_requirements_and_gpu_profile_is_b
             encoding="utf-8"
         )
     )
-    assert gpu["status"] == "blocked_unverified_runtime"
-    assert gpu["verified_packages"] is None and gpu["runtime_identity_sha256"] is None
-    assert gpu["detector_model_root"].startswith("/kaggle/input/")
-    assert gpu["paddlex_runtime_cache_root"].startswith("/kaggle/working/")
+    assert gpu["schema_version"] == "aic26.ocr_phase1.config.v1"
+    assert gpu["execution_profile"] == "kaggle_gpu_pinned"
+    assert gpu["model"]["device"] == "gpu:0"
+    assert gpu["model"]["enable_mkldnn"] is False
+    assert gpu["model"]["fallback"] is False
+    assert gpu["model"]["packages"] == GPU_PACKAGES
+    assert (
+        detector_only._canonical_hash(gpu["model"])
+        == detector_only.PINNED_KAGGLE_GPU_DETECTOR_PORT_CONFIG_SHA256
+    )
+    identity = detector_only.identity_from_locked_config(gpu)
+    assert identity["runtime_identity_sha256"] == detector_only.KAGGLE_GPU_RUNTIME_IDENTITY_SHA256
+    assert identity["paddle_provider"] == "paddlepaddle-gpu"
 
 
 def test_real_detector_only_smoke_when_local_pin_is_available(tmp_path: Path) -> None:

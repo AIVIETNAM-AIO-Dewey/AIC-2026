@@ -229,6 +229,97 @@ def test_interrupted_write_resumes_only_receipt_authenticated_prefix(tmp_path: P
     assert not partial.exists()
 
 
+def test_batched_detection_receipt_discards_mid_batch_tail_and_resumes_identically(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(tmp_path, tuple(range(7)))
+    tracking = TrackingConfig(detection_receipt_commit_interval_frames=3)
+    clean = tmp_path / "clean" / "detections.jsonl"
+    interrupted = tmp_path / "interrupted" / "detections.jsonl"
+    run_detect_crop(
+        frame_manifest=manifest,
+        data_root=tmp_path,
+        output=clean,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        detector=FakeDetector(),
+        crop_config=CropConfig(),
+        tracking_config=tracking,
+    )
+
+    # Three records form the first durable batch. The next two records are only
+    # an uncommitted tail when inference crashes while starting record six.
+    with pytest.raises(KeyboardInterrupt):
+        run_detect_crop(
+            frame_manifest=manifest,
+            data_root=tmp_path,
+            output=interrupted,
+            run_id="phase1-test",
+            config_sha256=CONFIG_HASH,
+            detector=FakeDetector(interrupt_call=6),
+            crop_config=CropConfig(),
+            tracking_config=tracking,
+        )
+    partial = interrupted.with_suffix(".jsonl.partial")
+    receipt = OcrPhase1Receipt.model_validate_json(
+        receipt_path_for(interrupted).read_text(encoding="utf-8")
+    )
+    assert receipt.committed_records == 3
+    assert receipt.record_counts == {"frames": 3, "detections": 3}
+    assert partial.stat().st_size > receipt.committed_bytes
+
+    resumed = FakeDetector()
+    counts = run_detect_crop(
+        frame_manifest=manifest,
+        data_root=tmp_path,
+        output=interrupted,
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        detector=resumed,
+        crop_config=CropConfig(),
+        tracking_config=tracking,
+        resume=True,
+    )
+    assert counts == {"frames": 7, "detections": 7}
+    assert resumed.calls == ["3", "4", "5", "6"]
+    assert interrupted.read_bytes() == clean.read_bytes()
+    assert receipt_path_for(interrupted).read_bytes() == receipt_path_for(clean).read_bytes()
+
+
+def test_batched_detection_receipt_commits_final_short_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path, tuple(range(7)))
+    running_commits: list[int] = []
+    original = phase1_module._write_receipt
+
+    def capture_running_commit(path: Path, receipt: OcrPhase1Receipt, fault=None) -> None:
+        if receipt.status == "running":
+            running_commits.append(receipt.committed_records)
+        original(path, receipt, fault)
+
+    monkeypatch.setattr(phase1_module, "_write_receipt", capture_running_commit)
+    run_detect_crop(
+        frame_manifest=manifest,
+        data_root=tmp_path,
+        output=tmp_path / "detections.jsonl",
+        run_id="phase1-test",
+        config_sha256=CONFIG_HASH,
+        detector=FakeDetector(),
+        crop_config=CropConfig(),
+        tracking_config=TrackingConfig(detection_receipt_commit_interval_frames=3),
+    )
+
+    # Initial empty receipt, two complete batches, then the one-frame final batch.
+    assert running_commits == [0, 3, 6, 7]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_detection_receipt_commit_interval_requires_positive_true_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="tracking counts"):
+        TrackingConfig(detection_receipt_commit_interval_frames=value)  # type: ignore[arg-type]
+
+
 def test_resume_rejects_input_config_model_and_output_tamper(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path, (2,))
 
@@ -2440,7 +2531,7 @@ def test_cli_rejects_non_string_run_id_at_config_parse(
 
 
 @pytest.mark.parametrize("profile", [None, "gpu_pinned", "blocked_unverified_runtime"])
-def test_cli_rejects_non_cpu_execution_profile(
+def test_cli_rejects_unsupported_execution_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str | None
 ) -> None:
     cli = _load_phase1_cli(monkeypatch)
@@ -2451,8 +2542,27 @@ def test_cli_rejects_non_cpu_execution_profile(
     config["execution_profile"] = profile
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    with pytest.raises(ValueError, match="execution_profile=cpu_pinned"):
+    with pytest.raises(ValueError, match="supported pinned profile"):
         cli._settings(argparse.Namespace(config=path))
+
+
+def test_cli_accepts_full_kaggle_gpu_profile_without_inspecting_installed_paddle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _load_phase1_cli(monkeypatch)
+    config_path = (
+        Path(__file__).resolve().parents[2] / "configs" / "offline" / "ocr_phase1_kaggle_gpu.yaml"
+    )
+    config, _, _, run_id, _, identity = cli._settings(argparse.Namespace(config=config_path))
+
+    import aic2026.ocr.detector_only as detector_only_module
+
+    assert config["execution_profile"] == "kaggle_gpu_pinned"
+    assert config["model"]["device"] == "gpu:0"
+    assert run_id == "ppocrv6-small-det-gpt4o-mini-high-v1-phase1"
+    assert (
+        identity.runtime_identity_sha256 == detector_only_module.KAGGLE_GPU_RUNTIME_IDENTITY_SHA256
+    )
 
 
 def test_track_select_verify_settings_do_not_inspect_installed_paddle(

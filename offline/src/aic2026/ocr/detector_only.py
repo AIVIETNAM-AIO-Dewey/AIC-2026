@@ -35,8 +35,14 @@ PINNED_SOURCE_REGISTRY_SHA256 = "9b221b4dd366c850e8a8bf6b4f11ca13becb921d51dddf2
 PINNED_DETECTOR_PORT_CONFIG_SHA256 = (
     "577d38c2e6b6ea373f32a10b1ce90ef33db3b609b672a32cd7825b734c8ab535"
 )
+PINNED_KAGGLE_GPU_DETECTOR_PORT_CONFIG_SHA256 = (
+    "98cc25639b2ef297e4dfc13b2059bbe478166344a5c2c5decd6f95f041a66e9d"
+)
 DETECTOR_TREE_SHA256 = "5ee508811bc9f799f68d83fafa7a60ee0f94e0ee5415c07d328895b6b41340bd"
 RUNTIME_IDENTITY_SHA256 = "c89e9fcf8a6c1065f4cbd9ea20e06646130db601663a232eb6bfda58390a0723"
+KAGGLE_GPU_RUNTIME_IDENTITY_SHA256 = (
+    "9329d3f1994261a1dff7f71b4615a131cc05fbd19ca6add0cb73c40e208f237b"
+)
 RUNTIME_DISTRIBUTIONS = (
     "paddlepaddle",
     "paddleocr",
@@ -46,7 +52,13 @@ RUNTIME_DISTRIBUTIONS = (
     "Pillow",
     "numpy",
 )
+KAGGLE_GPU_RUNTIME_DISTRIBUTIONS = (
+    "paddlepaddle-gpu",
+    *RUNTIME_DISTRIBUTIONS[1:],
+)
 OPENCV_DISTRIBUTION = "opencv-contrib-python"
+SUPPORTED_EXECUTION_PROFILES = frozenset({"cpu_pinned", "kaggle_gpu_pinned"})
+PINNED_KAGGLE_CUDA_BUILD = "12.6"
 
 
 class DetectorOnlyError(RuntimeError):
@@ -143,9 +155,9 @@ def _model_path(cache_root: Path, relative: Any) -> Path:
     return path
 
 
-def _installed_package_versions() -> dict[str, str]:
+def _installed_package_versions(distributions: Sequence[str]) -> dict[str, str]:
     versions: dict[str, str] = {}
-    for distribution in RUNTIME_DISTRIBUTIONS:
+    for distribution in distributions:
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError as error:
@@ -156,17 +168,30 @@ def _installed_package_versions() -> dict[str, str]:
 def identity_from_locked_config(config: Mapping[str, Any]) -> dict[str, Any]:
     """Pure expected identity derivation; never imports or inspects OCR packages."""
 
-    if config.get("execution_profile") != "cpu_pinned":
-        raise DetectorOnlyError("runnable detector config requires execution_profile=cpu_pinned")
+    execution_profile = config.get("execution_profile")
+    if execution_profile not in SUPPORTED_EXECUTION_PROFILES:
+        raise DetectorOnlyError(
+            "runnable detector config requires a supported pinned execution profile"
+        )
+    gpu_profile = execution_profile == "kaggle_gpu_pinned"
+    pinned_model_hash = (
+        PINNED_KAGGLE_GPU_DETECTOR_PORT_CONFIG_SHA256
+        if gpu_profile
+        else PINNED_DETECTOR_PORT_CONFIG_SHA256
+    )
+    expected_distributions = (
+        KAGGLE_GPU_RUNTIME_DISTRIBUTIONS if gpu_profile else RUNTIME_DISTRIBUTIONS
+    )
+    paddle_provider = "paddlepaddle-gpu" if gpu_profile else "paddlepaddle"
     model = _mapping(config.get("model"), "model")
-    if _canonical_hash(model) != PINNED_DETECTOR_PORT_CONFIG_SHA256:
+    if _canonical_hash(model) != pinned_model_hash:
         raise DetectorOnlyError("portable detector-only configuration drift")
     expected_scalars = {
         "id": DETECTOR_MODEL_ID,
         "candidate_id": "ppocrv6-small-det-gpt4o-mini-high-v1",
         "revision": DETECTOR_REVISION,
         "source_registry_sha256": PINNED_SOURCE_REGISTRY_SHA256,
-        "device": "cpu",
+        "device": "gpu:0" if gpu_profile else "cpu",
         "enable_mkldnn": False,
         "download_allowed": False,
         "fallback": False,
@@ -180,7 +205,7 @@ def identity_from_locked_config(config: Mapping[str, Any]) -> dict[str, Any]:
         raise DetectorOnlyError("detector-only config cannot contain a recognizer")
 
     expected_packages = _mapping(model.get("packages"), "model.packages")
-    if set(expected_packages) != set(RUNTIME_DISTRIBUTIONS):
+    if set(expected_packages) != set(expected_distributions):
         raise DetectorOnlyError("exact OCR/crop runtime package identity is required")
     component = _mapping(model.get("detector"), "model.detector")
     if component.get("model_name") != DETECTOR_ID:
@@ -194,6 +219,9 @@ def identity_from_locked_config(config: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "packages": dict(expected_packages),
         "cv2_provider": OPENCV_DISTRIBUTION,
+        "paddle_provider": paddle_provider,
+        "execution_profile": execution_profile,
+        "device": model["device"],
         "network_policy": model["network_policy"],
     }
 
@@ -209,10 +237,13 @@ def _verify_runtime_identity(
     *,
     package_versions: Mapping[str, str] | None = None,
     opencv_providers: Sequence[str] | None = None,
+    paddle_providers: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     expected = identity_from_locked_config(config)
     actual_packages = (
-        dict(package_versions) if package_versions is not None else _installed_package_versions()
+        dict(package_versions)
+        if package_versions is not None
+        else _installed_package_versions(tuple(expected["packages"]))
     )
     if actual_packages != expected["packages"]:
         raise DetectorOnlyError("installed OCR/crop package versions differ from runtime pin")
@@ -224,6 +255,16 @@ def _verify_runtime_identity(
     if providers != [OPENCV_DISTRIBUTION]:
         raise DetectorOnlyError(
             f"cv2 must come only from {OPENCV_DISTRIBUTION!r}; got {providers!r}"
+        )
+    actual_paddle_providers = (
+        list(paddle_providers)
+        if paddle_providers is not None
+        else list(importlib.metadata.packages_distributions().get("paddle") or [])
+    )
+    if actual_paddle_providers != [expected["paddle_provider"]]:
+        raise DetectorOnlyError(
+            f"paddle must come only from {expected['paddle_provider']!r}; "
+            f"got {actual_paddle_providers!r}"
         )
     return expected
 
@@ -249,11 +290,13 @@ def _verify_detector_only(
     *,
     package_versions: Mapping[str, str] | None = None,
     opencv_providers: Sequence[str] | None = None,
+    paddle_providers: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     identity = _verify_runtime_identity(
         config,
         package_versions=package_versions,
         opencv_providers=opencv_providers,
+        paddle_providers=paddle_providers,
     )
     model = _mapping(config.get("model"), "model")
     component = _mapping(model.get("detector"), "model.detector")
@@ -297,6 +340,93 @@ def _default_constructor(**kwargs: Any) -> Any:
     from paddleocr import TextDetection
 
     return TextDetection(**kwargs)
+
+
+def _verify_gpu_runtime(device: str) -> dict[str, Any]:
+    """Prove that the pinned Paddle build can execute a kernel on the requested GPU."""
+
+    if device != "gpu:0":
+        raise DetectorOnlyError("Kaggle GPU profile requires exactly device='gpu:0'")
+    try:
+        import paddle
+
+        if not paddle.device.is_compiled_with_cuda():
+            raise DetectorOnlyError("pinned Paddle runtime is not compiled with CUDA")
+        device_count = int(paddle.device.cuda.device_count())
+        if device_count < 1:
+            raise DetectorOnlyError("pinned Paddle runtime cannot see a CUDA device")
+        cuda_value = getattr(paddle.version, "cuda", None)
+        cuda_build = cuda_value() if callable(cuda_value) else cuda_value
+        if str(cuda_build) != PINNED_KAGGLE_CUDA_BUILD:
+            raise DetectorOnlyError(
+                "Paddle CUDA build differs from pinned Kaggle runtime: "
+                f"expected {PINNED_KAGGLE_CUDA_BUILD!r}, got {cuda_build!r}"
+            )
+        cudnn_version = paddle.device.get_cudnn_version()
+        if not isinstance(cudnn_version, int) or cudnn_version <= 0:
+            raise DetectorOnlyError("pinned Paddle runtime cannot report a usable cuDNN")
+        paddle.set_device(device)
+        selected = str(paddle.device.get_device())
+        if selected != device:
+            raise DetectorOnlyError(
+                f"Paddle selected {selected!r} instead of requested GPU {device!r}"
+            )
+        probe = (paddle.ones([1], dtype="float32") + 1).numpy()
+        if probe.shape != (1,) or float(probe[0]) != 2.0:
+            raise DetectorOnlyError("Paddle CUDA execution probe returned an invalid result")
+        device_name = str(paddle.device.cuda.get_device_name(0))
+        if not device_name:
+            raise DetectorOnlyError("Paddle CUDA device name is unavailable")
+    except DetectorOnlyError:
+        raise
+    except Exception as error:
+        raise DetectorOnlyError("Paddle CUDA execution probe failed") from error
+    return {
+        "device": device,
+        "cuda_build": str(cuda_build),
+        "cudnn_version": cudnn_version,
+        "gpu_device_count": device_count,
+        "gpu_device_name": device_name,
+        "gpu_kernel_probe_passed": True,
+        "paddlex_device_fallback_disabled": True,
+    }
+
+
+def _validate_gpu_runtime_evidence(value: Mapping[str, Any], *, device: str) -> dict[str, Any]:
+    evidence = dict(value)
+    if set(evidence) != {
+        "device",
+        "cuda_build",
+        "cudnn_version",
+        "gpu_device_count",
+        "gpu_device_name",
+        "gpu_kernel_probe_passed",
+        "paddlex_device_fallback_disabled",
+    }:
+        raise DetectorOnlyError("GPU runtime evidence schema is invalid")
+    if evidence["device"] != device:
+        raise DetectorOnlyError("GPU runtime evidence device differs from the profile")
+    if evidence["cuda_build"] != PINNED_KAGGLE_CUDA_BUILD:
+        raise DetectorOnlyError("GPU runtime evidence CUDA build differs from the pin")
+    if (
+        not isinstance(evidence["cudnn_version"], int)
+        or isinstance(evidence["cudnn_version"], bool)
+        or evidence["cudnn_version"] <= 0
+    ):
+        raise DetectorOnlyError("GPU runtime evidence cuDNN version is invalid")
+    if (
+        not isinstance(evidence["gpu_device_count"], int)
+        or isinstance(evidence["gpu_device_count"], bool)
+        or evidence["gpu_device_count"] < 1
+    ):
+        raise DetectorOnlyError("GPU runtime evidence device count is invalid")
+    if not isinstance(evidence["gpu_device_name"], str) or not evidence["gpu_device_name"]:
+        raise DetectorOnlyError("GPU runtime evidence device name is invalid")
+    if evidence["gpu_kernel_probe_passed"] is not True:
+        raise DetectorOnlyError("GPU runtime kernel probe did not pass")
+    if evidence["paddlex_device_fallback_disabled"] is not True:
+        raise DetectorOnlyError("PaddleX device fallback must be disabled")
+    return evidence
 
 
 def _fsync_directory(path: Path) -> None:
@@ -546,6 +676,8 @@ class PaddleOcrV6Detector:
         constructor: Callable[..., Any] | None = None,
         package_versions: Mapping[str, str] | None = None,
         opencv_providers: Sequence[str] | None = None,
+        paddle_providers: Sequence[str] | None = None,
+        gpu_runtime_probe: Callable[[str], Mapping[str, Any]] | None = None,
     ) -> PaddleOcrV6Detector:
         """Explicit non-production factory for isolated adapter tests."""
 
@@ -556,6 +688,8 @@ class PaddleOcrV6Detector:
             constructor=constructor,
             package_versions=package_versions,
             opencv_providers=opencv_providers,
+            paddle_providers=paddle_providers,
+            gpu_runtime_probe=gpu_runtime_probe,
         )
         return _seal_test_detector(cls, engine, verification)
 
@@ -569,12 +703,15 @@ class PaddleOcrV6Detector:
         constructor: Callable[..., Any] | None = None,
         package_versions: Mapping[str, str] | None = None,
         opencv_providers: Sequence[str] | None = None,
+        paddle_providers: Sequence[str] | None = None,
+        gpu_runtime_probe: Callable[[str], Mapping[str, Any]] | None = None,
     ) -> tuple[Any, Mapping[str, Any]]:
         verification = _verify_detector_only(
             config,
             cache_root,
             package_versions=package_versions,
             opencv_providers=opencv_providers,
+            paddle_providers=paddle_providers,
         )
         model = _mapping(config["model"], "model")
         root = (runtime_cache_root or cache_root).resolve()
@@ -597,6 +734,16 @@ class PaddleOcrV6Detector:
             )
         runtime_cache.mkdir(parents=True, exist_ok=True)
         os.environ["PADDLE_PDX_CACHE_HOME"] = str(runtime_cache)
+        os.environ["PADDLE_PDX_DISABLE_DEVICE_FALLBACK"] = (
+            "True" if verification["execution_profile"] == "kaggle_gpu_pinned" else "False"
+        )
+        gpu_runtime: dict[str, Any] | None = None
+        gpu_probe: Callable[[str], Mapping[str, Any]] | None = None
+        if verification["execution_profile"] == "kaggle_gpu_pinned":
+            gpu_probe = gpu_runtime_probe or _verify_gpu_runtime
+            gpu_runtime = _validate_gpu_runtime_evidence(
+                gpu_probe(str(model["device"])), device=str(model["device"])
+            )
         snapshot = _snapshot_model(verification, root)
         verification = {
             **verification,
@@ -616,6 +763,19 @@ class PaddleOcrV6Detector:
                 engine = (constructor or _default_constructor)(**kwargs)
         except PaddleOcrV6Error as error:
             raise DetectorOnlyError(str(error)) from error
+        if gpu_runtime is not None and gpu_probe is not None:
+            after_constructor = _validate_gpu_runtime_evidence(
+                gpu_probe(str(model["device"])), device=str(model["device"])
+            )
+            if after_constructor != gpu_runtime:
+                raise DetectorOnlyError("GPU runtime identity changed during detector construction")
+            verification = {
+                **verification,
+                "gpu_runtime": {
+                    **gpu_runtime,
+                    "probe_boundaries": ("before_constructor", "after_constructor"),
+                },
+            }
         _verify_snapshot(snapshot, verification["files"])
         return engine, verification
 

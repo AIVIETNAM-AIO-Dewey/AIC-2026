@@ -9,6 +9,7 @@ from .checkpoint import (
     verify_checkpoint_bundle,
 )
 from .detector_only import (
+    SUPPORTED_EXECUTION_PROFILES,
     DetectorOnlyError,
     DetectorPolygon,
     PaddleOcrV6Detector,
@@ -72,6 +73,7 @@ __all__ = [
     "CheckpointArtifactPaths",
     "PaddleOcrV6Error",
     "PaddleOcrV6Detector",
+    "SUPPORTED_EXECUTION_PROFILES",
     "OcrShardArtifactBundle",
     "NegativeFixture",
     "NegativeSuiteReceipt",
