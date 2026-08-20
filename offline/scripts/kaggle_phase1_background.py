@@ -75,13 +75,6 @@ def atomic_json(path: Path, value: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def find_unique(pattern: str) -> Path:
-    matches = sorted(INPUT_ROOT.rglob(pattern))
-    if not matches:
-        raise FileNotFoundError(f"required Kaggle input is missing: {pattern}")
-    return matches[0]
-
-
 def find_input_directories(name: str, *, maximum_depth: int = 5) -> list[Path]:
     """Find attached notebook outputs without descending into frame collections."""
 
@@ -104,6 +97,15 @@ def find_input_directories(name: str, *, maximum_depth: int = 5) -> list[Path]:
             elif child.name not in skipped:
                 pending.append((child, depth + 1))
     return sorted(set(found))
+
+
+def find_unique_input_directory(name: str) -> Path:
+    matches = find_input_directories(name)
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            f"expected one Kaggle input directory named {name!r}, found {len(matches)}"
+        )
+    return matches[0]
 
 
 def environment_marker_matches(root: Path) -> bool:
@@ -214,7 +216,7 @@ def setup_environment() -> None:
     )
     site_packages_path.mkdir(parents=True, exist_ok=True)
     site_packages = str(site_packages_path)
-    wheelhouse = find_unique("aic-ocr-phase1-wheelhouse")
+    wheelhouse = find_unique_input_directory("aic-ocr-phase1-wheelhouse")
     packages = [
         "paddleocr==3.7.0",
         "paddlex==3.7.2",
@@ -513,8 +515,17 @@ def phase1_env(gpu: int | None = None) -> dict[str, str]:
 
 def model_root() -> Path:
     relative = Path("ocr/ppocrv6-small/detector/inference.pdiparams")
-    model_file = find_unique(relative.as_posix())
-    return model_file.parents[3]
+    candidates = [
+        root
+        for root in find_input_directories("aic-ocr-phase1-model-root")
+        if (root / relative).is_file()
+    ]
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            "expected one attached aic-ocr-phase1-model-root with pinned detector, "
+            f"found {len(candidates)}"
+        )
+    return candidates[0]
 
 
 def checkpoint_chain_summary(root: Path, shard_id: str) -> tuple[int, tuple[str, ...]] | None:
