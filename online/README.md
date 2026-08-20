@@ -125,6 +125,26 @@ Open your browser at **`http://localhost:8000`**.
 
 ---
 
+## 📦 Automated Official Competition Submission Packager
+
+When the organizers provide a batch of query `.txt` files (e.g. `query-1-kis.txt`, `query-2-qa.txt`, `query-3-trake.txt`), generate the official submission `.zip` with a single command:
+
+```bash
+# Automatically processes all queries, formats exact CSVs, and creates valid submission.zip:
+PYTHONPATH=. python -m online.src.submission.run_batch_submission \
+    --queries-dir /path/to/competition_batch1 \
+    --output-zip team_AIC_round1.zip \
+    --top-k 100
+```
+
+#### Official Submission Format Compliance:
+- **KIS (`query-X-kis.csv`)**: `<video_id>, <frame_idx>` (No `.mp4`, integer frame index, max 100 lines).
+- **Q&A (`query-X-qa.csv`)**: `<video_id>, <frame_idx>, "<answer>"` ($\le 100$ characters, properly escaped quotes, no headers).
+- **TRAKE (`query-X-trake.csv`)**: `<video_id>, <frame_1>, <frame_2>, ..., <frame_N>` ($N$ event frames, strictly monotonic).
+- **Packaging**: Creates `submission.zip` containing the mandatory `submission/` root directory.
+
+---
+
 ## 🧪 Testing & Benchmarks
 
 Run the automated test suite:
