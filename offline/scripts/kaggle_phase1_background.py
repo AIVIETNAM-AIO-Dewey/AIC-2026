@@ -25,7 +25,6 @@ from pathlib import Path
 EXPECTED_FRAMES = 176_707
 EXPECTED_VIDEOS = 873
 SOFT_STOP_SECONDS = 9.5 * 60 * 60
-VENV_TIMEOUT_SECONDS = 60
 OFFLINE_INSTALL_TIMEOUT_SECONDS = 15 * 60
 PADDLE_INSTALL_TIMEOUT_SECONDS = 20 * 60
 ENV_COPY_TIMEOUT_SECONDS = 15 * 60
@@ -187,11 +186,25 @@ def setup_environment() -> None:
         shutil.rmtree(ENV_ROOT)
     if restore_environment():
         return
-    # Kaggle injects sitecustomize into the system interpreter.  -S prevents it
-    # from importing optional packages before this isolated prefix exists.
-    run(
-        [sys.executable, "-S", "-m", "venv", "--without-pip", str(ENV_ROOT)],
-        timeout=VENV_TIMEOUT_SECONDS,
+    # Kaggle's ``venv`` bootstrap can hang inside its injected sitecustomize,
+    # even with ``-S`` and ``--without-pip``.  Build the minimal PEP 405 prefix
+    # directly instead: the system interpreter supplies the standard library,
+    # while all third-party packages are installed into this private prefix.
+    executable = Path(sys.executable).resolve()
+    (ENV_ROOT / "bin").mkdir(parents=True)
+    os.symlink(executable, ENV_PYTHON)
+    (ENV_ROOT / "pyvenv.cfg").write_text(
+        "\n".join(
+            (
+                f"home = {executable.parent}",
+                "include-system-site-packages = false",
+                "version = "
+                f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                f"executable = {executable}",
+                "",
+            )
+        ),
+        encoding="utf-8",
     )
     site_packages_path = (
         ENV_ROOT
