@@ -52,7 +52,7 @@ GLOBAL_MANIFEST = SHARD_ROOT / "global-shards.json"
 STATE = WORK_ROOT / "background-state.json"
 SMOKE_ROOT = Path("/kaggle/working/ocr-phase1-smoke").resolve()
 ENV_MARKER = ".aic-phase1-gpu-ready"
-ENV_MARKER_VALUE = "aic26.phase1-gpu-env.ppocr-3.7.0-paddle-3.3.1-pydantic-2.10.6.v2"
+ENV_MARKER_VALUE = "aic26.phase1-gpu-env.ppocr-3.7.0-paddle-3.3.1-pydantic-2.10.6.v3"
 
 
 def log(message: str) -> None:
@@ -127,7 +127,7 @@ def probe_environment() -> None:
             str(ENV_PYTHON),
             "-c",
             (
-                "import importlib.metadata as m; import paddle, wrapt; "
+                "import importlib.metadata as m; import numpy, paddle, wrapt; "
                 "expected={'paddlepaddle-gpu':'3.3.1','paddleocr':'3.7.0',"
                 "'paddlex':'3.7.2','pyclipper':'1.4.0',"
                 "'opencv-contrib-python':'4.10.0.84','Pillow':'11.1.0',"
@@ -137,6 +137,7 @@ def probe_environment() -> None:
                 "'safetensors':'0.8.0'}; "
                 "assert all(m.version(k)==v for k,v in expected.items()), "
                 "{k:m.version(k) for k in expected}; "
+                "assert numpy.__version__=='1.26.4', numpy.__version__; "
                 "assert paddle.device.cuda.device_count()==2; "
                 "print(paddle.__version__, paddle.device.cuda.device_count())"
             ),
@@ -298,6 +299,28 @@ def setup_environment() -> None:
             "--index-url",
             "https://pypi.org/simple",
             "pydantic==2.10.6",
+        ],
+        env=pip_environment,
+        timeout=OFFLINE_INSTALL_TIMEOUT_SECONDS,
+    )
+    # Paddle is installed with ``--no-deps`` below so its large wheel cannot
+    # perturb the locked environment. Install its remaining direct runtime
+    # requirements explicitly, also without dependency resolution: all of
+    # their required shared packages are already supplied by the wheelhouse.
+    run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            site_packages,
+            "--ignore-installed",
+            "--no-deps",
+            "--no-cache-dir",
+            "--only-binary=:all:",
+            "--index-url",
+            "https://pypi.org/simple",
             "protobuf==5.29.3",
             "opt_einsum==3.3.0",
             "networkx==3.6.1",
