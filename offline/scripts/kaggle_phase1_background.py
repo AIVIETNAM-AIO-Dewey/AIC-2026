@@ -52,7 +52,7 @@ GLOBAL_MANIFEST = SHARD_ROOT / "global-shards.json"
 STATE = WORK_ROOT / "background-state.json"
 SMOKE_ROOT = Path("/kaggle/working/ocr-phase1-smoke").resolve()
 ENV_MARKER = ".aic-phase1-gpu-ready"
-ENV_MARKER_VALUE = "aic26.phase1-gpu-env.ppocr-3.7.0-paddle-3.3.1-pydantic-2.10.6.v1"
+ENV_MARKER_VALUE = "aic26.phase1-gpu-env.ppocr-3.7.0-paddle-3.3.1-pydantic-2.10.6.v2"
 
 
 def log(message: str) -> None:
@@ -132,7 +132,9 @@ def probe_environment() -> None:
                 "'paddlex':'3.7.2','pyclipper':'1.4.0',"
                 "'opencv-contrib-python':'4.10.0.84','Pillow':'11.1.0',"
                 "'numpy':'1.26.4','PyYAML':'6.0.2','pydantic':'2.10.6',"
-                "'wrapt':'1.17.3'}; "
+                "'wrapt':'1.17.3','protobuf':'5.29.3',"
+                "'opt-einsum':'3.3.0','networkx':'3.6.1',"
+                "'safetensors':'0.8.0'}; "
                 "assert all(m.version(k)==v for k,v in expected.items()), "
                 "{k:m.version(k) for k in expected}; "
                 "assert paddle.device.cuda.device_count()==2; "
@@ -296,6 +298,10 @@ def setup_environment() -> None:
             "--index-url",
             "https://pypi.org/simple",
             "pydantic==2.10.6",
+            "protobuf==5.29.3",
+            "opt_einsum==3.3.0",
+            "networkx==3.6.1",
+            "safetensors==0.8.0",
         ],
         env=pip_environment,
         timeout=OFFLINE_INSTALL_TIMEOUT_SECONDS,
