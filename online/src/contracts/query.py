@@ -71,21 +71,21 @@ class SpeechEvidence(BaseModel):
 
 class SearchResult(BaseModel):
     """Single candidate keyframe result card."""
-    rank: int
+    rank: int = 1
     video_id: str
-    keyframe_n: int
+    keyframe_n: int = 1
     frame_idx: int
-    pts_time_s: float
-    submission_string: str  # Format: "<VIDEO_ID>, <FRAME_IDX>"
+    pts_time_s: float = 0.0
+    submission_string: str = ""  # Format: "<VIDEO_ID>, <FRAME_IDX>"
     
-    # Scores
-    final_score: float
-    stage1_score: float
-    stage2_rerank_score: float
-    visual_similarity: float
+    # Fusion & Multi-Stage Scores
+    final_score: float = 0.0
+    stage1_score: float = 0.0
+    stage2_rerank_score: float = 0.0
+    visual_similarity: float = 0.0
     
-    # Explainability & Visual Artifacts
-    image_relpath: str
+    # Image Display
+    image_relpath: str = ""
     image_available: bool = True
     best_matching_objects: list[MatchedObject] = Field(default_factory=list)
     dam_full_captions: list[str] = Field(default_factory=list)
@@ -98,15 +98,19 @@ class SearchResult(BaseModel):
     # Adjacent Keyframes for shot navigation
     adjacent_keyframes: list[int] = Field(default_factory=list)
     
+    # TRAKE Sequential Matched Frames
+    trake_matched_frames: list[int] = Field(default_factory=list)
+    
     # VQA Answer (if VQA task)
     vqa_answer: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
     """Full search response payload returned to Frontend UI."""
-    task_type: TaskType
-    original_query: str
-    parsed_query: ParsedQuery
-    execution_time_ms: float
-    total_candidates_evaluated: int
-    results: list[SearchResult]
+    task_type: TaskType = "KIS"
+    original_query: str = ""
+    parsed_query: Optional[ParsedQuery] = None
+    execution_time_ms: float = 0.0
+    total_candidates_evaluated: int = 0
+    results: list[SearchResult] = Field(default_factory=list)
+    vqa_answer: Optional[str] = None
