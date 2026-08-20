@@ -75,13 +75,18 @@ def atomic_json(path: Path, value: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def find_input_directories(name: str, *, maximum_depth: int = 5) -> list[Path]:
+def find_input_directories(
+    name: str,
+    *,
+    maximum_depth: int = 5,
+    roots: tuple[Path, ...] | None = None,
+) -> list[Path]:
     """Find attached notebook outputs without descending into frame collections."""
 
     if not INPUT_ROOT.is_dir():
         return []
     found: list[Path] = []
-    pending = [(INPUT_ROOT, 0)]
+    pending = [(root, 0) for root in (roots or (INPUT_ROOT,))]
     skipped = {"keyframes", "map-keyframes", "crops", "state"}
     while pending:
         parent, depth = pending.pop()
@@ -354,9 +359,18 @@ def setup_environment() -> None:
 def build_manifest() -> None:
     if MANIFEST.is_file() and sum(1 for _ in MANIFEST.open("rb")) == EXPECTED_FRAMES:
         return
-    map_directories = find_input_directories("map-keyframes", maximum_depth=8)
+    dataset_roots = (
+        INPUT_ROOT / "aic-test-dataset",
+        INPUT_ROOT / "aic-26-video",
+    )
+    missing_roots = [str(root) for root in dataset_roots if not root.is_dir()]
+    if missing_roots:
+        raise FileNotFoundError(f"required Kaggle dataset roots are missing: {missing_roots}")
+    log("discovering map-keyframes only inside mounted dataset roots")
+    map_directories = find_input_directories("map-keyframes", maximum_depth=8, roots=dataset_roots)
     if not map_directories:
         raise FileNotFoundError("no mounted map-keyframes directory was found")
+    log(f"found {len(map_directories)} map-keyframes directories")
     helper = WORK_ROOT / "build_source_manifest.py"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(
