@@ -113,6 +113,25 @@ def find_unique_input_directory(name: str) -> Path:
     return matches[0]
 
 
+def find_dataset_mount(slug: str) -> Path:
+    """Resolve one Kaggle dataset slug without recursively scanning its files."""
+
+    candidates = [INPUT_ROOT / slug]
+    namespaced_root = INPUT_ROOT / "datasets"
+    if namespaced_root.is_dir():
+        try:
+            owners = sorted(item for item in namespaced_root.iterdir() if item.is_dir())
+        except OSError:
+            owners = []
+        candidates.extend(owner / slug for owner in owners)
+    matches = sorted({item.resolve() for item in candidates if item.is_dir()})
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            f"expected one mounted Kaggle dataset with slug {slug!r}, found {matches}"
+        )
+    return matches[0]
+
+
 def environment_marker_matches(root: Path) -> bool:
     marker = root / ENV_MARKER
     python = root / "bin/python"
@@ -359,13 +378,8 @@ def setup_environment() -> None:
 def build_manifest() -> None:
     if MANIFEST.is_file() and sum(1 for _ in MANIFEST.open("rb")) == EXPECTED_FRAMES:
         return
-    dataset_roots = (
-        INPUT_ROOT / "aic-test-dataset",
-        INPUT_ROOT / "aic-26-video",
-    )
-    missing_roots = [str(root) for root in dataset_roots if not root.is_dir()]
-    if missing_roots:
-        raise FileNotFoundError(f"required Kaggle dataset roots are missing: {missing_roots}")
+    dataset_roots = tuple(find_dataset_mount(slug) for slug in ("aic-test-dataset", "aic-26-video"))
+    log("resolved dataset roots: " + ", ".join(map(str, dataset_roots)))
     log("discovering map-keyframes only inside mounted dataset roots")
     map_directories = find_input_directories("map-keyframes", maximum_depth=8, roots=dataset_roots)
     if not map_directories:
