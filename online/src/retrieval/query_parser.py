@@ -21,7 +21,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_
 class QueryParser:
     """Intelligent Query Decomposer supporting Gemini Flash and Local Rule-based fallback."""
 
-    def __init__(self, gemini_model_id: str = "gemini-2.0-flash") -> None:
+    def __init__(self, gemini_model_id: str = "gemini-3.5-flash-lite") -> None:
         self.gemini_model_id = gemini_model_id
         self._gemini_client = None
         self._init_gemini()

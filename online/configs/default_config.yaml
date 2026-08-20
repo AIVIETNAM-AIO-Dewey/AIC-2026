@@ -38,8 +38,8 @@ models:
   # Local fast LLM model for query parsing / VQA extractive reader
   local_llm_model_id: "Qwen/Qwen2.5-3B-Instruct"
   
-  # Cloud LLM model for complex TRAKE reasoning
-  gemini_model_id: "gemini-2.0-flash"
+  # Cloud LLM model for fast intelligent query parsing & VQA
+  gemini_model_id: "gemini-3.5-flash-lite"
 
 retrieval:
   # Stage 1 default channel weights

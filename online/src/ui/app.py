@@ -40,6 +40,7 @@ def startup_event():
         qdrant_db_path=str(QDRANT_DB_PATH),
         keyframes_root=str(KEYFRAMES_ROOT),
     )
+    engine.models.warmup()
 
 
 class ParseRequest(BaseModel):
