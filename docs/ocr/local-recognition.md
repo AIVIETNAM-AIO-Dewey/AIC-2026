@@ -90,7 +90,8 @@ materializing crop files:
 
 This path verifies the linked Phase 1 artifacts before inference, reconstructs every crop
 from its source frame and immutable provenance, and rechecks source/canonical/crop hashes.
-Its running receipt commits progress every 32 records. The v2 receipt binds the exact batch
+Its running receipt commits progress at the requested interval (256 records above). The v2
+receipt binds the exact batch
 size, bounded canonical-frame LRU settings, execution-policy hash, GPU/CUDA/cuDNN/TF32
 runtime evidence, and cumulative cache/batch statistics. A failed batch writes no records.
 After interruption, rerun the exact command with `--resume`; any torn or uncommitted tail is
@@ -115,7 +116,39 @@ final backend adapter are separate deterministic commands:
   --run-id vietocr-local-v1
 ```
 
-Consensus first uses exact agreement; disagreement is resolved by support count, confidence
-weighted by Phase 1 crop quality, then representative rank. Empty trajectories remain
+Consensus first uses exact agreement; disagreement is resolved by support count, summed
+Phase 1 crop quality, representative rank, then text. Model confidence is retained as
+informational evidence but cannot change the selected text. Empty trajectories remain
 explicit but are marked unaccepted, so backend ingestion does not index them. This stage has
 no VLM fallback and does not rewrite model text.
+
+## Continue every completed Kaggle shard end to end
+
+Use the Kaggle launcher after all Phase 1 shards have completed and the prior output is
+attached read-only. It creates/reuses an isolated VietOCR environment, verifies or downloads
+the pinned checkpoint, runs four independent workers over T4 x2, resumes committed prefixes,
+builds consensus/final JSONL, and publishes a content-addressed bundle:
+
+```bash
+python offline/scripts/kaggle_phase2_e2e.py \
+  --phase1-root /kaggle/input/PRIOR_PHASE1_OUTPUT/ocr-production-bg-v1 \
+  --input-root /kaggle/input \
+  --data-root /kaggle/input \
+  --source-commit-sha "$(git rev-parse HEAD)" \
+  --devices cuda:0,cuda:1 \
+  --workers-per-gpu 2 \
+  --batch-size 256 \
+  --commit-interval-records 256 \
+  --soft-stop-seconds 34200 \
+  --save-progress-on-error
+```
+
+Without explicit `--shard`, the launcher rejects an incomplete Phase 1 run. A cooperative
+soft stop exits successfully with authenticated partial outputs for the next Kaggle Version.
+`--save-progress-on-error` also lets Kaggle save durable progress after an unexpected Phase 2
+failure, while `continuation-state.json` remains explicitly `failed` rather than pretending
+the OCR bundle completed. Attach that prior output to the next Version; the launcher restores
+only receipt-bound bytes and re-verifies them before continuing.
+
+The launcher does not upload to Google Drive. Upload only a verified directory under
+`final-bundles/bundle-*` after `continuation-state.json` reports `status: completed`.

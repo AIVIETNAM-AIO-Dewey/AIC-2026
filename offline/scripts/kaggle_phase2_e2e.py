@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -207,13 +208,15 @@ def _environment_report(python: Path, device: str) -> dict[str, Any] | None:
     if not python.is_file():
         return None
     code = (
-        "import importlib.metadata as m,json,torch,torchvision;"
+        "import importlib.metadata as m,json,numpy,PIL,pydantic,torch,torchvision,yaml;"
         "from vietocr.tool.config import Cfg;"
         "from vietocr.tool.predictor import Predictor;"
         f"names={list(ENV_EXPECTED_VERSIONS)!r};"
         "print(json.dumps({'versions':{n:m.version(n) for n in names},"
         "'cuda':torch.cuda.is_available(),'cuda_count':torch.cuda.device_count(),"
         "'cuda_devices':[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],"
+        "'runtime_versions':{'numpy':numpy.__version__,'Pillow':PIL.__version__,"
+        "'pydantic':pydantic.__version__,'PyYAML':yaml.__version__},"
         "'torch':m.version('torch'),"
         "'torchvision':m.version('torchvision')}))"
     )
@@ -225,6 +228,12 @@ def _environment_report(python: Path, device: str) -> dict[str, Any] | None:
     except (IndexError, json.JSONDecodeError):
         return None
     if report.get("versions") != ENV_EXPECTED_VERSIONS:
+        return None
+    runtime_versions = report.get("runtime_versions")
+    if not isinstance(runtime_versions, dict) or any(
+        runtime_versions.get(name) != ENV_EXPECTED_VERSIONS[name]
+        for name in ("numpy", "Pillow", "pydantic", "PyYAML")
+    ):
         return None
     if device.startswith("cuda") and report.get("cuda") is not True:
         return None
@@ -340,9 +349,7 @@ def discover_phase1_root(input_root: Path, explicit: Path | None) -> Path:
         ]
         working = Path("/kaggle/working")
         if working.is_dir():
-            working_manifests = find_named_paths(
-                working, "global-shards.json", directories=False
-            )
+            working_manifests = find_named_paths(working, "global-shards.json", directories=False)
             manifests.extend(
                 item
                 for item in working_manifests
@@ -352,8 +359,7 @@ def discover_phase1_root(input_root: Path, explicit: Path | None) -> Path:
     valid = [
         item
         for item in candidates
-        if (item / "manifests/shards/global-shards.json").is_file()
-        and (item / "phase1").is_dir()
+        if (item / "manifests/shards/global-shards.json").is_file() and (item / "phase1").is_dir()
     ]
     if len(valid) != 1:
         raise ValueError(
@@ -382,10 +388,9 @@ def discover_completed_shards(
 ) -> tuple[str, str, int, int, list[Phase1Shard]]:
     global_path = phase1_root / "manifests/shards/global-shards.json"
     global_receipt = read_json(receipt_path(global_path))
-    if (
-        global_receipt.get("status") != "completed"
-        or global_receipt.get("global_manifest_sha256") != sha256_file(global_path)
-    ):
+    if global_receipt.get("status") != "completed" or global_receipt.get(
+        "global_manifest_sha256"
+    ) != sha256_file(global_path):
         raise ValueError("global Phase 1 shard manifest is not completed or has drifted")
     global_value = read_json(global_path)
     shard_values = global_value.get("shards")
@@ -419,9 +424,8 @@ def discover_completed_shards(
             raise ValueError(f"invalid shard manifest path: {shard_id}")
         frame_manifest = (global_path.parent / raw_relpath).resolve()
         frame_manifest.relative_to(global_path.parent.resolve())
-        if (
-            not frame_manifest.is_file()
-            or sha256_file(frame_manifest) != item.get("manifest_sha256")
+        if not frame_manifest.is_file() or sha256_file(frame_manifest) != item.get(
+            "manifest_sha256"
         ):
             raise ValueError(f"Phase 1 shard manifest checksum mismatch: {shard_id}")
         root = run_dir / shard_id
@@ -771,8 +775,7 @@ def process_shard(
         or consensus_marker.get("trajectories_sha256") != sha256_file(shard.trajectories)
         or consensus_marker.get("representatives_sha256") != sha256_file(shard.representatives)
         or consensus_marker.get("recognition_output_sha256") != sha256_file(recognition)
-        or consensus_marker.get("recognition_receipt_sha256")
-        != sha256_file(recognition_receipt)
+        or consensus_marker.get("recognition_receipt_sha256") != sha256_file(recognition_receipt)
     ):
         raise ValueError(f"consensus provenance drift: {shard.shard_id}")
 
@@ -844,9 +847,7 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     expected_lines.append(f"{index_hash}  bundle-index.json\n")
     if sums_path.read_text(encoding="utf-8") != "".join(sorted(expected_lines)):
         raise ValueError("bundle SHA256SUMS drift")
-    actual = {
-        item.relative_to(bundle).as_posix() for item in bundle.rglob("*") if item.is_file()
-    }
+    actual = {item.relative_to(bundle).as_posix() for item in bundle.rglob("*") if item.is_file()}
     if actual != expected_paths | {"bundle-index.json", "SHA256SUMS"}:
         raise ValueError("bundle contains missing or undeclared files")
     return index
@@ -996,12 +997,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--no-weight-download", action="store_true")
-    parser.add_argument(
-        "--work-root", type=Path, default=Path("/kaggle/working/ocr-phase2-e2e-v1")
-    )
-    parser.add_argument(
-        "--env-root", type=Path, default=Path("/kaggle/working/phase2-vietocr-env")
-    )
+    parser.add_argument("--work-root", type=Path, default=Path("/kaggle/working/ocr-phase2-e2e-v1"))
+    parser.add_argument("--env-root", type=Path, default=Path("/kaggle/working/phase2-vietocr-env"))
     parser.add_argument("--phase2-python", type=Path)
     parser.add_argument(
         "--devices",
@@ -1022,6 +1019,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--commit-interval-records", type=int, default=256)
     parser.add_argument("--shard", action="append", default=[])
+    parser.add_argument(
+        "--save-progress-on-error",
+        action="store_true",
+        help=(
+            "Write a failed continuation state and exit zero so Kaggle saves all durable "
+            "Phase 1/2 progress; the state remains explicitly failed."
+        ),
+    )
     return parser
 
 
@@ -1041,6 +1046,11 @@ def main(argv: list[str] | None = None) -> int:
         phase1_run_id=args.phase1_run_id,
         selected=set(args.shard),
     )
+    if not args.shard and len(shards) != total_shards:
+        raise RuntimeError(
+            f"Phase 1 is incomplete: {len(shards)}/{total_shards} completed shards; "
+            "resume Phase 1 before launching the full Phase 2 bundle"
+        )
     log(f"found {len(shards)}/{total_shards} completed Phase 1 shard(s)")
     source_commit_sha = args.source_commit_sha or _git_head()
     if not (7 <= len(source_commit_sha) <= 64) or any(
@@ -1173,21 +1183,46 @@ def main(argv: list[str] | None = None) -> int:
         consensus_run_id=args.consensus_run_id,
         final_run_id=args.final_run_id,
     )
-    print(
-        json.dumps(
-            {
-                "status": "completed",
-                "processed_shards": len(shards),
-                "total_phase1_shards": total_shards,
-                "bundle": str(bundle),
-                "bundle_index_sha256": sha256_file(bundle / "bundle-index.json"),
-                "upload_performed": False,
-            },
-            sort_keys=True,
-        )
-    )
+    state = {
+        "schema_version": "aic26.ocr_phase2_continuation_state.v1",
+        "status": "completed",
+        "completed_shards": sorted(outputs),
+        "remaining_shards": [],
+        "processed_shards": len(shards),
+        "total_phase1_shards": total_shards,
+        "bundle": str(bundle),
+        "bundle_index_sha256": sha256_file(bundle / "bundle-index.json"),
+        "upload_performed": False,
+    }
+    atomic_json(work_root / "continuation-state.json", state)
+    print(json.dumps(state, sort_keys=True))
     return 0
 
 
+def entrypoint(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    preserve = "--save-progress-on-error" in arguments
+    try:
+        return main(arguments)
+    except Exception as error:
+        if not preserve:
+            raise
+        traceback.print_exc()
+        parsed = build_parser().parse_args(arguments)
+        work_root = parsed.work_root.expanduser().resolve()
+        working = Path("/kaggle/working").resolve()
+        work_root.relative_to(working)
+        state = {
+            "schema_version": "aic26.ocr_phase2_continuation_state.v1",
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error_message": " ".join(str(error).split())[:1000] or type(error).__name__,
+            "upload_performed": False,
+        }
+        atomic_json(work_root / "continuation-state.json", state)
+        print(json.dumps(state, sort_keys=True))
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entrypoint())

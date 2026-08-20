@@ -402,6 +402,7 @@ def _phase1_shard(
     *,
     frame_count: int = 2,
     legacy_tracking: bool = False,
+    include_source_hashes: bool = True,
     tracking_config: TrackingConfig | None = None,
 ) -> tuple[Path, Path, Path, Path]:
     frame_dir = tmp_path / "frames" / "video"
@@ -419,7 +420,7 @@ def _phase1_shard(
                 pts_time_s=index / 25,
                 fps=25.0,
                 frame_relpath=f"frames/video/{index}.png",
-                source_image_sha256=sha256_file(frame_path),
+                source_image_sha256=(sha256_file(frame_path) if include_source_hashes else None),
                 width=32,
                 height=18,
             )
@@ -464,6 +465,49 @@ def _phase1_shard(
         tracking_config=tracking,
     )
     return manifest, detections, trajectories, representatives
+
+
+def test_representative_runner_accepts_lazy_phase1_manifest(
+    tmp_path: Path,
+) -> None:
+    artifacts = _phase1_shard(tmp_path, include_source_hashes=False)
+    assert all(row["source_image_sha256"] is None for row in iter_jsonl(artifacts[0]))
+    bindings = [RepresentativeCropBinding.model_validate(row) for row in iter_jsonl(artifacts[3])]
+    assert all(binding.source_image_sha256 for binding in bindings)
+
+    weights = tmp_path / "model.pth"
+    weights.write_bytes(b"fixture-weights")
+    output = tmp_path / "lazy-results.jsonl"
+    _run_representatives(
+        tmp_path,
+        artifacts=artifacts,
+        output=output,
+        recognizer=_RepresentativeRecognizer(sha256_file(weights), ["Tiếng Việt", "English"]),
+    )
+
+    assert [row["transcript_nfc"] for row in iter_jsonl(output)] == [
+        "Tiếng Việt",
+        "English",
+    ]
+
+    consensus = tmp_path / "lazy-consensus.jsonl"
+    run_trajectory_consensus(
+        trajectories=artifacts[2],
+        representatives=artifacts[3],
+        recognition_output=output,
+        output=consensus,
+        run_id="lazy-consensus",
+    )
+    final = tmp_path / "lazy-final.jsonl"
+    build_final_ocr_artifact(
+        trajectories=artifacts[2],
+        consensus=consensus,
+        output=final,
+        run_id="lazy-final",
+    )
+    final_rows = list(iter_jsonl(final))
+    assert [row["frame_uid"] for row in final_rows] == ["video:0", "video:1"]
+    assert all(row["source_image_sha256"] for row in final_rows)
 
 
 def _runtime_fixture() -> tuple[dict[str, str], dict[str, str], str]:

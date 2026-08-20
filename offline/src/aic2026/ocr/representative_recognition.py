@@ -413,9 +413,36 @@ def _load_manifest_frames(path: Path) -> dict[str, FrameRef]:
     by_uid = {frame.frame_uid: frame for frame in frames}
     if len(by_uid) != len(frames):
         raise ValueError("frame manifest contains duplicate frame_uid values")
-    if any(frame.source_image_sha256 is None for frame in frames):
-        raise ValueError("Phase 2 requires source image SHA-256 for every frame")
     return by_uid
+
+
+def _materialize_binding_frame(binding: RepresentativeCropBinding, frame: FrameRef) -> FrameRef:
+    """Bind a lazy Phase 1 manifest row to its verified representative SHA."""
+
+    expected = (
+        frame.video_id,
+        frame.frame_idx,
+        frame.frame_relpath,
+        frame.width,
+        frame.height,
+    )
+    actual = (
+        binding.video_id,
+        binding.frame_idx,
+        binding.frame_relpath,
+        binding.source_width,
+        binding.source_height,
+    )
+    if actual != expected:
+        raise ValueError(f"representative/frame manifest provenance drift: {binding.frame_uid}")
+    if (
+        frame.source_image_sha256 is not None
+        and frame.source_image_sha256 != binding.source_image_sha256
+    ):
+        raise ValueError(f"representative/frame manifest provenance drift: {binding.frame_uid}")
+    if frame.source_image_sha256 is None:
+        return frame.model_copy(update={"source_image_sha256": binding.source_image_sha256})
+    return frame
 
 
 _RESOURCE_LIMIT_FIELDS = (
@@ -807,6 +834,8 @@ def run_representative_recognition(
         frame = frames_by_uid.get(binding.frame_uid)
         if frame is None:
             raise ValueError(f"representative references an unknown frame: {binding.frame_uid}")
+        frame = _materialize_binding_frame(binding, frame)
+        frames_by_uid[binding.frame_uid] = frame
         _validate_binding_frame(binding, frame)
 
     model_config_hash = sha256_file(model_config)
