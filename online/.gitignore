@@ -1,0 +1,11 @@
+# Ignore vector database, large embeddings, cache, and secrets
+qdrant_db/
+cache/
+*.npy
+*.pt
+*.bin
+*.log
+.env
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIC-2026 Multimodal Video Retrieval Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="brand-logo">🎬</div>
+        <div class="brand-text">
+          <h1>AIC-2026 <span>Video Retrieval</span></h1>
+          <p class="subtitle">Quad-Modal Hybrid Search Engine • SigLIP-2 + BGE-M3 + Qdrant + BGE-Reranker</p>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-corpus">📚 177,321 Keyframes</span>
+        <span class="badge badge-objects">🔍 435,713 Objects</span>
+        <span class="badge badge-speech">🎙️ 55,168 Speech</span>
+      </div>
+    </header>
+
+    <!-- Main Search Control Deck -->
+    <main class="control-deck">
+      <!-- Task Selection Tabs -->
+      <div class="task-tabs" id="taskTabs">
+        <button class="tab-btn active" data-task="KIS">
+          <span class="tab-icon">🎯</span>
+          <span class="tab-label">KIS (Known-Item Search)</span>
+        </button>
+        <button class="tab-btn" data-task="TRAKE">
+          <span class="tab-icon">⏱️</span>
+          <span class="tab-label">TRAKE (Action Sequence)</span>
+        </button>
+        <button class="tab-btn" data-task="VQA">
+          <span class="tab-icon">❓</span>
+          <span class="tab-label">VQA (Question Answering)</span>
+        </button>
+      </div>
+
+      <!-- Search Input Bar -->
+      <div class="search-bar-container">
+        <div class="search-input-wrapper">
+          <span class="search-icon">🔎</span>
+          <input 
+            type="text" 
+            id="rawQueryInput" 
+            placeholder="Type search query in Vietnamese, English, or Vietlish (e.g., 'người đàn ông mặc áo vest xanh trong trường quay')..."
+            autocomplete="off"
+          />
+          <button id="parseBtn" class="action-btn btn-secondary" title="Decompose query into sub-channels">
+            <span>🧠 Parse Sub-Queries</span>
+          </button>
+          <button id="searchBtn" class="action-btn btn-primary" title="Execute Multimodal Search">
+            <span>⚡ Search</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Human-in-the-Loop Editable Sub-Query Inspector -->
+      <div class="query-inspector card glassmorphism" id="queryInspector">
+        <div class="inspector-header" id="toggleInspector">
+          <div class="inspector-title">
+            <span class="indicator">⚙️</span>
+            <h3>Editable Sub-Query & Weight Adjuster</h3>
+            <span class="tag-status">Auto-Parsed</span>
+          </div>
+          <span class="chevron" id="inspectorChevron">▼</span>
+        </div>
+
+        <div class="inspector-body" id="inspectorBody">
+          <div class="grid-form">
+            <!-- Channel 1: Visual Scene -->
+            <div class="form-group">
+              <label>🖼️ Visual Scene Context (English - SigLIP-2):</label>
+              <input type="text" id="inputSceneEn" placeholder="e.g. A modern television newsroom studio..." />
+            </div>
+
+            <!-- Channel 2: DAM Objects -->
+            <div class="form-group">
+              <label>🔍 Distinct DAM Objects (Comma-separated):</label>
+              <input type="text" id="inputObjectsEn" placeholder="e.g. A man wearing glasses, A blue suit jacket, A checkered shirt..." />
+            </div>
+
+            <!-- Channel 3: ASR Speech -->
+            <div class="form-group">
+              <label>🎙️ Spoken Dialogue / Voiceover (Vietnamese - ASR):</label>
+              <input type="text" id="inputSpeechVi" placeholder="e.g. bản tin sáu mươi giây hôm nay..." />
+            </div>
+
+            <!-- Channel 4: OCR Text -->
+            <div class="form-group">
+              <label>🔤 On-Screen Text / Logos (OCR):</label>
+              <input type="text" id="inputOcrText" placeholder="e.g. HTV9, BẢN TIN 60 GIÂY..." />
+            </div>
+          </div>
+
+          <!-- Channel Weight Sliders -->
+          <div class="weights-control">
+            <div class="weight-item">
+              <span class="weight-label">Visual (SigLIP): <strong id="valVis">45%</strong></span>
+              <input type="range" id="sliderVis" min="0" max="100" value="45" />
+            </div>
+            <div class="weight-item">
+              <span class="weight-label">Objects (DAM): <strong id="valDam">40%</strong></span>
+              <input type="range" id="sliderDam" min="0" max="100" value="40" />
+            </div>
+            <div class="weight-item">
+              <span class="weight-label">Speech (ASR): <strong id="valAsr">15%</strong></span>
+              <input type="range" id="sliderAsr" min="0" max="100" value="15" />
+            </div>
+            <div class="weight-item">
+              <span class="weight-label">OCR Text: <strong id="valOcr">0%</strong></span>
+              <input type="range" id="sliderOcr" min="0" max="100" value="0" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Search Results Section -->
+    <section class="results-section">
+      <!-- Status & Performance Bar -->
+      <div class="results-header" id="resultsHeader" style="display: none;">
+        <div class="results-stats">
+          <h2>Search Results</h2>
+          <span class="stats-badge" id="latencyBadge">⚡ 45.2ms</span>
+          <span class="stats-badge" id="resultsCountBadge">50 Candidates</span>
+        </div>
+        <div class="export-actions">
+          <button class="action-btn btn-outline" id="copyAllSubmissionsBtn">📋 Copy Top 10 Submissions</button>
+        </div>
+      </div>
+
+      <!-- VQA Top Answer Banner (Visible in VQA mode) -->
+      <div class="vqa-banner card glassmorphism" id="vqaBanner" style="display: none;">
+        <div class="vqa-icon">💡</div>
+        <div class="vqa-content">
+          <h4>VQA Extracted Answer:</h4>
+          <p class="vqa-answer-text" id="vqaAnswerText">--</p>
+          <span class="vqa-evidence-source" id="vqaEvidenceSource">Evidence from Top-1 Keyframe</span>
+        </div>
+      </div>
+
+      <!-- Results Grid Container -->
+      <div class="results-grid" id="resultsGrid">
+        <!-- Result Cards Injected Dynamically by app.js -->
+      </div>
+
+      <!-- Empty State Placeholder -->
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">🎥</div>
+        <h3>Ready for Multimodal Video Search</h3>
+        <p>Enter a search query above in Vietnamese or English to search across visual pixels, object descriptions, and spoken dialogue.</p>
+      </div>
+
+      <!-- Loading Spinner -->
+      <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="spinner"></div>
+        <p id="loadingStatusText">Executing 4-Channel Parallel Search...</p>
+      </div>
+    </section>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast">Copied to clipboard!</div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

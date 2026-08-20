@@ -1,0 +1,63 @@
+# Default Configuration for Online Multimodal Video Retrieval Engine
+
+paths:
+  # Base dataset root directory
+  data_root: "/Users/khoale/Downloads/AIC_HCM"
+  
+  # Master keyframes CSV directory (873 CSVs, 177,321 rows)
+  map_keyframes_dir: "/Users/khoale/Downloads/AIC_HCM/map-keyframes"
+  
+  # Scene visual embeddings directory (873 .f16.npy, 177,321 vectors)
+  scene_embeddings_dir: "/Users/khoale/Downloads/[AIC2026] Scene Embeddings"
+  
+  # DAM object descriptions (873 .jsonl, 435,713 objects)
+  dam_descriptions_dir: "/Users/khoale/Downloads/AIC_HCM/artifacts/dam_descriptions"
+  
+  # Spoken speech transcripts (873 .jsonl, 55,168 segments)
+  asr_segments_dir: "/Users/khoale/Downloads/AIC_HCM/artifacts/asr_segments"
+  
+  # On-screen text (pending real extraction, default weight = 0.0)
+  ocr_transcripts_dir: "/Users/khoale/Downloads/AIC_HCM/artifacts/ocr_transcripts"
+  
+  # Local keyframe images directory (for display with safe fallback)
+  keyframes_dir: "/Users/khoale/Downloads/AIC_Challenger/data/keyframes"
+  
+  # Qdrant embedded on-disk storage path
+  qdrant_db_path: "/Users/khoale/Downloads/AIC_HCM/qdrant_db"
+
+models:
+  # Visual text encoder (must match scene embeddings model)
+  siglip_model_id: "google/siglip2-base-patch16-224"
+  
+  # Multilingual dense embedding model for DAM & ASR
+  bge_m3_model_id: "BAAI/bge-m3"
+  
+  # Multilingual cross-encoder re-ranker
+  bge_reranker_model_id: "BAAI/bge-reranker-v2-m3"
+  
+  # Local fast LLM model for query parsing / VQA extractive reader
+  local_llm_model_id: "Qwen/Qwen2.5-3B-Instruct"
+  
+  # Cloud LLM model for complex TRAKE reasoning
+  gemini_model_id: "gemini-2.0-flash"
+
+retrieval:
+  # Stage 1 default channel weights
+  default_weights:
+    vis: 0.45
+    dam: 0.40
+    asr: 0.15
+    ocr: 0.00
+    
+  # Candidate pool size passed from Stage 1 to Stage 2
+  stage1_top_k: 50
+  
+  # Maximum returned final results
+  final_top_k: 50
+  
+  # TRAKE maximum temporal interval between events (seconds)
+  trake_max_time_span_s: 90.0
+
+server:
+  host: "0.0.0.0"
+  port: 8000
