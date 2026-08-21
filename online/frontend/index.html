@@ -221,6 +221,12 @@
 
         <!-- Right: Metadata & Explainability Panel -->
         <div class="inspector-meta-pane">
+          <!-- TRAKE Event Selector Tabs (Visible only in TRAKE mode) -->
+          <div id="insp-trake-event-tabs" class="trake-event-tabs-bar hidden">
+            <span class="trake-tabs-lbl">EDITING EVENT:</span>
+            <div class="trake-tabs-list" id="trake-tabs-list"></div>
+          </div>
+
           <div class="meta-section">
             <div class="meta-field">
               <span class="meta-lbl">VIDEO</span>
@@ -238,6 +244,12 @@
               <span class="meta-lbl">SCORE / RANK</span>
               <span class="meta-val" id="insp-score-rank">-</span>
             </div>
+          </div>
+
+          <!-- VQA Extracted Answer Box (Visible in VQA mode) -->
+          <div class="meta-detail-box vqa-box hidden" id="insp-vqa-box">
+            <div class="detail-box-title">💡 VQA EXTRACTED ANSWER (EDITABLE)</div>
+            <input type="text" id="insp-vqa-input" class="vqa-edit-input" value="" placeholder="Extracted answer...">
           </div>
 
           <!-- ASR Speech Transcript -->

@@ -1,5 +1,6 @@
 /**
  * AIC-2026 Multimodal Retrieval Studio — Frontend Logic
+ * Supports KIS, VQA with answer editing, and TRAKE Monotonic Sequence Editor.
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ const state = {
   activeVideoKeyframes: [],
   selectedSubmission: "",
   activeBBoxObjects: [],
+  activeTrakeEventIndex: 0,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -25,7 +27,6 @@ const state = {
 const el = {
   taskBtns: document.querySelectorAll(".task-btn"),
   geminiToggle: document.getElementById("btn-gemini-toggle"),
-  geminiDot: document.querySelector("#btn-gemini-toggle .indicator-dot"),
   geminiText: document.querySelector("#btn-gemini-toggle .btn-text"),
   modeTabs: document.querySelectorAll(".mode-tab"),
   
@@ -79,6 +80,12 @@ const el = {
   inspAsrText: document.getElementById("insp-asr-text"),
   inspDamText: document.getElementById("insp-dam-text"),
   inspObjectsList: document.getElementById("insp-objects-list"),
+  
+  // TRAKE and VQA Inspector Additions
+  trakeTabsBar: document.getElementById("insp-trake-event-tabs"),
+  trakeTabsList: document.getElementById("trake-tabs-list"),
+  inspVqaBox: document.getElementById("insp-vqa-box"),
+  inspVqaInput: document.getElementById("insp-vqa-input"),
   
   btnToggleInSubmission: document.getElementById("btn-toggle-in-submission"),
   btnCloseInspector: document.getElementById("btn-close-inspector"),
@@ -191,6 +198,21 @@ function bindEvents() {
   el.btnToggleInSubmission.addEventListener("click", toggleCurrentInSubmission);
   el.chkBBoxes.addEventListener("change", drawBBoxesOnCanvas);
 
+  // VQA Answer Input Edit
+  el.inspVqaInput.addEventListener("input", (e) => {
+    if (!state.activeInspectorItem) return;
+    const ans = e.target.value.trim();
+    state.activeInspectorItem.vqa_answer = ans;
+    const vid = state.activeInspectorItem.video_id;
+    const fIdx = state.activeInspectorItem.frame_idx;
+    state.activeInspectorItem.submission_string = `${vid}, ${fIdx}, "${ans}"`;
+    
+    if (state.selectedSubmission) {
+      state.selectedSubmission = state.activeInspectorItem.submission_string;
+      el.submissionInput.value = state.selectedSubmission;
+    }
+  });
+
   el.btnFilmstripPrev.addEventListener("click", () => {
     el.filmstripScroll.scrollBy({ left: -300, behavior: "smooth" });
   });
@@ -204,9 +226,9 @@ function bindEvents() {
 
     if (e.key === "Escape") {
       closeInspector();
-    } else if (e.key === "ArrowLeft") {
+    } else if (e.key === "ArrowLeft" && !e.target.matches("input, textarea")) {
       navigateFilmstrip(-1);
-    } else if (e.key === "ArrowRight") {
+    } else if (e.key === "ArrowRight" && !e.target.matches("input, textarea")) {
       navigateFilmstrip(1);
     } else if (e.key === "Enter" && !e.target.matches("textarea, input")) {
       e.preventDefault();
@@ -285,7 +307,6 @@ function handleSliderChange() {
   el.valAsr.textContent = w.asr.toFixed(2);
   el.valOcr.textContent = w.ocr.toFixed(2);
 
-  // Sync with JSON editor if it has valid JSON
   try {
     const data = JSON.parse(el.jsonEditor.value);
     data.weights = w;
@@ -323,7 +344,6 @@ async function handleRunQueryClick() {
   el.timingBadge.textContent = "Parsing query...";
 
   try {
-    // 1. Call Parse endpoint
     const parseRes = await fetch("/api/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -338,13 +358,11 @@ async function handleRunQueryClick() {
     const parseData = await parseRes.json();
     state.parsedQuery = parseData.parsed_query;
 
-    // Update JSON editor and sliders
     el.jsonEditor.value = JSON.stringify(state.parsedQuery, null, 2);
     if (state.parsedQuery.weights) {
       setSliderValues(state.parsedQuery.weights);
     }
 
-    // In Auto-Run mode, immediately execute search
     if (state.queryMode === "auto") {
       await handleExecuteJsonClick(true);
     } else {
@@ -366,7 +384,6 @@ async function handleExecuteJsonClick(runStage2 = true) {
     return;
   }
 
-  // Inject current sliders into parsedJson
   parsedJson.weights = getSliderWeights();
   parsedJson.task_type = state.taskType;
 
@@ -409,7 +426,6 @@ async function handleExecuteJsonClick(runStage2 = true) {
 // ──────────────────────────────────────────────────────────────────────────────
 async function handleCachedReFuse(runStage2 = false) {
   if (!state.sessionId) {
-    // If no session exists yet, run full search
     return handleExecuteJsonClick(runStage2);
   }
 
@@ -431,7 +447,6 @@ async function handleCachedReFuse(runStage2 = false) {
     });
 
     if (!res.ok) {
-      // If session expired or not found, fallback to full search
       return handleExecuteJsonClick(runStage2);
     }
 
@@ -447,13 +462,12 @@ async function handleCachedReFuse(runStage2 = false) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Results Grid Rendering
+// Results Grid Rendering (KIS, VQA, and TRAKE Sequences)
 // ──────────────────────────────────────────────────────────────────────────────
 function getImageUrl(item) {
   const vid = item.video_id;
   const kn = String(item.keyframe_n || 1).padStart(3, "0");
   
-  // Prefer file:// protocol if loaded locally, fallback to /keyframes/
   if (window.location.protocol === "file:") {
     return `file://${state.keyframesRoot}/${vid}/${kn}.jpg`;
   }
@@ -465,7 +479,7 @@ function renderResults(results) {
   const limit = parseInt(el.selectTopK.value) || 20;
   const list = results.slice(0, limit);
 
-  el.resultsCount.textContent = `${list.length} candidate keyframes`;
+  el.resultsCount.textContent = `${list.length} candidate items`;
 
   if (list.length === 0) {
     el.resultsGrid.innerHTML = `
@@ -477,6 +491,18 @@ function renderResults(results) {
     return;
   }
 
+  // Detect if results are TRAKE sequence format
+  const isTrake = state.taskType === "TRAKE" || (list[0] && Array.isArray(list[0].matched_frames));
+
+  if (isTrake) {
+    renderTrakeSequences(list);
+  } else {
+    renderStandardCards(list);
+  }
+}
+
+// Standard KIS & VQA Cards
+function renderStandardCards(list) {
   list.forEach((item, idx) => {
     const rank = item.final_rank || item.rank || idx + 1;
     const score = item.final_score || item.stage1_score || 0.0;
@@ -491,6 +517,10 @@ function renderResults(results) {
       ? `🎙️ "${item.asr_transcript}"`
       : "(No speech / background audio)";
 
+    const vqaBadge = (state.taskType === "VQA" || item.vqa_answer)
+      ? `<div class="vqa-answer-badge">💡 Answer: "${escapeHtml(item.vqa_answer || 'N/A')}"</div>`
+      : "";
+
     card.innerHTML = `
       <div class="card-media">
         <img src="${imgUrl}" alt="${item.video_id}" onerror="this.onerror=null; this.src=''; this.parentElement.classList.add('img-fallback');">
@@ -504,6 +534,7 @@ function renderResults(results) {
             <span class="score-final">${(score * 100).toFixed(1)}%</span>
           </div>
         </div>
+        ${vqaBadge}
         <div class="card-speech-snippet">${escapeHtml(speechTxt)}</div>
         <div class="card-tags-row">
           <span class="pill-tag ${item.rank_vis ? 'active' : ''}">👁️ Vis ${item.rank_vis ? '#' + item.rank_vis : '-'}</span>
@@ -512,7 +543,70 @@ function renderResults(results) {
         </div>
       </div>`;
 
-    card.addEventListener("click", () => openInspector(item));
+    card.addEventListener("click", () => openStandardInspector(item));
+    el.resultsGrid.appendChild(card);
+  });
+}
+
+// TRAKE Horizontal Multi-Event Sequence Cards
+function renderTrakeSequences(list) {
+  list.forEach((seq, idx) => {
+    const rank = seq.rank || idx + 1;
+    const fScore = seq.final_score || seq.sequence_score || 0.0;
+    const dpScore = seq.dp_score || seq.sequence_score || 0.0;
+    const narrScore = seq.narrative_score || dpScore;
+    const frames = seq.matched_frames || [];
+    const timestamps = seq.timestamps || [];
+    const dossiers = seq.event_dossiers || [];
+
+    const isMono = frames.every((f, i) => i === 0 || f > frames[i - 1]);
+
+    const card = document.createElement("div");
+    card.className = "trake-sequence-card";
+
+    // Build event slots HTML
+    let eventsHtml = "";
+    frames.forEach((f, evIdx) => {
+      const timeVal = timestamps[evIdx] ? timestamps[evIdx].toFixed(1) + "s" : "";
+      const d = dossiers[evIdx] || {};
+      const kn = d.keyframe_n || (evIdx + 1);
+      const imgUrl = getImageUrl({ video_id: seq.video_id, keyframe_n: kn });
+
+      eventsHtml += `
+        <div class="trake-event-slot">
+          <div class="event-slot-header">
+            <span class="event-num-pill">E${evIdx + 1}</span>
+            <span class="event-time-txt">${timeVal} (Frame ${f})</span>
+          </div>
+          <div class="event-thumb-wrap">
+            <img src="${imgUrl}" alt="E${evIdx + 1}" onerror="this.onerror=null; this.src=''; this.parentElement.style.background='#1e293b';">
+          </div>
+        </div>`;
+
+      if (evIdx < frames.length - 1) {
+        eventsHtml += `<span class="event-arrow-separator">➔</span>`;
+      }
+    });
+
+    card.innerHTML = `
+      <div class="trake-card-header">
+        <div class="trake-header-left">
+          <span class="trake-rank-pill">#${rank}</span>
+          <span class="trake-video-name">${seq.video_id}</span>
+          <span class="trake-mono-badge">${isMono ? '✅ Strict Monotonic' : '⚠️ Order Warning'}</span>
+        </div>
+        <div class="card-scores">
+          <span style="font-size:12px;color:var(--text-dim);">DP: ${(dpScore * 100).toFixed(1)}% | Narr: ${(narrScore * 100).toFixed(1)}%</span>
+          <span class="score-final" style="font-size:14px;margin-left:8px;">${(fScore * 100).toFixed(1)}%</span>
+        </div>
+      </div>
+      <div class="trake-events-strip">${eventsHtml}</div>
+      <div style="font-size:11.5px;color:var(--text-dim);display:flex;justify-content:space-between;">
+        <span>Click sequence to open Interactive Monotonic Editor</span>
+        <span style="font-family:var(--font-mono);color:var(--accent-cyan);">${seq.submission_string || ''}</span>
+      </div>`;
+
+    card.addEventListener("click", () => openTrakeInspector(seq, 0));
     el.resultsGrid.appendChild(card);
   });
 }
@@ -520,11 +614,96 @@ function renderResults(results) {
 // ──────────────────────────────────────────────────────────────────────────────
 // Frame Inspector Modal
 // ──────────────────────────────────────────────────────────────────────────────
-async function openInspector(item) {
+
+// Standard Inspector (KIS & VQA)
+async function openStandardInspector(item) {
   state.activeInspectorItem = item;
   el.modal.classList.remove("hidden");
+  el.trakeTabsBar.classList.add("hidden");
 
-  // Populate basic card metadata
+  // VQA Answer Input
+  if (state.taskType === "VQA" || item.vqa_answer) {
+    el.inspVqaBox.classList.remove("hidden");
+    el.inspVqaInput.value = item.vqa_answer || "";
+  } else {
+    el.inspVqaBox.classList.add("hidden");
+  }
+
+  populateInspectorCommon(item);
+  loadFilmstrip(item.video_id, item.keyframe_n, null, null);
+}
+
+// TRAKE Monotonic Sequence Inspector
+async function openTrakeInspector(sequence, activeEventIndex = 0) {
+  state.activeInspectorItem = sequence;
+  state.activeTrakeEventIndex = activeEventIndex;
+  el.modal.classList.remove("hidden");
+  el.trakeTabsBar.classList.remove("hidden");
+  el.inspVqaBox.classList.add("hidden");
+
+  renderTrakeTabs(sequence);
+
+  // Load all keyframes for this video first if not already loaded
+  if (!state.activeVideoKeyframes.length || state.activeVideoKeyframes[0].video_id !== sequence.video_id) {
+    try {
+      const res = await fetch(`/api/video/${sequence.video_id}/keyframes`);
+      if (res.ok) {
+        const data = await res.json();
+        state.activeVideoKeyframes = data.keyframes || [];
+      }
+    } catch (err) {
+      console.warn("Could not load video keyframes:", err);
+    }
+  }
+
+  displayTrakeActiveEvent(sequence, activeEventIndex);
+}
+
+function renderTrakeTabs(sequence) {
+  el.trakeTabsList.innerHTML = "";
+  const frames = sequence.matched_frames || [];
+
+  frames.forEach((f, idx) => {
+    const btn = document.createElement("button");
+    btn.className = "trake-tab-btn" + (idx === state.activeTrakeEventIndex ? " active" : "");
+    btn.textContent = `E${idx + 1}: Frame ${f}`;
+    btn.addEventListener("click", () => {
+      state.activeTrakeEventIndex = idx;
+      renderTrakeTabs(sequence);
+      displayTrakeActiveEvent(sequence, idx);
+    });
+    el.trakeTabsList.appendChild(btn);
+  });
+}
+
+function displayTrakeActiveEvent(sequence, eventIdx) {
+  const frames = sequence.matched_frames || [];
+  const currentF = frames[eventIdx];
+  
+  // Find keyframe item in active video keyframes
+  let targetKf = state.activeVideoKeyframes.find((k) => k.frame_idx === currentF);
+  if (!targetKf) {
+    targetKf = {
+      video_id: sequence.video_id,
+      frame_idx: currentF,
+      keyframe_n: eventIdx + 1,
+      pts_time_s: (sequence.timestamps && sequence.timestamps[eventIdx]) || 0.0,
+      score: sequence.final_score || 0.0,
+    };
+  }
+
+  populateInspectorCommon(targetKf);
+
+  // Calculate strict monotonic boundaries for this event slot:
+  // min_frame = previous event's frame + 1 (or 0 if event 1)
+  // max_frame = next event's frame - 1 (or Infinity if last event)
+  const minFrame = eventIdx > 0 ? frames[eventIdx - 1] + 1 : 0;
+  const maxFrame = eventIdx < frames.length - 1 ? frames[eventIdx + 1] - 1 : Infinity;
+
+  loadFilmstrip(sequence.video_id, targetKf.keyframe_n, minFrame, maxFrame);
+}
+
+function populateInspectorCommon(item) {
   el.inspVideoId.textContent = item.video_id || "-";
   el.inspKeyframeN.textContent = String(item.keyframe_n || 1).padStart(3, "0");
   el.inspFrameIdx.textContent = `${item.frame_idx || 0} (${item.pts_time_s ? item.pts_time_s.toFixed(1) + 's' : '-'})`;
@@ -533,7 +712,6 @@ async function openInspector(item) {
   const score = item.final_score || item.stage1_score || 0.0;
   el.inspScoreRank.textContent = `${score.toFixed(4)} • #${rank}`;
 
-  // Image & Canvas setup
   const imgUrl = getImageUrl(item);
   el.inspectorImg.src = imgUrl;
   el.inspectorImg.onerror = () => {
@@ -545,30 +723,25 @@ async function openInspector(item) {
     drawBBoxesOnCanvas();
   };
 
-  // Populate text descriptions
   el.inspAsrText.textContent = item.asr_transcript || "(No speech / silent frame)";
   el.inspDamText.textContent = item.dam_summary || "(No visual description available)";
 
   updateInspectorSubmitBtn();
 
-  // Load detailed DAM bounding boxes & macro audio from API
-  try {
-    const res = await fetch(`/api/keyframe/${item.video_id}/${item.keyframe_n}`);
-    if (res.ok) {
-      const data = await res.json();
-      state.activeBBoxObjects = data.dam_objects || [];
-      if (data.macro_audio_transcript) {
-        el.inspAsrText.textContent = data.macro_audio_transcript;
+  // Load detailed DAM bounding boxes from API
+  fetch(`/api/keyframe/${item.video_id}/${item.keyframe_n}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => {
+      if (data) {
+        state.activeBBoxObjects = data.dam_objects || [];
+        if (data.macro_audio_transcript) {
+          el.inspAsrText.textContent = data.macro_audio_transcript;
+        }
+        renderMatchedObjectsList(state.activeBBoxObjects);
+        drawBBoxesOnCanvas();
       }
-      renderMatchedObjectsList(state.activeBBoxObjects);
-      drawBBoxesOnCanvas();
-    }
-  } catch (err) {
-    console.warn("Could not fetch detailed keyframe metadata:", err);
-  }
-
-  // Load filmstrip for this video
-  loadFilmstrip(item.video_id, item.keyframe_n);
+    })
+    .catch(() => {});
 }
 
 function renderMatchedObjectsList(objects) {
@@ -604,17 +777,14 @@ function drawBBoxesOnCanvas() {
   state.activeBBoxObjects.forEach((obj, idx) => {
     if (!obj.bbox || obj.bbox.length < 4) return;
     
-    // Normalized bbox format: [ymin, xmin, ymax, xmax] or [x1, y1, x2, y2]
     const b = obj.bbox;
     let x1, y1, x2, y2;
     if (b[0] < b[2] && b[1] < b[3]) {
-      // standard [x1, y1, x2, y2]
       x1 = b[0] * canvas.width;
       y1 = b[1] * canvas.height;
       x2 = b[2] * canvas.width;
       y2 = b[3] * canvas.height;
     } else {
-      // [ymin, xmin, ymax, xmax]
       y1 = b[0] * canvas.height;
       x1 = b[1] * canvas.width;
       y2 = b[2] * canvas.height;
@@ -629,7 +799,6 @@ function drawBBoxesOnCanvas() {
     ctx.lineWidth = 2.5;
     ctx.strokeRect(x1, y1, w, h);
 
-    // Label
     const label = obj.class_entity || "Object";
     ctx.fillStyle = color;
     ctx.font = "bold 11px Inter, sans-serif";
@@ -641,52 +810,88 @@ function drawBBoxesOnCanvas() {
   });
 }
 
-async function loadFilmstrip(videoId, currentKeyframeN) {
+// Filmstrip Loader with Dynamic Monotonic Boundary Enforcement
+async function loadFilmstrip(videoId, currentKeyframeN, minFrame = null, maxFrame = null) {
   el.filmstripScroll.innerHTML = "";
-  try {
-    const res = await fetch(`/api/video/${videoId}/keyframes`);
-    if (!res.ok) return;
-
-    const data = await res.json();
-    state.activeVideoKeyframes = data.keyframes || [];
-    el.filmstripCount.textContent = `${state.activeVideoKeyframes.length} keyframes`;
-
-    state.activeVideoKeyframes.forEach((kf) => {
-      const item = document.createElement("div");
-      item.className = "filmstrip-item" + (kf.keyframe_n === currentKeyframeN ? " active" : "");
-      item.dataset.keyframeN = kf.keyframe_n;
-
-      const imgUrl = getImageUrl(kf);
-      item.innerHTML = `
-        <img src="${imgUrl}" alt="${kf.keyframe_n}" onerror="this.onerror=null; this.src=''; this.parentElement.style.background='#1e293b';">
-        <span class="filmstrip-lbl">${String(kf.keyframe_n).padStart(3, "0")}</span>`;
-
-      item.addEventListener("click", () => {
-        openInspector(kf);
-      });
-
-      el.filmstripScroll.appendChild(item);
-    });
-
-    // Auto-scroll to active item
-    const activeEl = el.filmstripScroll.querySelector(".filmstrip-item.active");
-    if (activeEl) {
-      activeEl.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  
+  if (!state.activeVideoKeyframes.length || state.activeVideoKeyframes[0].video_id !== videoId) {
+    try {
+      const res = await fetch(`/api/video/${videoId}/keyframes`);
+      if (res.ok) {
+        const data = await res.json();
+        state.activeVideoKeyframes = data.keyframes || [];
+      }
+    } catch (err) {
+      console.warn("Filmstrip load error:", err);
+      return;
     }
-  } catch (err) {
-    console.warn("Filmstrip load error:", err);
+  }
+
+  el.filmstripCount.textContent = `${state.activeVideoKeyframes.length} keyframes`;
+
+  state.activeVideoKeyframes.forEach((kf) => {
+    const isLocked = (minFrame !== null && kf.frame_idx < minFrame) || (maxFrame !== null && kf.frame_idx > maxFrame);
+    const isActive = kf.keyframe_n === currentKeyframeN;
+
+    const item = document.createElement("div");
+    item.className = "filmstrip-item" + (isActive ? " active" : "") + (isLocked ? " locked" : "");
+    item.dataset.keyframeN = kf.keyframe_n;
+
+    const imgUrl = getImageUrl(kf);
+    item.innerHTML = `
+      <img src="${imgUrl}" alt="${kf.keyframe_n}" onerror="this.onerror=null; this.src=''; this.parentElement.style.background='#1e293b';">
+      <span class="filmstrip-lbl">${String(kf.keyframe_n).padStart(3, "0")}</span>`;
+
+    if (!isLocked) {
+      item.addEventListener("click", () => {
+        if (state.activeInspectorItem && Array.isArray(state.activeInspectorItem.matched_frames)) {
+          // In TRAKE mode: update this event slot's selected frame!
+          const seq = state.activeInspectorItem;
+          const evIdx = state.activeTrakeEventIndex;
+          seq.matched_frames[evIdx] = kf.frame_idx;
+          seq.submission_string = `${seq.video_id}, ${seq.matched_frames.join(', ')}`;
+          
+          if (state.selectedSubmission) {
+            state.selectedSubmission = seq.submission_string;
+            el.submissionInput.value = seq.submission_string;
+          }
+
+          // Re-render tabs and refresh sequence card
+          renderTrakeTabs(seq);
+          displayTrakeActiveEvent(seq, evIdx);
+          renderResults(state.searchResults);
+          showToast(`Event E${evIdx + 1} updated to frame ${kf.frame_idx}!`);
+        } else {
+          // Standard mode
+          openStandardInspector(kf);
+        }
+      });
+    }
+
+    el.filmstripScroll.appendChild(item);
+  });
+
+  // Auto-scroll to active item
+  const activeEl = el.filmstripScroll.querySelector(".filmstrip-item.active");
+  if (activeEl) {
+    activeEl.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
   }
 }
 
 function navigateFilmstrip(step) {
   if (!state.activeVideoKeyframes.length || !state.activeInspectorItem) return;
-  const currN = state.activeInspectorItem.keyframe_n;
+  const currN = parseInt(el.inspKeyframeN.textContent) || 1;
   const currIdx = state.activeVideoKeyframes.findIndex((k) => k.keyframe_n === currN);
   if (currIdx === -1) return;
 
   const nextIdx = currIdx + step;
   if (nextIdx >= 0 && nextIdx < state.activeVideoKeyframes.length) {
-    openInspector(state.activeVideoKeyframes[nextIdx]);
+    const nextKf = state.activeVideoKeyframes[nextIdx];
+    if (state.activeInspectorItem && Array.isArray(state.activeInspectorItem.matched_frames)) {
+      displayTrakeActiveEvent(state.activeInspectorItem, state.activeTrakeEventIndex);
+    } else {
+      openStandardInspector(nextKf);
+    }
   }
 }
 
