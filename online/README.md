@@ -36,9 +36,21 @@ Features a **FastAPI GPU backend** with warm PyTorch models and a **modern dark-
 
 ## 🛠️ Quick Start Guide
 
-### 1. Requirements & Dependencies
-Navigate to the repository root and install all dependencies in your Python environment (Python 3.10+):
+### 1. Create Environment & Install Dependencies
+Navigate to the repository root:
+
+**Using Python `venv` (Zero install needed)**:
 ```bash
+python3 -m venv aic
+source aic/bin/activate
+pip install --upgrade pip
+pip install -r online/requirements.txt
+```
+
+**Or Using `conda`**:
+```bash
+conda create -n aic python=3.10 -y
+conda activate aic
 pip install -r online/requirements.txt
 ```
 
