@@ -21,6 +21,7 @@ import tempfile
 import time
 import traceback
 import urllib.request
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -691,6 +692,7 @@ def process_shard(
     batch_size: int,
     commit_interval: int,
     partitions_per_shard: int,
+    partition_visible_devices: Sequence[str] | None,
     deadline: float | None,
 ) -> dict[str, Path]:
     output_root = work_root / "stages" / shard.shard_id
@@ -741,8 +743,6 @@ def process_shard(
             str(weights),
             "--weights-sha256",
             WEIGHTS_SHA256,
-            "--device",
-            device,
             "--source-commit-sha",
             source_commit_sha,
             "--batch-size",
@@ -751,9 +751,22 @@ def process_shard(
             str(commit_interval),
             "--resume",
         ]
+
+        def command_for_partition(index: int) -> list[str]:
+            if partition_visible_devices:
+                visible_device = partition_visible_devices[index % len(partition_visible_devices)]
+                return [
+                    "/usr/bin/env",
+                    f"CUDA_VISIBLE_DEVICES={visible_device}",
+                    *base_command,
+                    "--device",
+                    "cuda:0",
+                ]
+            return [*base_command, "--device", device]
+
         if partitions_per_shard == 1:
             run(
-                [*base_command, "--output", str(recognition)],
+                [*command_for_partition(0), "--output", str(recognition)],
                 deadline=deadline,
             )
         else:
@@ -781,7 +794,7 @@ def process_shard(
                         partition_executor.submit(
                             run,
                             [
-                                *base_command,
+                                *command_for_partition(index),
                                 "--output",
                                 str(partition),
                                 "--representative-start",
@@ -1207,6 +1220,21 @@ def main(argv: list[str] | None = None) -> int:
         for device in devices
     }
     futures: dict[Future[dict[str, Path]], Phase1Shard] = {}
+    partition_visible_devices: list[str] | None = None
+    if len(shards) == 1 and len(devices) > 1 and args.partitions_per_shard > 1:
+        physical_indexes: list[str] = []
+        for device in devices:
+            kind, separator, index = device.partition(":")
+            if kind != "cuda" or separator != ":" or not index.isdigit():
+                raise ValueError(
+                    "single-shard multi-GPU partitioning requires devices like cuda:0,cuda:1"
+                )
+            physical_indexes.append(index)
+        partition_visible_devices = physical_indexes
+        log(
+            "isolating recognition partitions across physical GPU(s): "
+            + ", ".join(physical_indexes)
+        )
     try:
         for shard in shards:
             device = _device_for_shard(shard.shard_id, devices, args.workers_per_gpu)
@@ -1230,6 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
                     batch_size=args.batch_size,
                     commit_interval=args.commit_interval_records,
                     partitions_per_shard=args.partitions_per_shard,
+                    partition_visible_devices=partition_visible_devices,
                     deadline=deadline,
                 )
             ] = shard
