@@ -107,7 +107,7 @@ python -m online.server
 When ready, the server will output:
 ```
 2026-08-21 13:13:33 [INFO] ✅ Server fully warmed and ready in 23.7s!
-INFO: Uvicorn running on http://0.0.0.0:8890 (Press CTRL+C to quit)
+INFO: Uvicorn running on http://127.0.0.1:8890 (Press CTRL+C to quit)
 ```
 
 ---

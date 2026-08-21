@@ -479,8 +479,8 @@ if FRONTEND_DIR.exists():
 def main():
     import uvicorn
 
-    host = config["server"].get("host", "0.0.0.0")
-    port = config["server"].get("port", 8890)
+    host = os.environ.get("AIC_HOST") or config["server"].get("host", "127.0.0.1")
+    port = int(os.environ.get("AIC_PORT") or config["server"].get("port", 8890))
     logger.info(f"Starting server on http://{host}:{port}")
     uvicorn.run("online.server:app", host=host, port=port, reload=False)
 
