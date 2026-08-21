@@ -1056,6 +1056,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Prior saved /kaggle/input/.../ocr-phase2-e2e-v1 root; auto-detected if unique.",
     )
+    parser.add_argument(
+        "--skip-resume-search",
+        action="store_true",
+        help="Start fresh without scanning attached Kaggle inputs for prior Phase 2 state.",
+    )
     parser.add_argument("--phase1-config", type=Path, default=DEFAULT_PHASE1_CONFIG)
     parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG)
     parser.add_argument("--weights", type=Path)
@@ -1182,7 +1187,11 @@ def main(argv: list[str] | None = None) -> int:
         marker=work_root / "model-smoke.json",
         deadline=deadline,
     )
-    resume_root = discover_resume_root(input_root, args.resume_from)
+    if args.skip_resume_search and args.resume_from is not None:
+        raise ValueError("--skip-resume-search cannot be combined with --resume-from")
+    resume_root = (
+        None if args.skip_resume_search else discover_resume_root(input_root, args.resume_from)
+    )
     if resume_root is not None:
         restored = sum(
             restore_prior_shard(resume_root, work_root, item.shard_id) for item in shards
