@@ -68,31 +68,20 @@ _branch_cache: dict[str, dict[str, Any]] = {}
 
 
 def _index_keyframe_directories(root_dir: Path):
-    """Recursively discover and index all video keyframe directories so users never need to move files."""
+    """Recursively discover and index all video keyframe directories at any nesting depth."""
     if not root_dir.exists():
         return
     logger.info(f"⚡ Discovering video keyframe directories under {root_dir}...")
     t0 = time.perf_counter()
-    count = 0
     try:
-        # Check direct children
-        for d in root_dir.iterdir():
-            if not d.is_dir():
-                continue
-            if d.name.startswith("L") and "_" in d.name:
-                _video_to_dir_map[d.name] = d
-                count += 1
-            else:
-                # Check nested children (e.g. keyframes-1, keyframes-2, keyframes-3...)
-                for sub in d.iterdir():
-                    if sub.is_dir() and sub.name.startswith("L") and "_" in sub.name:
-                        _video_to_dir_map[sub.name] = sub
-                        count += 1
+        for p in root_dir.rglob("L*_*"):
+            if p.is_dir() and p.name.startswith("L") and "_" in p.name:
+                _video_to_dir_map[p.name] = p
     except Exception as e:
         logger.warning(f"Error during keyframe directory indexing: {e}")
 
     dt = (time.perf_counter() - t0) * 1000.0
-    logger.info(f"✅ Indexed {len(_video_to_dir_map)} video keyframe folders in {dt:.1f}ms (Supports multi-batch folders)")
+    logger.info(f"✅ Indexed {len(_video_to_dir_map)} video keyframe folders in {dt:.1f}ms (Supports arbitrary nested folders)")
 
 
 @asynccontextmanager
@@ -462,7 +451,7 @@ async def serve_keyframe_image(video_id: str, filename: str):
         return FileResponse(direct)
 
     # 3. Dynamic glob search fallback
-    for match in KEYFRAMES_DIR.glob(f"*/{video_id}/{filename}"):
+    for match in KEYFRAMES_DIR.rglob(f"{video_id}/{filename}"):
         if match.exists():
             _video_to_dir_map[video_id] = match.parent
             return FileResponse(match)
