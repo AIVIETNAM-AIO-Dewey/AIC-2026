@@ -44,27 +44,36 @@ from aic2026.scene_embedding import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
-    parser.add_argument("--frame-manifest", type=Path, required=True)
+    parser.add_argument("--frame-manifest", type=Path)
     parser.add_argument("--output", type=Path, help="Index JSONL path; matrix is derived from it.")
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--video-ids",
+        nargs="+",
+        help=(
+            "Embed several videos in one process so the model is loaded once. Each still "
+            "gets its own shard and run manifest; paths come from the artifact root."
+        ),
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = read_config(args.config)
+def process_video(
+    *,
+    video_id: str,
+    args: argparse.Namespace,
+    config: dict,
+    roots: dict[str, Path],
+    device: str,
+    backend_cache: dict[str, object],
+) -> dict[str, object]:
+    """Embed one video. `backend_cache` keeps the loaded model across videos."""
     seed = resolve_seed(args.seed, config)
-    roots = runtime_roots(args, config)
-    video_id = args.video_id or config.get("video_id")
-    if not video_id:
-        raise SystemExit("--video-id is required")
-    device = resolve_device(args.device, config)
-    if device == "cpu":
-        print(
-            "warning: running SigLIP2 on cpu; pass --device mps on Apple Silicon",
-            file=sys.stderr,
-        )
-    frame_manifest = args.frame_manifest.expanduser().resolve()
+    frame_manifest = (
+        args.frame_manifest.expanduser().resolve()
+        if args.frame_manifest
+        else roots["output_root"] / "frame_manifests" / f"{video_id}.jsonl"
+    )
     output = (
         args.output.expanduser().resolve()
         if args.output
@@ -113,8 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
     )
     if complete:
-        print(json.dumps({"status": "already_complete", "output": str(output)}))
-        return 0
+        return {"status": "already_complete", "video_id": video_id}
     # prepare_resume only guards the index; an orphan matrix means a crash between the
     # two publishes and must not be silently reused.
     if matrix_path.exists() and not output.exists():
@@ -159,16 +167,18 @@ def main(argv: list[str] | None = None) -> int:
                 output_paths=[("embedding_index", output), ("embedding_matrix", matrix_path)],
             )
             write_manifest(manifest_path, manifest)
-            print(json.dumps({"status": "recovered", "output": str(output), **counters}))
-            return 0
+            return {"status": "recovered", "video_id": video_id, **counters}
 
-        backend = SiglipEncoder.from_pretrained(
-            model_id=model_id,
-            revision=revision,
-            cache_dir=cache_dir,
-            device=device,
-            compute_dtype=compute_dtype,
-        )
+        # Loading the tower dominates a short shard, so reuse it across videos.
+        if "encoder" not in backend_cache:
+            backend_cache["encoder"] = SiglipEncoder.from_pretrained(
+                model_id=model_id,
+                revision=revision,
+                cache_dir=cache_dir,
+                device=device,
+                compute_dtype=compute_dtype,
+            )
+        backend = backend_cache["encoder"]
         counters = embed_frames(
             frame_manifest=frame_manifest,
             data_root=roots["data_root"],
@@ -198,8 +208,51 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(error, KeyboardInterrupt | SystemExit):
             write_manifest(manifest_path, fail_manifest(manifest, error))
         raise
-    print(json.dumps({"status": "completed", "output": str(output), **counters}))
-    return 0
+    return {"status": "completed", "video_id": video_id, **counters}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = read_config(args.config)
+    roots = runtime_roots(args, config)
+    device = resolve_device(args.device, config)
+    if device == "cpu":
+        print(
+            "warning: running SigLIP2 on cpu; pass --device mps on Apple Silicon",
+            file=sys.stderr,
+        )
+
+    if args.video_ids and (args.video_id or args.frame_manifest or args.output):
+        raise SystemExit("--video-ids cannot be combined with the single-video switches")
+    video_ids = args.video_ids or [args.video_id or config.get("video_id")]
+    if not video_ids or not video_ids[0]:
+        raise SystemExit("--video-id or --video-ids is required")
+
+    backend_cache: dict[str, object] = {}
+    failures = 0
+    for video_id in video_ids:
+        try:
+            result = process_video(
+                video_id=video_id,
+                args=args,
+                config=config,
+                roots=roots,
+                device=device,
+                backend_cache=backend_cache,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:  # noqa: BLE001 - one bad shard must not stop the rest
+            if len(video_ids) == 1:
+                raise
+            failures += 1
+            result = {
+                "status": "failed",
+                "video_id": video_id,
+                "error": f"{error.__class__.__name__}: {error}",
+            }
+        print(json.dumps(result))
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
