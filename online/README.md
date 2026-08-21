@@ -37,12 +37,17 @@ Features a **FastAPI GPU backend** with warm PyTorch models and a **modern dark-
 ## 🛠️ Quick Start Guide
 
 ### 1. Requirements & Dependencies
-Ensure your Python environment has the required packages installed:
+Navigate to the repository root and install all dependencies in your Python environment (Python 3.10+):
 ```bash
-pip install fastapi uvicorn pyyaml numpy torch transformers pydantic
+pip install -r online/requirements.txt
 ```
 
-*(Optional for local Qwen parser)*: Make sure Ollama is running:
+*(Optional for Gemini Cloud Parser)*: Create a `.env` file in the repo root with your Gemini API key:
+```bash
+echo "GEMINI_API_KEY=your_key_here" >> .env
+```
+
+*(Optional for local Qwen parser)*: Make sure Ollama is installed and running:
 ```bash
 ollama run qwen2.5:7b
 ```
