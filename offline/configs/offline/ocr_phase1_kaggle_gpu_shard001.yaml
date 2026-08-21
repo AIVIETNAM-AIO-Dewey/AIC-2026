@@ -1,0 +1,79 @@
+schema_version: "aic26.ocr_phase1.config.v1"
+execution_profile: kaggle_gpu_pinned
+run:
+  run_id: ppocrv6-small-det-gpt4o-mini-high-v1-phase1-shard001-highcap
+seed: 2026
+model:
+  id: ppocrv6-small-det
+  candidate_id: ppocrv6-small-det-gpt4o-mini-high-v1
+  revision: 01038f24bb3ca833f40dfd0eba0b81f0d92b5275576e3696ced20a5a1f619d06
+  source_registry_sha256: 9b221b4dd366c850e8a8bf6b4f11ca13becb921d51dddf2dcabdd41a1eaab5f7
+  device: gpu:0
+  enable_mkldnn: false
+  download_allowed: false
+  fallback: false
+  ensemble: false
+  network_policy: execution_environment_internet_disabled_plus_python_best_effort
+  packages:
+    paddlepaddle-gpu: 3.3.1
+    paddleocr: 3.7.0
+    paddlex: 3.7.2
+    pyclipper: 1.4.0
+    opencv-contrib-python: 4.10.0.84
+    Pillow: 11.1.0
+    numpy: 1.26.4
+  detector:
+    model_name: PP-OCRv6_small_det
+    path: ocr/ppocrv6-small/detector
+    files:
+      - path: inference.json
+        bytes: 229307
+        sha256: 89240f689a4a77aad75ef55a8df0a15c8e1d4980a327d17e58f24bbadde5aeab
+      - path: inference.pdiparams
+        bytes: 9817888
+        sha256: 5043d4ccc8d63402ccea8feefcee4db57077431a873e78d2191836a178a492da
+      - path: inference.yml
+        bytes: 885
+        sha256: 193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516
+crop:
+  horizontal_padding_ratio: 0.08
+  vertical_padding_ratio: 0.18
+  minimum_height_px: 96
+  perspective_resampling: bicubic
+  visual_hash_resampling: bilinear
+  png_compress_level: 1
+  algorithm: aic26.pil_quad_crop.v3
+tracking:
+  max_frame_gap: 120
+  minimum_polygon_iou: 0.15
+  maximum_centroid_distance_ratio: 0.75
+  minimum_area_ratio: 0.40
+  maximum_log_aspect_delta: 0.45
+  maximum_visual_hash_distance: 0.22
+  sharpness_weight: 0.40
+  detector_score_weight: 0.30
+  resolution_weight: 0.15
+  edge_weight: 0.15
+  temporal_diversity_weight: 0.20
+  maximum_representatives: 3
+  maximum_frames_per_shard: 25000
+  # Shard 001 produced 249,980 detections after 21,568 frames with the 250k
+  # production cap. Keep every detector threshold identical and raise only the
+  # fail-closed shard capacity so this dense shard can finish.
+  maximum_detections_per_shard: 400000
+  maximum_detections_per_frame: 2000
+  maximum_active_trajectories: 20000
+  maximum_candidate_evaluations_per_frame: 2000000
+  maximum_candidate_edges_per_frame: 250000
+  maximum_candidate_edges_per_component: 250000
+  detection_receipt_commit_interval_frames: 32
+  version: aic26.ocr_tracking.pilot.v3
+quality:
+  version: aic26.ocr_detection_quality.v1
+  minimum_labeled_frames: 100
+  minimum_non_ignored_instances: 200
+  minimum_frames_per_stratum: 15
+  matching_iou_threshold: 0.50
+  minimum_overall_recall: 0.95
+  minimum_stratum_recall: 0.90
+  minimum_overall_precision: 0.50
