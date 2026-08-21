@@ -68,15 +68,20 @@ _branch_cache: dict[str, dict[str, Any]] = {}
 
 
 def _index_keyframe_directories(root_dir: Path):
-    """Recursively discover and index all video keyframe directories at any nesting depth."""
+    """Recursively discover and index all video keyframe directories at any nesting depth and casing."""
     if not root_dir.exists():
+        logger.warning(f"Keyframes root directory not found: {root_dir}")
         return
     logger.info(f"⚡ Discovering video keyframe directories under {root_dir}...")
     t0 = time.perf_counter()
     try:
-        for p in root_dir.rglob("L*_*"):
-            if p.is_dir() and p.name.startswith("L") and "_" in p.name:
-                _video_to_dir_map[p.name] = p
+        for p in root_dir.rglob("*"):
+            if p.is_dir():
+                name_upper = p.name.upper()
+                if name_upper.startswith("L") and ("_" in name_upper or "-" in name_upper):
+                    canon_name = name_upper.replace("-", "_")
+                    _video_to_dir_map[canon_name] = p
+                    _video_to_dir_map[p.name] = p
     except Exception as e:
         logger.warning(f"Error during keyframe directory indexing: {e}")
 
@@ -432,29 +437,54 @@ async def get_video_keyframes(video_id: str):
 # Static File & UI Serving
 # ──────────────────────────────────────────────────────────────────────────────
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
-KEYFRAMES_DIR = Path(config["paths"]["keyframes_root"])
+KEYFRAMES_DIR = Path(str(config["paths"]["keyframes_root"]).strip().strip('"').strip("'")).expanduser().resolve()
 
 
 @app.get("/keyframes/{video_id}/{filename}")
 async def serve_keyframe_image(video_id: str, filename: str):
-    """Dynamically serve keyframe image across single or multi-batch folders (keyframes-1, keyframes-2, etc.)."""
+    """Dynamically serve keyframe image across arbitrary nested folders, casings, and image extensions."""
+    canon_vid = video_id.upper().replace("-", "_")
+    v_dir = _video_to_dir_map.get(canon_vid) or _video_to_dir_map.get(video_id)
+    
+    stem = Path(filename).stem
+    candidates_to_try = [
+        filename,
+        f"{stem}.jpg",
+        f"{stem}.jpeg",
+        f"{stem}.png",
+        f"{stem}.JPG",
+        f"{stem}.JPEG",
+        f"{stem}.PNG",
+    ]
+    if stem.isdigit():
+        num = int(stem)
+        candidates_to_try.extend([
+            f"{num:03d}.jpg",
+            f"{num:04d}.jpg",
+            f"{num}.jpg",
+            f"{num:03d}.png",
+            f"{num}.png",
+        ])
+
     # 1. Look up in indexed directory map
-    v_dir = _video_to_dir_map.get(video_id)
     if v_dir:
-        target = v_dir / filename
-        if target.exists():
-            return FileResponse(target)
+        for fname in candidates_to_try:
+            target = v_dir / fname
+            if target.exists():
+                return FileResponse(target)
 
     # 2. Fallback direct check
-    direct = KEYFRAMES_DIR / video_id / filename
-    if direct.exists():
-        return FileResponse(direct)
+    for fname in candidates_to_try:
+        direct = KEYFRAMES_DIR / video_id / fname
+        if direct.exists():
+            return FileResponse(direct)
 
     # 3. Dynamic glob search fallback
-    for match in KEYFRAMES_DIR.rglob(f"{video_id}/{filename}"):
-        if match.exists():
-            _video_to_dir_map[video_id] = match.parent
-            return FileResponse(match)
+    for fname in candidates_to_try:
+        for match in KEYFRAMES_DIR.rglob(f"{video_id}/{fname}"):
+            if match.exists():
+                _video_to_dir_map[canon_vid] = match.parent
+                return FileResponse(match)
 
     raise HTTPException(status_code=404, detail=f"Keyframe image {video_id}/{filename} not found")
 

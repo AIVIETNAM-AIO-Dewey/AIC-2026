@@ -26,7 +26,8 @@ class FastVectorSearchEngine:
     """High-speed vector retrieval engine using memory-mapped BLAS matrix operations."""
 
     def __init__(self, unified_index_dir: str | Path = "/Users/khoale/Downloads/AIC_HCM/unified_index"):
-        self.index_dir = Path(unified_index_dir)
+        clean_path = str(unified_index_dir).strip().strip('"').strip("'")
+        self.index_dir = Path(clean_path).expanduser().resolve()
         self._load_matrices()
         self._load_metadata()
 
