@@ -28,6 +28,7 @@ from aic2026.ocr.representative_recognition import (  # noqa: E402
     DEFAULT_RECOGNITION_BATCH_SIZE,
     local_runtime_identity,
     merge_representative_recognition_partitions,
+    preverify_phase1_recognition_inputs,
     run_representative_recognition,
 )
 from aic2026.ocr.tracking import TrackingConfig  # noqa: E402
@@ -94,6 +95,20 @@ def build_parser() -> argparse.ArgumentParser:
     representatives.add_argument("--resume", action="store_true")
     representatives.add_argument("--representative-start", type=int, default=0)
     representatives.add_argument("--representative-end", type=int)
+    representatives.add_argument("--phase1-preverification", type=Path)
+    representatives.add_argument("--phase1-preverification-sha256")
+
+    preverify = commands.add_parser(
+        "preverify-representatives",
+        help="Verify Phase 1 once before launching same-session recognition partitions",
+    )
+    preverify.add_argument("--phase1-config", type=Path, default=DEFAULT_PHASE1_CONFIG)
+    preverify.add_argument("--frame-manifest", type=Path, required=True)
+    preverify.add_argument("--detections", type=Path, required=True)
+    preverify.add_argument("--trajectories", type=Path, required=True)
+    preverify.add_argument("--representatives", type=Path, required=True)
+    preverify.add_argument("--source-commit-sha", required=True)
+    preverify.add_argument("--output", type=Path, required=True)
 
     merge = commands.add_parser(
         "merge-representatives",
@@ -170,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "completed", **counts}))
         return 0
 
-    if args.command == "run-representatives":
+    if args.command in {"preverify-representatives", "run-representatives"}:
         phase1_config_path = args.phase1_config.expanduser().resolve()
         phase1_config = read_config(phase1_config_path)
         if phase1_config.get("schema_version") != "aic26.ocr_phase1.config.v1":
@@ -188,6 +203,30 @@ def main(argv: list[str] | None = None) -> int:
             detector_tree_sha256=runtime["detector_tree_sha256"],
             runtime_identity_sha256=runtime["runtime_identity_sha256"],
         )
+        if args.command == "preverify-representatives":
+            attestation = preverify_phase1_recognition_inputs(
+                frame_manifest=args.frame_manifest.expanduser().resolve(),
+                detections=args.detections.expanduser().resolve(),
+                trajectories=args.trajectories.expanduser().resolve(),
+                representatives=args.representatives.expanduser().resolve(),
+                output=args.output.expanduser().resolve(),
+                run_id=run_config["run_id"],
+                phase1_config_sha256=canonical_config_sha256(phase1_config),
+                phase1_identity=identity,
+                tracking_config=TrackingConfig(**dict(tracking_config)),
+                source_commit_sha=args.source_commit_sha,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "counts": attestation.counts,
+                        "output": str(args.output.expanduser().resolve()),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         model_config = args.model_config.expanduser().resolve()
         weights = args.weights.expanduser().resolve()
         recognizer = VietOcrRecognizer.create(
@@ -224,6 +263,12 @@ def main(argv: list[str] | None = None) -> int:
             frame_cache_max_bytes=args.frame_cache_max_bytes,
             representative_start=args.representative_start,
             representative_end=args.representative_end,
+            phase1_preverification_path=(
+                None
+                if args.phase1_preverification is None
+                else args.phase1_preverification.expanduser().resolve()
+            ),
+            expected_phase1_preverification_sha256=(args.phase1_preverification_sha256),
             resume=args.resume,
         )
         print(json.dumps({"status": "completed", **counts}, ensure_ascii=False))

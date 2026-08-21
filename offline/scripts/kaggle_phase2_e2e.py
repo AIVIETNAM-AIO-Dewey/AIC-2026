@@ -721,6 +721,33 @@ def process_shard(
         if marker.get("status") == "completed" and not recognition_done:
             raise ValueError(f"completed recognition identity drift: {shard.shard_id}")
     if not recognition_done:
+        preverification: Path | None = None
+        preverification_sha256: str | None = None
+        if partitions_per_shard > 1:
+            preverification = output_root / "phase1-preverification.json"
+            run(
+                [
+                    str(python),
+                    str(PHASE2_RUNNER),
+                    "preverify-representatives",
+                    "--phase1-config",
+                    str(phase1_config),
+                    "--frame-manifest",
+                    str(shard.frame_manifest),
+                    "--detections",
+                    str(shard.detections),
+                    "--trajectories",
+                    str(shard.trajectories),
+                    "--representatives",
+                    str(shard.representatives),
+                    "--source-commit-sha",
+                    source_commit_sha,
+                    "--output",
+                    str(preverification),
+                ],
+                deadline=deadline,
+            )
+            preverification_sha256 = sha256_file(preverification)
         base_command = [
             str(python),
             str(PHASE2_RUNNER),
@@ -751,6 +778,16 @@ def process_shard(
             str(commit_interval),
             "--resume",
         ]
+        if preverification is not None:
+            assert preverification_sha256 is not None
+            base_command.extend(
+                (
+                    "--phase1-preverification",
+                    str(preverification),
+                    "--phase1-preverification-sha256",
+                    preverification_sha256,
+                )
+            )
 
         def command_for_partition(index: int) -> list[str]:
             if partition_visible_devices:

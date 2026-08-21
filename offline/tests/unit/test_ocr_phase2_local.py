@@ -39,6 +39,7 @@ from aic2026.ocr.representative_recognition import (
     _reconstruct_crop_image,
     _tracking_identity_hashes,
     merge_representative_recognition_partitions,
+    preverify_phase1_recognition_inputs,
     recognition_execution_policy_sha256,
     run_representative_recognition,
 )
@@ -558,6 +559,8 @@ def _run_representatives(
     frame_cache_max_bytes: int = DEFAULT_FRAME_CACHE_MAX_BYTES,
     representative_start: int = 0,
     representative_end: int | None = None,
+    phase1_preverification_path: Path | None = None,
+    expected_phase1_preverification_sha256: str | None = None,
     clock=None,
 ):
     manifest, detections, trajectories, representatives = artifacts
@@ -593,6 +596,8 @@ def _run_representatives(
         frame_cache_max_bytes=frame_cache_max_bytes,
         representative_start=representative_start,
         representative_end=representative_end,
+        phase1_preverification_path=phase1_preverification_path,
+        expected_phase1_preverification_sha256=expected_phase1_preverification_sha256,
         resume=resume,
         fault_injector=fault_injector,
         clock=clock or _PairClock(),
@@ -645,6 +650,43 @@ def test_representative_partitions_merge_in_exact_input_order(tmp_path: Path) ->
     assert receipt.partition_start == 0
     assert receipt.partition_end is None
     assert receipt.total_representatives == 2
+
+
+def test_shared_preverification_skips_partition_semantic_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts = _phase1_shard(tmp_path)
+    attestation_path = tmp_path / "phase1-preverification.json"
+    preverify_phase1_recognition_inputs(
+        frame_manifest=artifacts[0],
+        detections=artifacts[1],
+        trajectories=artifacts[2],
+        representatives=artifacts[3],
+        output=attestation_path,
+        run_id="phase2-fixture",
+        phase1_config_sha256="a" * 64,
+        phase1_identity=Phase1Identity(),
+        tracking_config=TrackingConfig(),
+        source_commit_sha="b" * 40,
+    )
+    monkeypatch.setattr(
+        "aic2026.ocr.representative_recognition.verify_linked_artifacts",
+        lambda **_: (_ for _ in ()).throw(AssertionError("semantic replay repeated")),
+    )
+    weights = tmp_path / "model.pth"
+    weights.write_bytes(b"fixture-weights")
+    output = tmp_path / "partition.jsonl"
+    _run_representatives(
+        tmp_path,
+        artifacts=artifacts,
+        output=output,
+        recognizer=_RepresentativeRecognizer(sha256_file(weights), ["Tiếng Việt"]),
+        representative_start=0,
+        representative_end=1,
+        phase1_preverification_path=attestation_path,
+        expected_phase1_preverification_sha256=sha256_file(attestation_path),
+    )
+    assert [row["transcript_nfc"] for row in iter_jsonl(output)] == ["Tiếng Việt"]
 
 
 def test_representative_runner_resume_truncates_torn_tail_and_is_byte_identical(

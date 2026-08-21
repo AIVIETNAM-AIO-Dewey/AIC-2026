@@ -18,6 +18,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from importlib import metadata
+from itertools import islice
 from pathlib import Path
 from time import perf_counter
 from typing import Literal, cast
@@ -210,6 +211,53 @@ class RepresentativeRecognitionResult(StrictModel):
                 raise ValueError("error result cannot contain a transcript")
             if self.confidence is not None or not self.error_type or not self.error_message:
                 raise ValueError("error result requires error details and no confidence")
+        return self
+
+
+class Phase1PreverifiedInput(StrictModel):
+    path: str = Field(min_length=1)
+    size: int = Field(ge=0)
+    mtime_ns: int = Field(ge=0)
+    device: int = Field(ge=0)
+    inode: int = Field(ge=0)
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+class Phase1RecognitionPreverification(StrictModel):
+    """One semantic Phase 1 verification shared by same-session inference workers."""
+
+    schema_version: Literal["aic26.ocr_phase1_recognition_preverification.v1"] = (
+        "aic26.ocr_phase1_recognition_preverification.v1"
+    )
+    run_id: str = Field(min_length=1)
+    source_commit_sha: str = Field(pattern=SOURCE_COMMIT_PATTERN)
+    phase1_config_sha256: str = Field(pattern=SHA256_PATTERN)
+    detector_id: str = Field(min_length=1)
+    detector_revision: str = Field(min_length=1)
+    detector_tree_sha256: str = Field(pattern=SHA256_PATTERN)
+    runtime_identity_sha256: str = Field(pattern=SHA256_PATTERN)
+    tracking_identity_mode: Literal["current", "legacy_without_commit_interval"]
+    tracking_config_sha256: str = Field(pattern=SHA256_PATTERN)
+    resource_limits_sha256: str = Field(pattern=SHA256_PATTERN)
+    inputs: dict[str, Phase1PreverifiedInput]
+    counts: dict[str, int]
+    trust_boundary: Literal["same_session_stat_identity_after_semantic_verification"] = (
+        "same_session_stat_identity_after_semantic_verification"
+    )
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> Phase1RecognitionPreverification:
+        if set(self.inputs) != {
+            "frame_manifest",
+            "detections",
+            "trajectories",
+            "representatives",
+        }:
+            raise ValueError("preverification inputs must contain the four exact Phase 1 roles")
+        if set(self.counts) != {"frames", "detections", "trajectories", "representatives"}:
+            raise ValueError("preverification counts contain unexpected roles")
+        if any(type(value) is not int or value < 0 for value in self.counts.values()):
+            raise ValueError("preverification counts must be non-negative integers")
         return self
 
 
@@ -548,6 +596,170 @@ def _select_tracking_identity_view(
     )
 
 
+def _preverified_input(path: Path, digest: str) -> Phase1PreverifiedInput:
+    resolved = path.resolve()
+    metadata = resolved.stat()
+    return Phase1PreverifiedInput(
+        path=str(resolved),
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        sha256=digest,
+    )
+
+
+def _assert_preverified_input_stats(
+    attestation: Phase1RecognitionPreverification,
+    paths: Mapping[str, Path],
+) -> None:
+    for name, path in paths.items():
+        expected = attestation.inputs[name]
+        actual = _preverified_input(path, expected.sha256)
+        if actual != expected:
+            raise ValueError(f"preverified Phase 1 input stat identity changed: {name}")
+
+
+def _tracking_view_from_preverification(
+    tracking_config: TrackingConfig,
+    attestation: Phase1RecognitionPreverification,
+) -> tuple[TrackingConfig, Literal["current", "legacy_without_commit_interval"]]:
+    current_tracking, current_resources, legacy_tracking, legacy_resources = (
+        _tracking_identity_hashes(tracking_config)
+    )
+    if attestation.tracking_identity_mode == "current":
+        if (
+            attestation.tracking_config_sha256 != current_tracking
+            or attestation.resource_limits_sha256 != current_resources
+        ):
+            raise ValueError("current tracking identity differs from preverification")
+        return tracking_config, "current"
+    if (
+        attestation.tracking_config_sha256 != legacy_tracking
+        or attestation.resource_limits_sha256 != legacy_resources
+    ):
+        raise ValueError("legacy tracking identity differs from preverification")
+    view = _LegacyTrackingIdentityView(
+        tracking_config,
+        tracking_sha=legacy_tracking,
+        resource_sha=legacy_resources,
+    )
+    return cast(TrackingConfig, view), "legacy_without_commit_interval"
+
+
+def preverify_phase1_recognition_inputs(
+    *,
+    frame_manifest: Path,
+    detections: Path,
+    trajectories: Path,
+    representatives: Path,
+    output: Path,
+    run_id: str,
+    phase1_config_sha256: str,
+    phase1_identity: Phase1Identity,
+    tracking_config: TrackingConfig,
+    source_commit_sha: str,
+) -> Phase1RecognitionPreverification:
+    """Verify a shard once before same-session partition workers are launched."""
+
+    paths = {
+        "frame_manifest": frame_manifest.resolve(),
+        "detections": detections.resolve(),
+        "trajectories": trajectories.resolve(),
+        "representatives": representatives.resolve(),
+    }
+    input_hashes = {name: sha256_file(path) for name, path in paths.items()}
+    verified_tracking_config, tracking_identity_mode = _select_tracking_identity_view(
+        tracking_config=tracking_config,
+        detections=paths["detections"],
+        trajectories=paths["trajectories"],
+        representatives=paths["representatives"],
+    )
+    counts = verify_linked_artifacts(
+        detections=paths["detections"],
+        trajectories=paths["trajectories"],
+        representatives=paths["representatives"],
+        expected_run_id=run_id,
+        expected_config_sha256=phase1_config_sha256,
+        expected_identity=phase1_identity,
+        tracking_config=verified_tracking_config,
+    )
+    if any(sha256_file(path) != input_hashes[name] for name, path in paths.items()):
+        raise ValueError("Phase 1 input changed during shared preverification")
+    detection_receipt = OcrPhase1Receipt.model_validate_json(
+        receipt_path_for(paths["detections"]).read_text(encoding="utf-8")
+    )
+    if detection_receipt.input_artifact_sha256 != input_hashes["frame_manifest"]:
+        raise ValueError("frame manifest is not the shard manifest bound by Phase 1")
+    attestation = Phase1RecognitionPreverification(
+        run_id=run_id,
+        source_commit_sha=source_commit_sha,
+        phase1_config_sha256=phase1_config_sha256,
+        detector_id=phase1_identity.detector_id,
+        detector_revision=phase1_identity.detector_revision,
+        detector_tree_sha256=phase1_identity.detector_tree_sha256,
+        runtime_identity_sha256=phase1_identity.runtime_identity_sha256,
+        tracking_identity_mode=tracking_identity_mode,
+        tracking_config_sha256=verified_tracking_config.sha256,
+        resource_limits_sha256=verified_tracking_config.resource_limits_sha256,
+        inputs={name: _preverified_input(path, input_hashes[name]) for name, path in paths.items()},
+        counts=counts,
+    )
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(output, attestation.model_dump(mode="json"))
+    _fsync_directory(output.parent)
+    return attestation
+
+
+def _load_phase1_preverification(
+    *,
+    path: Path,
+    expected_sha256: str,
+    paths: Mapping[str, Path],
+    run_id: str,
+    source_commit_sha: str,
+    phase1_config_sha256: str,
+    phase1_identity: Phase1Identity,
+    tracking_config: TrackingConfig,
+) -> tuple[
+    Phase1RecognitionPreverification,
+    TrackingConfig,
+    Literal["current", "legacy_without_commit_interval"],
+]:
+    resolved = path.resolve()
+    if sha256_file(resolved) != expected_sha256:
+        raise ValueError("Phase 1 preverification attestation SHA-256 mismatch")
+    attestation = Phase1RecognitionPreverification.model_validate_json(
+        resolved.read_text(encoding="utf-8")
+    )
+    expected_identity = (
+        run_id,
+        source_commit_sha,
+        phase1_config_sha256,
+        phase1_identity.detector_id,
+        phase1_identity.detector_revision,
+        phase1_identity.detector_tree_sha256,
+        phase1_identity.runtime_identity_sha256,
+    )
+    actual_identity = (
+        attestation.run_id,
+        attestation.source_commit_sha,
+        attestation.phase1_config_sha256,
+        attestation.detector_id,
+        attestation.detector_revision,
+        attestation.detector_tree_sha256,
+        attestation.runtime_identity_sha256,
+    )
+    if actual_identity != expected_identity:
+        raise ValueError("Phase 1 preverification identity mismatch")
+    _assert_preverified_input_stats(attestation, paths)
+    verified_tracking_config, mode = _tracking_view_from_preverification(
+        tracking_config, attestation
+    )
+    return attestation, verified_tracking_config, mode
+
+
 def _validate_binding_frame(binding: RepresentativeCropBinding, frame: FrameRef) -> None:
     expected = (
         frame.video_id,
@@ -591,10 +803,27 @@ def _reverify_release_inputs(
     frames_by_uid: Mapping[str, FrameRef],
     representative_records: Sequence[RepresentativeCropBinding],
     data_root: Path,
+    phase1_preverification: Phase1RecognitionPreverification | None = None,
+    phase1_preverification_path: Path | None = None,
+    phase1_preverification_sha256: str | None = None,
 ) -> None:
     """Recheck every mutable trust-boundary input immediately before release."""
 
-    if any(sha256_file(path) != input_hashes[name] for name, path in paths.items()):
+    preverification_values = (
+        phase1_preverification,
+        phase1_preverification_path,
+        phase1_preverification_sha256,
+    )
+    if any(value is not None for value in preverification_values):
+        if any(value is None for value in preverification_values):
+            raise ValueError("Phase 1 preverification release identity is incomplete")
+        assert phase1_preverification is not None
+        assert phase1_preverification_path is not None
+        assert phase1_preverification_sha256 is not None
+        if sha256_file(phase1_preverification_path) != phase1_preverification_sha256:
+            raise ValueError("Phase 1 preverification changed during recognition")
+        _assert_preverified_input_stats(phase1_preverification, paths)
+    elif any(sha256_file(path) != input_hashes[name] for name, path in paths.items()):
         raise ValueError("Phase 1 input changed during representative recognition")
     if (
         sha256_file(model_config) != model_config_hash
@@ -798,6 +1027,8 @@ def run_representative_recognition(
     frame_cache_max_bytes: int = DEFAULT_FRAME_CACHE_MAX_BYTES,
     representative_start: int = 0,
     representative_end: int | None = None,
+    phase1_preverification_path: Path | None = None,
+    expected_phase1_preverification_sha256: str | None = None,
     resume: bool = False,
     fault_injector: FaultInjector | None = None,
     clock: Clock = perf_counter,
@@ -822,24 +1053,49 @@ def run_representative_recognition(
         "trajectories": trajectories.resolve(),
         "representatives": representatives.resolve(),
     }
-    input_hashes = {name: sha256_file(path) for name, path in paths.items()}
-    verified_tracking_config, tracking_identity_mode = _select_tracking_identity_view(
-        tracking_config=tracking_config,
-        detections=paths["detections"],
-        trajectories=paths["trajectories"],
-        representatives=paths["representatives"],
+    preverification_values = (
+        phase1_preverification_path,
+        expected_phase1_preverification_sha256,
     )
-    verify_linked_artifacts(
-        detections=paths["detections"],
-        trajectories=paths["trajectories"],
-        representatives=paths["representatives"],
-        expected_run_id=run_id,
-        expected_config_sha256=phase1_config_sha256,
-        expected_identity=phase1_identity,
-        tracking_config=verified_tracking_config,
-    )
-    if any(sha256_file(path) != input_hashes[name] for name, path in paths.items()):
-        raise ValueError("Phase 1 input changed during linked-artifact verification")
+    if any(value is not None for value in preverification_values) and any(
+        value is None for value in preverification_values
+    ):
+        raise ValueError("Phase 1 preverification path and SHA-256 must be provided together")
+    phase1_preverification: Phase1RecognitionPreverification | None = None
+    if phase1_preverification_path is not None:
+        assert expected_phase1_preverification_sha256 is not None
+        phase1_preverification, verified_tracking_config, tracking_identity_mode = (
+            _load_phase1_preverification(
+                path=phase1_preverification_path,
+                expected_sha256=expected_phase1_preverification_sha256,
+                paths=paths,
+                run_id=run_id,
+                source_commit_sha=source_commit_sha,
+                phase1_config_sha256=phase1_config_sha256,
+                phase1_identity=phase1_identity,
+                tracking_config=tracking_config,
+            )
+        )
+        input_hashes = {name: item.sha256 for name, item in phase1_preverification.inputs.items()}
+    else:
+        input_hashes = {name: sha256_file(path) for name, path in paths.items()}
+        verified_tracking_config, tracking_identity_mode = _select_tracking_identity_view(
+            tracking_config=tracking_config,
+            detections=paths["detections"],
+            trajectories=paths["trajectories"],
+            representatives=paths["representatives"],
+        )
+        verify_linked_artifacts(
+            detections=paths["detections"],
+            trajectories=paths["trajectories"],
+            representatives=paths["representatives"],
+            expected_run_id=run_id,
+            expected_config_sha256=phase1_config_sha256,
+            expected_identity=phase1_identity,
+            tracking_config=verified_tracking_config,
+        )
+        if any(sha256_file(path) != input_hashes[name] for name, path in paths.items()):
+            raise ValueError("Phase 1 input changed during linked-artifact verification")
     phase1_detection_receipt = OcrPhase1Receipt.model_validate_json(
         receipt_path_for(paths["detections"]).read_text(encoding="utf-8")
     )
@@ -847,11 +1103,14 @@ def run_representative_recognition(
         raise ValueError("frame manifest is not the shard manifest bound by Phase 1")
 
     frames_by_uid = _load_manifest_frames(paths["frame_manifest"])
-    source_representative_records = [
-        RepresentativeCropBinding.model_validate(row)
-        for row in iter_jsonl(paths["representatives"])
-    ]
-    source_total_representatives = len(source_representative_records)
+    if phase1_preverification is None:
+        source_representative_records = [
+            RepresentativeCropBinding.model_validate(row)
+            for row in iter_jsonl(paths["representatives"])
+        ]
+        source_total_representatives = len(source_representative_records)
+    else:
+        source_total_representatives = phase1_preverification.counts["representatives"]
     if type(representative_start) is not int or representative_start < 0:
         raise ValueError("representative_start must be a non-negative integer")
     if representative_end is None:
@@ -860,7 +1119,21 @@ def run_representative_recognition(
         representative_start < representative_end <= source_total_representatives
     ):
         raise ValueError("representative partition must be a non-empty in-bounds range")
-    representative_records = source_representative_records[representative_start:representative_end]
+    if phase1_preverification is None:
+        representative_records = source_representative_records[
+            representative_start:representative_end
+        ]
+    else:
+        representative_records = [
+            RepresentativeCropBinding.model_validate(row)
+            for row in islice(
+                iter_jsonl(paths["representatives"]),
+                representative_start,
+                representative_end,
+            )
+        ]
+        if len(representative_records) != representative_end - representative_start:
+            raise ValueError("preverified representative partition became incomplete")
     for binding in representative_records:
         frame = frames_by_uid.get(binding.frame_uid)
         if frame is None:
@@ -957,6 +1230,9 @@ def run_representative_recognition(
             frames_by_uid=frames_by_uid,
             representative_records=representative_records,
             data_root=data_root,
+            phase1_preverification=phase1_preverification,
+            phase1_preverification_path=phase1_preverification_path,
+            phase1_preverification_sha256=expected_phase1_preverification_sha256,
         )
         if receipt.status == "running":
             completed_receipt = RepresentativeRecognitionReceipt(
@@ -1152,6 +1428,9 @@ def run_representative_recognition(
         frames_by_uid=frames_by_uid,
         representative_records=representative_records,
         data_root=data_root,
+        phase1_preverification=phase1_preverification,
+        phase1_preverification_path=phase1_preverification_path,
+        phase1_preverification_sha256=expected_phase1_preverification_sha256,
     )
 
     os.replace(partial, output)
@@ -1169,6 +1448,9 @@ def run_representative_recognition(
         frames_by_uid=frames_by_uid,
         representative_records=representative_records,
         data_root=data_root,
+        phase1_preverification=phase1_preverification,
+        phase1_preverification_path=phase1_preverification_path,
+        phase1_preverification_sha256=expected_phase1_preverification_sha256,
     )
     completed_receipt = RepresentativeRecognitionReceipt(
         **identity_fields,
