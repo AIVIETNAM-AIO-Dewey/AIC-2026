@@ -1088,13 +1088,16 @@ function generate100SubmissionRows(queryId) {
     const topVid = topItem.video_id;
     const topFrame = topItem.frame_idx;
     const topKn = topItem.keyframe_n || 1;
+    
+    // User-edited answer (or model answer if not edited)
     const chosenAnswer = (el.inspVqaInput && el.inspVqaInput.value.trim()) || topItem.vqa_answer || "màu xanh";
+    const formattedAns = chosenAnswer.replace(/"/g, '""');
 
     // Row 1: Human pick + answer
-    rows.push(`${queryId},${topVid},${topFrame},"${chosenAnswer.replace(/"/g, '""')}"`);
+    rows.push(`${queryId},${topVid},${topFrame},"${formattedAns}"`);
     const seen = new Set([`${topVid}_${topFrame}`]);
 
-    // Tier 2 (Rows 2–8): Adjacent frames of top video with chosenAnswer
+    // Tier 2 (Rows 2–8): Adjacent frames of top video with user's answer
     if (state.activeVideoKeyframes && state.activeVideoKeyframes.length > 0 && state.activeVideoKeyframes[0].video_id === topVid) {
       const currIdx = state.activeVideoKeyframes.findIndex(k => k.frame_idx === topFrame || k.keyframe_n === topKn);
       if (currIdx !== -1) {
@@ -1106,20 +1109,19 @@ function generate100SubmissionRows(queryId) {
             const key = `${topVid}_${kf.frame_idx}`;
             if (!seen.has(key)) {
               seen.add(key);
-              rows.push(`${queryId},${topVid},${kf.frame_idx},"${chosenAnswer.replace(/"/g, '""')}"`);
+              rows.push(`${queryId},${topVid},${kf.frame_idx},"${formattedAns}"`);
             }
           }
         }
       }
     }
 
-    // Tier 3 & 4 (Rows 9–100): Secondary candidates
+    // Tier 3 & 4 (Rows 9–100): Secondary candidate frames ALL using user's answer
     for (const cand of results) {
       const key = `${cand.video_id}_${cand.frame_idx}`;
       if (!seen.has(key) && rows.length < 100) {
         seen.add(key);
-        const ans = cand.vqa_answer || chosenAnswer;
-        rows.push(`${queryId},${cand.video_id},${cand.frame_idx},"${ans.replace(/"/g, '""')}"`);
+        rows.push(`${queryId},${cand.video_id},${cand.frame_idx},"${formattedAns}"`);
       }
     }
 
@@ -1132,8 +1134,7 @@ function generate100SubmissionRows(queryId) {
         const key = `${cand.video_id}_${fakeF}`;
         if (!seen.has(key) && rows.length < 100) {
           seen.add(key);
-          const ans = cand.vqa_answer || chosenAnswer;
-          rows.push(`${queryId},${cand.video_id},${fakeF},"${ans.replace(/"/g, '""')}"`);
+          rows.push(`${queryId},${cand.video_id},${fakeF},"${formattedAns}"`);
         }
       }
     }
