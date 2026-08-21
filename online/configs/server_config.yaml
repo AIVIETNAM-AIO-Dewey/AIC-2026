@@ -1,0 +1,35 @@
+# AIC Online Retrieval Engine Server Configuration
+server:
+  host: "0.0.0.0"
+  port: 8890
+
+paths:
+  # Root directory containing keyframe images (e.g., L21_V001/001.jpg)
+  keyframes_root: "/Users/khoale/Downloads/AIC_Challenger/data/keyframes"
+  # Unified index directory (npy vectors + jsonl metadata)
+  unified_index: "/Users/khoale/Downloads/AIC_HCM/unified_index"
+  # ASR segments directory (per-video JSONL transcripts)
+  asr_segments: "/Users/khoale/Downloads/AIC_HCM/artifacts/asr_segments"
+  # DAM descriptions directory
+  dam_descriptions: "/Users/khoale/Downloads/AIC_HCM/artifacts/dam_descriptions"
+  # Map-keyframes CSV directory (n, pts_time, fps, frame_idx)
+  map_keyframes: "/Users/khoale/Downloads/AIC_HCM/map-keyframes"
+
+models:
+  siglip: "google/siglip2-base-patch16-224"
+  bge_m3: "BAAI/bge-m3"
+  bge_reranker: "BAAI/bge-reranker-v2-m3"
+  qwen_ollama_url: "http://localhost:11434/api/chat"
+  qwen_model_id: "qwen2.5:7b"
+  gemini_model_id: "gemini-3.6-flash"
+
+retrieval:
+  branch_limit: 500       # Per-branch top-k for cosine search
+  top_k_pool: 300          # Stage 1 candidate pool size
+  top_k_rerank: 50         # Stage 2 cross-encoder top candidates
+  k_rrf: 60                # Reciprocal Rank Fusion constant
+  default_weights:
+    vis: 0.35
+    dam: 0.30
+    asr: 0.35
+    ocr: 0.00

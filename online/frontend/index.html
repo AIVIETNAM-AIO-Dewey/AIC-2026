@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIC-2026 Multimodal Retrieval Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- TOP APP HEADER -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-badge">
+        <span class="logo-icon">⚡</span>
+        <div class="logo-text">
+          <span class="logo-title">AIC-2026 RETRIEVAL STUDIO</span>
+          <span class="logo-sub">High-Speed Multimodal Video Retrieval</span>
+        </div>
+      </div>
+      
+      <div class="task-selector">
+        <label>TASK:</label>
+        <div class="task-btn-group">
+          <button class="task-btn active" data-task="KIS">KIS</button>
+          <button class="task-btn" data-task="VQA">VQA</button>
+          <button class="task-btn" data-task="TRAKE">TRAKE</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <button id="btn-gemini-toggle" class="toggle-btn active" title="Toggle Gemini 3.6 Flash / Local Qwen 2.5">
+        <span class="indicator-dot"></span>
+        <span class="btn-text">Gemini 3.6 ON</span>
+      </button>
+
+      <div class="status-pill ready">
+        <span class="status-dot"></span>
+        <span id="server-status-text">GPU Warm & Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTAINER -->
+  <main class="main-container">
+    <!-- QUERY CONTROL DECK -->
+    <section class="control-deck">
+      <div class="deck-header">
+        <div class="mode-tabs">
+          <span class="section-label">QUERY MODE:</span>
+          <button class="mode-tab active" data-mode="auto">1. Auto-Run</button>
+          <button class="mode-tab" data-mode="edit">2. Edit-then-Send</button>
+          <button class="mode-tab" data-mode="direct">3. Direct JSON</button>
+        </div>
+        <div class="deck-meta">
+          <span id="timing-badge" class="meta-badge">Ready</span>
+          <span id="session-badge" class="meta-badge hidden">Session: -</span>
+        </div>
+      </div>
+
+      <div class="deck-body">
+        <!-- Original Query Box -->
+        <div class="query-box-col" id="col-original-query">
+          <div class="col-header">
+            <label for="input-query">ORIGINAL QUERY (VIETNAMESE / ENGLISH)</label>
+            <span class="shortcut-tip">Press Ctrl+Enter or Cmd+Enter to Run</span>
+          </div>
+          <textarea id="input-query" placeholder="Nhập câu truy vấn video... (Ví dụ: Đoạn video về cuộc đua xe đạp nhìn từ flycam trên cao...)"></textarea>
+          <div class="col-actions">
+            <button id="btn-run-query" class="btn-primary">
+              <span class="btn-icon">🚀</span>
+              <span id="btn-run-label">Parse & Search</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Structured Parsed JSON Editor -->
+        <div class="query-box-col" id="col-parsed-json">
+          <div class="col-header">
+            <label for="json-editor">STRUCTURED QUERY CONTRACT (JSON)</label>
+            <button id="btn-format-json" class="btn-text">Format</button>
+          </div>
+          <textarea id="json-editor" spellcheck="false" placeholder="Parsed JSON schema will appear here or paste directly..."></textarea>
+          <div class="col-actions json-actions">
+            <button id="btn-execute-json" class="btn-secondary">
+              <span class="btn-icon">▶️</span> Execute JSON
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- DYNAMIC WEIGHT ADJUSTMENT PANEL -->
+      <div class="weights-panel">
+        <div class="weights-header">
+          <div class="weights-title">
+            <span>🎛️ DYNAMIC MODALITY WEIGHTS (SUM = 1.00)</span>
+            <span class="weights-hint">— Drag sliders and click Re-fuse for instant (<5ms) re-weighting</span>
+          </div>
+          <div class="weights-actions">
+            <button id="btn-re-fuse" class="btn-accent" title="Re-fuse Stage 1 pool instantly using cached branch hits">
+              <span>⚡ Re-Fuse Pool (<5ms)</span>
+            </button>
+            <button id="btn-re-rank" class="btn-outline" title="Re-run Stage 2 Cross-Encoder on newly fused pool">
+              <span>🔄 Re-Rank Top 50</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="sliders-grid">
+          <!-- Visual SigLIP Slider -->
+          <div class="slider-group">
+            <div class="slider-label-row">
+              <span class="modality-name">👁️ Visual Scene (SigLIP-2)</span>
+              <span class="slider-val" id="val-w-vis">0.35</span>
+            </div>
+            <input type="range" id="slider-w-vis" min="0" max="1" step="0.05" value="0.35">
+          </div>
+
+          <!-- DAM Objects Slider -->
+          <div class="slider-group">
+            <div class="slider-label-row">
+              <span class="modality-name">📦 Objects (DAM)</span>
+              <span class="slider-val" id="val-w-dam">0.30</span>
+            </div>
+            <input type="range" id="slider-w-dam" min="0" max="1" step="0.05" value="0.30">
+          </div>
+
+          <!-- Speech ASR Slider -->
+          <div class="slider-group">
+            <div class="slider-label-row">
+              <span class="modality-name">🎙️ Speech Dialogue (ASR)</span>
+              <span class="slider-val" id="val-w-asr">0.35</span>
+            </div>
+            <input type="range" id="slider-w-asr" min="0" max="1" step="0.05" value="0.35">
+          </div>
+
+          <!-- OCR Text Slider -->
+          <div class="slider-group">
+            <div class="slider-label-row">
+              <span class="modality-name">🔤 Screen Text (OCR)</span>
+              <span class="slider-val" id="val-w-ocr">0.00</span>
+            </div>
+            <input type="range" id="slider-w-ocr" min="0" max="1" step="0.05" value="0.00">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RESULTS SECTION -->
+    <section class="results-section">
+      <div class="results-header">
+        <div class="results-title-group">
+          <span class="results-heading">🎯 RETRIEVAL CANDIDATES</span>
+          <span id="results-count-badge" class="count-badge">0 candidates</span>
+        </div>
+        <div class="results-view-controls">
+          <label>Top Results:</label>
+          <select id="select-top-k">
+            <option value="10">Top 10</option>
+            <option value="20" selected>Top 20</option>
+            <option value="50">Top 50</option>
+            <option value="100">Top 100</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- RESULTS GRID -->
+      <div id="results-grid" class="results-grid">
+        <!-- Candidate Cards will be rendered dynamically -->
+        <div class="empty-placeholder">
+          <div class="empty-icon">🔍</div>
+          <div class="empty-title">Ready for Search</div>
+          <div class="empty-desc">Enter your query above or paste structured JSON to retrieve video keyframes.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- STICKY SUBMISSION BAR -->
+  <footer class="submission-bar">
+    <div class="submission-content">
+      <div class="submission-label">
+        <span>CURRENT SUBMISSION:</span>
+      </div>
+      <div class="submission-string-container">
+        <input type="text" id="submission-input" readonly value="No keyframe selected">
+      </div>
+      <div class="submission-actions">
+        <button id="btn-copy-submission" class="btn-copy">
+          <span>📋 Copy Submission</span>
+        </button>
+        <button id="btn-clear-submission" class="btn-text">Clear</button>
+      </div>
+    </div>
+  </footer>
+
+  <!-- FRAME INSPECTOR MODAL (Matching User's UI Design) -->
+  <div id="inspector-modal" class="modal-backdrop hidden">
+    <div class="inspector-card">
+      <div class="inspector-main">
+        <!-- Left: Large Keyframe Canvas & Image -->
+        <div class="inspector-visual-pane">
+          <div class="image-wrapper" id="inspector-image-wrapper">
+            <img id="inspector-img" alt="Keyframe Preview" src="">
+            <canvas id="inspector-canvas"></canvas>
+            <div id="inspector-img-placeholder" class="missing-img-overlay hidden">
+              <div class="placeholder-icon">🖼️</div>
+              <div id="placeholder-text" class="placeholder-lbl">L21_V001 / 001.jpg</div>
+            </div>
+          </div>
+          <div class="visual-controls">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-bboxes" checked>
+              <span>Show DAM Bounding Boxes</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Right: Metadata & Explainability Panel -->
+        <div class="inspector-meta-pane">
+          <div class="meta-section">
+            <div class="meta-field">
+              <span class="meta-lbl">VIDEO</span>
+              <span class="meta-val highlight" id="insp-video-id">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">FRAME NUMBER</span>
+              <span class="meta-val" id="insp-keyframe-n">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">FRAME INDEX (PTS TIME)</span>
+              <span class="meta-val" id="insp-frame-idx">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">SCORE / RANK</span>
+              <span class="meta-val" id="insp-score-rank">-</span>
+            </div>
+          </div>
+
+          <!-- ASR Speech Transcript -->
+          <div class="meta-detail-box">
+            <div class="detail-box-title">🎙️ SPOKEN SPEECH (ASR)</div>
+            <div class="detail-box-content" id="insp-asr-text">(No dialogue recorded in this keyframe)</div>
+          </div>
+
+          <!-- DAM Visual Description -->
+          <div class="meta-detail-box">
+            <div class="detail-box-title">🖼️ DAM VISUAL DESCRIPTION</div>
+            <div class="detail-box-content" id="insp-dam-text">(No visual description)</div>
+          </div>
+
+          <!-- Matched DAM Objects List -->
+          <div class="meta-detail-box" id="insp-objects-box">
+            <div class="detail-box-title">📦 DETECTED OBJECTS</div>
+            <div class="objects-list" id="insp-objects-list"></div>
+          </div>
+
+          <!-- Inspector Action Buttons -->
+          <div class="inspector-actions">
+            <button id="btn-toggle-in-submission" class="btn-submit-toggle">
+              <span>✓ In submission</span>
+            </button>
+            <button id="btn-close-inspector" class="btn-close">
+              <span>Close</span>
+            </button>
+          </div>
+
+          <div class="keyboard-hints">
+            <span><kbd>←</kbd> <kbd>→</kbd> browse video</span>
+            <span><kbd>↵</kbd> add to submit</span>
+            <span><kbd>Esc</kbd> close</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom: Filmstrip Slider -->
+      <div class="inspector-filmstrip-pane">
+        <div class="filmstrip-header">
+          <span>VIDEO KEYFRAMES TIMELINE</span>
+          <span id="filmstrip-count">0 frames</span>
+        </div>
+        <div class="filmstrip-carousel-wrap">
+          <button id="btn-filmstrip-prev" class="carousel-arrow">◀</button>
+          <div class="filmstrip-scroll" id="filmstrip-scroll">
+            <!-- Filmstrip thumbnails injected here -->
+          </div>
+          <button id="btn-filmstrip-next" class="carousel-arrow">▶</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toast" class="toast hidden">Copied to clipboard!</div>
+
+  <script src="app.js"></script>
+</body>
+</html>

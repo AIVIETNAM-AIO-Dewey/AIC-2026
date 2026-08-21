@@ -1,161 +1,135 @@
-# 🎬 AIC-2026 Online Multimodal Video Retrieval Engine
+# AIC-2026 Multimodal Online Retrieval Studio
 
-High-performance, low-latency (< 80ms) multimodal video retrieval engine built for the **Ho Chi Minh City AI Challenge (AIC)** and **Video Browser Showdown (VBS)**.
+A high-speed, client-server multimodal video retrieval platform for the **Ho Chi Minh City AI Challenge (AIC 2026)**.
 
----
-
-## 🏛️ Architecture Overview
-
-The system operates as a **two-stage cascaded hybrid retrieval funnel**:
-
-```
-                       Raw User Query (Vietnamese / English)
-                                        │
-                                        ▼
-             ┌─────────────────────────────────────────────────────┐
-             │ 1. Query Decomposer & Task Classifier               │
-             │    (Gemini Flash API + Local Offline Fallback)      │
-             └──────────────────────────┬──────────────────────────┘
-                                        │
-     ┌──────────────────┬───────────────┴──────────────┬──────────────────┐
-     ▼                  ▼                              ▼                  ▼
-┌──────────────┐ ┌──────────────┐             ┌────────────────┐ ┌────────────────┐
-│ Channel 1:   │ │ Channel 2:   │             │ Channel 3:     │ │ Channel 4:     │
-│ Visual Scene │ │ DAM Objects  │             │ Audio Speech   │ │ Screen Text    │
-│ (SigLIP-2)   │ │ (BGE-M3 Dense│             │ (BGE-M3 + BM25)│ │ (BM25-OCR)     │
-│ 768-d Vector │ │ 1024-d Vector│             │ 1024-d Vector  │ │ Text Match     │
-└──────┬───────┘ └──────┬───────┘             └────────┬───────┘ └────────┬───────┘
-       │                │                              │                  │
-       └────────────────┴──────────────┬───────────────┴──────────────────┘
-                                       ▼
-             ┌─────────────────────────────────────────────────────┐
-             │ Stage 1 Funnel: Weighted Reciprocal Rank Fusion     │
-             │ (177,321 Master Keyframes ──► Top-50 Pool in ~25ms) │
-             └─────────────────────────┬───────────────────────────┘
-                                       │ Top-50 Candidates
-                                       ▼
-             ┌─────────────────────────────────────────────────────┐
-             │ Stage 2: Precision Cross-Attention & Reasoner Layer │
-             │ • KIS:   bge-reranker-v2-m3 Cross-Encoder (~20ms)   │
-             │ • TRAKE: Temporal Monotonicity Filter (t1 < t2)     │
-             │ • VQA:   Extractive LLM Question Answering          │
-             └─────────────────────────┬───────────────────────────┘
-                                       ▼
-               Output: Ranked Keyframes + Bounding Boxes + AIC Submission Code
-```
+Features a **FastAPI GPU backend** with warm PyTorch models and a **modern dark-mode Web Studio UI** with instant weight re-tuning, bounding box overlays, and filmstrip timeline navigation.
 
 ---
 
-## 📂 Directory Layout & Data Assumptions
+## 🚀 Key Highlights
 
-The retrieval pipeline assumes the following directory structure:
+1. **Client-Server Architecture**:
+   - Heavy AI models (`SigLIP-2`, `BGE-M3`, `BGE-Reranker-v2-m3`) and memory-mapped matrices (177k keyframes, 435k DAM objects) stay warm in GPU VRAM.
+   - No cold-start overhead per query.
 
-```
-AIC_HCM/
-├── map-keyframes/               <── 873 CSVs mapping n -> pts_time -> frame_idx (177,321 rows)
-├── artifacts/
-│   ├── dam_descriptions/       <── 873 JSONLs with 435,713 50-word DAM object captions
-│   ├── asr_segments/           <── 873 JSONLs with 55,168 speech transcripts & keyframe links
-│   └── ocr_transcripts/        <── (Optional) On-screen text JSONLs (Default w_ocr=0.0)
-└── qdrant_db/                   <── Embedded on-disk Qdrant vector database
+2. **Instant (< 6ms) CPU Re-Fusion (Branch Caching)**:
+   - When a query is run, raw retrieval hits from all 4 branches (`vis`, `dam`, `asr`, `ocr`) are cached in-memory.
+   - Dragging modality weight sliders and clicking **`[ ⚡ Re-Fuse Pool ]`** re-scores and re-ranks 300 candidates on CPU in **~5ms** without re-embedding!
 
-[AIC2026] Scene Embeddings/
-└── *.f16.npy, *.jsonl          <── 873 NumPy matrices with 177,321 768-d SigLIP-2 visual vectors
+3. **3 Query Modes**:
+   - **Auto-Run**: Natural language query $\rightarrow$ LLM parses $\rightarrow$ runs search immediately.
+   - **Edit-then-Send**: Natural language query $\rightarrow$ LLM decomposes to JSON $\rightarrow$ inspect & modify JSON/weights $\rightarrow$ execute.
+   - **Direct JSON**: Paste structured JSON directly (e.g., from web Gemini chat) $\rightarrow$ execute (skips LLM step).
 
-keyframes/                       <── (Optional local images) keyframes/<VIDEO_ID>/<00n>.jpg
-```
+4. **Multi-LLM Query Decomposer with Graceful Fallback**:
+   - **Gemini 3.6 Flash / 3.7**: High-precision cloud parser with a UI toggle button.
+   - **Local Qwen 2.5 7B (via Ollama)**: Offline competition mode on Mac Metal/GPU.
+   - **Rule-based Fallback**: Zero-dependency offline backup if APIs are unreachable.
+
+5. **Interactive Frame Inspector**:
+   - Large keyframe preview with canvas overlay for **DAM object bounding boxes**.
+   - Explainability panel: Video ID, Frame Number, PTS timestamp, score breakdown, full ASR dialogue, and DAM description.
+   - **Filmstrip Timeline Slider**: Scrollable chronological filmstrip of all keyframes in the video with `[←]` / `[→]` keyboard navigation.
+   - **Sticky Submission Bar**: One-click `[ 📋 Copy Submission ]` in official format (`<VIDEO_ID>, <FRAME_IDX>`).
 
 ---
 
-## 🚀 Quickstart & Installation
+## 🛠️ Quick Start Guide
 
-### 1. Python Environment Setup
+### 1. Requirements & Dependencies
+Ensure your Python environment has the required packages installed:
 ```bash
-# Activate environment or create virtual env
-conda activate speech_to_text
-# or: python -m venv .venv && source .venv/bin/activate
-
-# Install dependencies
-pip install -r online/requirements.txt
+pip install fastapi uvicorn pyyaml numpy torch transformers pydantic
 ```
 
-### 2. Configure Environment Variables
-Create a `.env` file in the project root:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
+*(Optional for local Qwen parser)*: Make sure Ollama is running:
+```bash
+ollama run qwen2.5:7b
 ```
-*(If no API key is provided, the engine automatically uses the fast local rule-based query parser and offline VQA heuristic extractor).*
 
 ---
 
-## 🛠️ Step 1: One-Time Qdrant Indexing
+### 2. Configure Dataset Directories
 
-To index the entire dataset into the local embedded Qdrant store:
+Open [`online/configs/server_config.yaml`](online/configs/server_config.yaml) and adjust the paths to match your local machine:
+
+```yaml
+paths:
+  # 1. Root directory containing keyframe images (e.g. L21_V001/001.jpg)
+  keyframes_root: "/Users/khoale/Downloads/AIC_Challenger/data/keyframes"
+
+  # 2. Unified index directory (npy vectors + jsonl metadata)
+  unified_index: "/Users/khoale/Downloads/AIC_HCM/unified_index"
+
+  # 3. ASR segments directory (per-video JSONL transcripts)
+  asr_segments: "/Users/khoale/Downloads/AIC_HCM/artifacts/asr_segments"
+
+  # 4. DAM descriptions directory (per-video object descriptions)
+  dam_descriptions: "/Users/khoale/Downloads/AIC_HCM/artifacts/dam_descriptions"
+
+  # 5. Keyframes CSV mapping directory
+  map_keyframes: "/Users/khoale/Downloads/AIC_HCM/map-keyframes"
+```
+
+---
+
+### 3. Launch the Server
+
+Navigate to the repository root and start the server:
 
 ```bash
-# Index all 873 videos into Qdrant (Runs on Mac MPS GPU / CUDA)
-python -m online.src.index.run_indexing
+cd /Users/khoale/Downloads/AIC_Challenger/shared_repo/AIC-2026
+python -m online.server
+```
 
-# Or index a small subset for quick testing:
-python -m online.src.index.run_indexing --videos L21_V001 L21_V002
+*(Or specify your conda python path)*:
+```bash
+/opt/anaconda3/envs/speech_to_text/bin/python -m online.server
+```
+
+When ready, the server will output:
+```
+2026-08-21 13:13:33 [INFO] ✅ Server fully warmed and ready in 23.7s!
+INFO: Uvicorn running on http://0.0.0.0:8890 (Press CTRL+C to quit)
 ```
 
 ---
 
-## 🌐 Step 2: Launch the Interactive Web Application
+### 4. Open the Web Studio UI
 
-Start the FastAPI web server:
-
-```bash
-uvicorn online.src.ui.app:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Open your browser at **`http://localhost:8000`**.
-
-### 🌟 Web UI Features:
-1. **Task Switcher**: Tabs for **KIS** (Known-Item Search), **TRAKE** (Temporal Sequences), and **VQA** (Question Answering).
-2. **Editable Query Inspector (Human-in-the-Loop)**: Click **"Parse Sub-Queries"** to view and manually adjust the decomposed visual scene, DAM objects, speech keywords, and channel weight sliders before searching!
-3. **Canvas Bounding Box Overlays**: Detected DAM objects are rendered with **translucent colored highlights and entity tags** directly on the keyframe images.
-4. **Collapsible Explainability Drawer ("Inspect Evidence")**:
-   - 🖼️ SigLIP-2 Visual Cosine Similarity
-   - 🔍 Detailed DAM Object Captions & Bounding Box coordinates
-   - 🎙️ Spoken ASR Audio Transcript with exact playback timestamp interval
-   - 🧠 BGE-Reranker Cross-Attention Score
-5. **1-Click Submission Code Copy**: Click to copy `<VIDEO_ID>, <FRAME_IDX>` directly to your clipboard.
+Open your browser and navigate to:
+👉 **[http://localhost:8890](http://localhost:8890)**
 
 ---
 
-## 📦 Automated Official Competition Submission Packager
+## 📁 Data Structure Reference
 
-When the organizers provide a batch of query `.txt` files (e.g. `query-1-kis.txt`, `query-2-qa.txt`, `query-3-trake.txt`), generate the official submission `.zip` with a single command:
+For full details on the dataset directory layout and metadata schemas, refer to [`online/DATA_STRUCTURE.md`](DATA_STRUCTURE.md).
 
-```bash
-# Automatically processes all queries, formats exact CSVs, and creates valid submission.zip:
-PYTHONPATH=. python -m online.src.submission.run_batch_submission \
-    --queries-dir /path/to/competition_batch1 \
-    --output-zip team_AIC_round1.zip \
-    --top-k 100
 ```
+<keyframes_root>/
+  ├── L21_V001/
+  │   ├── 001.jpg
+  │   ├── 002.jpg
+  │   └── ...
+  └── L30_V020/
 
-#### Official Submission Format Compliance:
-- **KIS (`query-X-kis.csv`)**: `<video_id>, <frame_idx>` (No `.mp4`, integer frame index, max 100 lines).
-- **Q&A (`query-X-qa.csv`)**: `<video_id>, <frame_idx>, "<answer>"` ($\le 100$ characters, properly escaped quotes, no headers).
-- **TRAKE (`query-X-trake.csv`)**: `<video_id>, <frame_1>, <frame_2>, ..., <frame_N>` ($N$ event frames, strictly monotonic).
-- **Packaging**: Creates `submission.zip` containing the mandatory `submission/` root directory.
+<unified_index>/
+  ├── keyframes_visual_vectors.f16.npy    # (177321, 768) float16 (SigLIP-2)
+  ├── keyframes_speech_vectors.f16.npy    # (177321, 1024) float16 (BGE-M3 Speech)
+  ├── dam_vectors.f16.npy                 # (435713, 1024) float16 (DAM Objects)
+  ├── keyframes_metadata.jsonl            # 177,321 keyframe metadata records
+  └── dam_metadata.jsonl                  # 435,713 localized object records
+```
 
 ---
 
-## 🧪 Testing & Benchmarks
+## ⌨️ Useful Keyboard Shortcuts (in Frame Inspector)
 
-Run the automated test suite:
-
-```bash
-# 1. Test Qdrant indexing & vector search
-python -m unittest online/tests/test_qdrant_indexing.py
-
-# 2. Test End-to-End retrieval across KIS and VQA
-python -m unittest online/tests/test_retrieval_e2e.py
-
-# 3. Benchmark latency (Budget: < 80ms)
-python -m online.tests.benchmark_latency
-```
+| Key | Action |
+|---|---|
+| <kbd>←</kbd> | Previous keyframe in video timeline |
+| <kbd>→</kbd> | Next keyframe in video timeline |
+| <kbd>Enter</kbd> | Toggle keyframe in/out of current submission |
+| <kbd>Esc</kbd> | Close Frame Inspector modal |
+| <kbd>Ctrl</kbd> + <kbd>Enter</kbd> | Execute search from query / JSON textarea |

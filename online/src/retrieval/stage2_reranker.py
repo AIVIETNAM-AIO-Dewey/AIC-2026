@@ -1,213 +1,357 @@
-"""Stage 2: Precision Cross-Attention Re-Ranking & TRAKE Temporal Verification."""
+"""Stage 2: Precision Cross-Attention Re-Ranking & TRAKE Dynamic Programming Path Finder.
+
+Implements task-specific precision layers:
+1. KIS: bge-reranker-v2-m3 Cross-Encoder on candidate dossiers (Score = 0.40 * Stage1 + 0.60 * Reranker).
+2. VQA: Cross-Encoder ranking + Extractive LLM Reader for Top 1 evidence answer.
+3. TRAKE: Dynamic Programming Monotonic Path Matching across events (t(f1) < t(f2) < ... < t(fN)).
+"""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Optional
+
 import numpy as np
 
-from online.src.contracts.query import (
-    ParsedQuery,
-    SearchResult,
-    SpeechEvidence,
-    MatchedObject,
-)
+from online.src.contracts.query import ParsedQuery
 from online.src.retrieval.embeddings import ModelRegistry
+from online.src.retrieval.vqa_reasoner import VQAReasoner
 
 logger = logging.getLogger(__name__)
 
 
 class Stage2Reranker:
-    """Stage 2 High-Precision Cross-Attention Re-ranking and TRAKE Sequence Verifier."""
+    """Stage 2 Precision Re-Ranker and Reasoning Layer."""
 
     def __init__(
         self,
-        models: ModelRegistry,
-        keyframes_root: Path = Path("/Users/khoale/Downloads/AIC_Challenger/data/keyframes"),
-    ) -> None:
-        self.models = models
-        self.keyframes_root = keyframes_root
+        registry: Optional[ModelRegistry] = None,
+        vqa_reasoner: Optional[VQAReasoner] = None,
+    ):
+        self.registry = registry or ModelRegistry.get_instance()
+        self.vqa_reasoner = vqa_reasoner or VQAReasoner()
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # 1. KIS Precision Re-Ranking (BGE Cross-Encoder)
+    # ──────────────────────────────────────────────────────────────────────────
     def rerank_kis(
         self,
         parsed_query: ParsedQuery,
-        candidates: list[dict],
-        final_top_k: int = 50,
-    ) -> list[SearchResult]:
-        """Execute BGE-Reranker-v2-m3 Cross-Encoder on Top-50 candidate profiles."""
+        candidates: list[dict[str, Any]],
+        final_top_k: int = 20,
+        top_k_rerank: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Re-rank Stage 1 candidate pool using BGE-Reranker-v2-m3 Cross-Encoder.
+        
+        Args:
+            parsed_query: Query with text descriptors
+            candidates: Candidate pool from Stage 1 (e.g. 300 items)
+            final_top_k: Number of final results to return
+            top_k_rerank: Maximum candidates to evaluate with heavy cross-encoder (default 50)
+        """
         if not candidates:
             return []
 
         user_query = parsed_query.original_query
-        query_doc_pairs = []
+        
+        # Only send top_k_rerank candidates to the heavy cross-encoder
+        to_eval = candidates[:top_k_rerank]
+        dossiers = []
 
-        for cand in candidates:
-            doc_parts = []
-            if cand.get("dam_summary_en"):
-                doc_parts.append(f"[DAM Objects] {cand['dam_summary_en']}")
-            if cand.get("asr_transcript_vi"):
-                doc_parts.append(f"[Audio Speech] {cand['asr_transcript_vi']}")
-            if cand.get("ocr_text"):
-                doc_parts.append(f"[Screen Text] {cand['ocr_text']}")
+        for c in to_eval:
+            parts = []
+            if c.get("dam_summary"):
+                parts.append(f"[Visual Objects] {c['dam_summary']}")
+            if c.get("asr_transcript"):
+                parts.append(f"[Spoken Speech] {c['asr_transcript']}")
+            if c.get("ocr_text"):
+                parts.append(f"[Screen Text] {c['ocr_text']}")
+            
+            # If no text payload, fallback to scene description
+            dossier_text = " ".join(parts) if parts else f"[Scene] Video {c['video_id']} frame {c['frame_idx']}"
+            dossiers.append(dossier_text)
 
-            doc_text = " ".join(doc_parts) if doc_parts else cand.get("image_relpath", "")
-            query_doc_pairs.append((user_query, doc_text))
+        # Compute Cross-Encoder scores for the top candidates
+        ce_scores = self.registry.compute_rerank_scores(user_query, dossiers)
 
-        # Cross-encoder inference on MPS/GPU
-        rerank_scores = self.models.rerank_pairs(query_doc_pairs)
+        # Blend Stage 1 and Stage 2 scores: 0.40 * Stage1 + 0.60 * CrossEncoder
+        reranked = []
+        for i, c in enumerate(to_eval):
+            c_copy = dict(c)
+            ce_score = float(ce_scores[i])
+            norm_s1 = c.get("normalized_score", 1.0)
+            final_score = round(0.40 * norm_s1 + 0.60 * ce_score, 4)
 
-        # Normalize stage1 scores to [0, 1] for blending
-        s1_scores = np.array([c["stage1_score"] for c in candidates], dtype=np.float32)
-        if s1_scores.max() > s1_scores.min():
-            s1_norm = (s1_scores - s1_scores.min()) / (s1_scores.max() - s1_scores.min())
-        else:
-            s1_norm = np.ones_like(s1_scores)
+            c_copy["cross_encoder_score"] = round(ce_score, 4)
+            c_copy["final_score"] = final_score
+            c_copy["submission_string"] = f"{c['video_id']}, {c['frame_idx']}"
+            reranked.append(c_copy)
 
-        # Final Blend: 40% Stage 1 Funnel + 60% Stage 2 Deep Cross-Attention
-        final_scores = 0.40 * s1_norm + 0.60 * rerank_scores
+        reranked.sort(key=lambda x: x["final_score"], reverse=True)
 
-        # Rank candidates by final blended score
-        sorted_indices = np.argsort(final_scores)[::-1]
-        results = []
+        for rank, item in enumerate(reranked[:final_top_k], 1):
+            item["final_rank"] = rank
 
-        for rank_idx, idx in enumerate(sorted_indices[:final_top_k], 1):
-            cand = candidates[idx]
-            v_id = cand["video_id"]
-            k_n = cand["keyframe_n"]
-            f_idx = cand["frame_idx"]
-            pts = cand["pts_time_s"]
+        return reranked[:final_top_k]
 
-            # Safe check image file existence
-            img_path = self.keyframes_root / v_id / f"{k_n:03d}.jpg"
-            img_path_alt = self.keyframes_root / v_id / f"{k_n}.jpg"
-            image_available = img_path.exists() or img_path_alt.exists()
-
-            # Speech evidence
-            speech_ev = None
-            if cand.get("has_speech") and cand.get("asr_transcript_vi"):
-                speech_ev = SpeechEvidence(
-                    start_s=max(0.0, pts - 2.5),
-                    end_s=pts + 2.5,
-                    transcript_raw=cand["asr_transcript_vi"],
-                    score=cand.get("asr_score", 0.0),
-                )
-
-            # Adjacent keyframes for shot context
-            adj_kfs = [max(1, k_n - 2), max(1, k_n - 1), k_n, k_n + 1, k_n + 2]
-
-            res = SearchResult(
-                rank=rank_idx,
-                video_id=v_id,
-                keyframe_n=k_n,
-                frame_idx=f_idx,
-                pts_time_s=pts,
-                submission_string=f"{v_id}, {f_idx}",
-                final_score=float(final_scores[idx]),
-                stage1_score=float(cand["stage1_score"]),
-                stage2_rerank_score=float(rerank_scores[idx]),
-                visual_similarity=float(cand.get("visual_score", 0.0)),
-                image_relpath=cand.get("image_relpath", f"keyframes/{v_id}/{k_n:03d}.jpg"),
-                image_available=image_available,
-                best_matching_objects=cand.get("matched_objects", []),
-                dam_full_captions=[cand.get("dam_summary_en", "")] if cand.get("dam_summary_en") else [],
-                has_speech=cand.get("has_speech", False),
-                speech_evidence=speech_ev,
-                ocr_text=cand.get("ocr_text", ""),
-                adjacent_keyframes=adj_kfs,
-            )
-            results.append(res)
-
-        return results
-
-    def verify_trake_sequence(
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2. VQA Precision Re-Ranking & Answer Extraction
+    # ──────────────────────────────────────────────────────────────────────────
+    def rerank_vqa(
         self,
-        event_candidates_list: list[list[dict]],
-        max_time_span_s: float = 90.0,
-        final_top_k: int = 50,
-    ) -> list[SearchResult]:
-        """Verify strict chronological sequence ordering (t1 < t2 < t3) within same video."""
-        if not event_candidates_list or not event_candidates_list[0]:
+        parsed_query: ParsedQuery,
+        candidates: list[dict[str, Any]],
+        final_top_k: int = 20,
+        top_k_rerank: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Re-rank candidates and extract concise answer for the Top Evidence Keyframe."""
+        reranked = self.rerank_kis(parsed_query, candidates, final_top_k=final_top_k, top_k_rerank=top_k_rerank)
+        if not reranked:
             return []
 
-        if len(event_candidates_list) == 1:
-            # Single event fallback
-            return self.rerank_kis(
-                ParsedQuery(task_type="TRAKE", original_query="TRAKE"),
-                event_candidates_list[0],
-                final_top_k=final_top_k,
-            )
+        # Run Extractive Reasoner on Top 1 Evidence Keyframe
+        top_frame = reranked[0]
+        q_text = parsed_query.vqa_question or parsed_query.original_query
+        vqa_ans = self.vqa_reasoner.answer_question(q_text, top_frame, raw_query=parsed_query.original_query)
 
-        # Multi-event sequence matching
-        # Group candidates by video_id
-        e1_by_video = {}
-        for c in event_candidates_list[0]:
-            e1_by_video.setdefault(c["video_id"], []).append(c)
+        top_frame["vqa_answer"] = vqa_ans
+        top_frame["submission_string"] = f'{top_frame["video_id"]}, {top_frame["frame_idx"]}, "{vqa_ans}"'
 
-        e2_by_video = {}
-        for c in event_candidates_list[1]:
-            e2_by_video.setdefault(c["video_id"], []).append(c)
+        # Also populate default submission string for others
+        for item in reranked[1:]:
+            item["vqa_answer"] = vqa_ans  # Human can review / override in UI
+            item["submission_string"] = f'{item["video_id"]}, {item["frame_idx"]}, "{vqa_ans}"'
+
+        return reranked
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3. TRAKE Dynamic Programming Monotonic Sequence Solver
+    # ──────────────────────────────────────────────────────────────────────────
+    def solve_trake_video_guided_dp(
+        self,
+        event_queries: list[ParsedQuery],
+        candidate_pools: list[list[dict[str, Any]]],
+        searcher: Any,
+        top_n_videos: int = 10,
+        final_top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Video-Level Timeline Dynamic Programming.
+        
+        1. Identifies top candidate videos from Stage 1 candidate pools.
+        2. Slices all chronological keyframes for each top video.
+        3. Computes event-to-frame similarity matrix (M x N).
+        4. Runs Dynamic Programming enforcing strict monotonic order (f1 < f2 < ... < fN).
+        """
+        num_events = len(event_queries)
+        if num_events == 0:
+            return []
+
+        # 1. Aggregate video scores across all event pools
+        video_scores: dict[str, float] = defaultdict(float)
+        for pool in candidate_pools:
+            for cand in pool:
+                video_scores[cand["video_id"]] += cand.get("stage1_score", 0.0)
+
+        top_videos = sorted(video_scores.items(), key=lambda x: x[1], reverse=True)[:top_n_videos]
+
+        # 2. Build video-to-keyframes index map
+        video_kfs = defaultdict(list)
+        for idx, kf in enumerate(searcher.keyframe_metadata):
+            video_kfs[kf["video_id"]].append((idx, kf))
+
+        # 3. Encode visual query vectors for each event
+        ev_vis_vecs = [self.registry.embed_siglip_text(q.global_scene_en) for q in event_queries]
 
         valid_sequences = []
 
-        # Find videos appearing in both events
-        common_videos = set(e1_by_video.keys()).intersection(e2_by_video.keys())
+        # 4. Run DP per candidate video
+        for video_id, agg_score in top_videos:
+            kfs_in_v = sorted(video_kfs[video_id], key=lambda x: x[1]["frame_idx"])
+            M = len(kfs_in_v)
+            if M < num_events:
+                continue
 
-        for v_id in common_videos:
-            for c1 in e1_by_video[v_id]:
-                t1 = c1["pts_time_s"]
-                for c2 in e2_by_video[v_id]:
-                    t2 = c2["pts_time_s"]
-                    # Constraint: t1 < t2 and time gap <= max_time_span
-                    time_gap = t2 - t1
-                    if 0.5 < time_gap <= max_time_span_s:
-                        seq_score = (c1["stage1_score"] + c2["stage1_score"]) - 0.001 * time_gap
-                        valid_sequences.append({
-                            "video_id": v_id,
-                            "start_keyframe_n": c1["keyframe_n"],
-                            "end_keyframe_n": c2["keyframe_n"],
-                            "start_frame_idx": c1["frame_idx"],
-                            "end_frame_idx": c2["frame_idx"],
-                            "start_pts": t1,
-                            "end_pts": t2,
-                            "seq_score": seq_score,
-                            "c1": c1,
-                            "c2": c2,
-                        })
+            kf_indices = [k[0] for k in kfs_in_v]
+            kf_vis_matrix = searcher.vis_matrix[kf_indices].astype(np.float32)
 
-        valid_sequences.sort(key=lambda x: x["seq_score"], reverse=True)
+            # Similarity matrix: (M x 768) @ (768 x N) -> M x N
+            sim_matrix = kf_vis_matrix @ np.column_stack(ev_vis_vecs)
 
-        results = []
-        for rank_idx, seq in enumerate(valid_sequences[:final_top_k], 1):
-            v_id = seq["video_id"]
-            k_n = seq["start_keyframe_n"]
-            f_idx = seq["start_frame_idx"]
-            f_end_idx = seq["end_frame_idx"]
+            # DP Table: dp[ev_idx][kf_idx] = (max_score, prev_kf_idx)
+            dp: list[list[tuple[float, int]]] = []
+            dp.append([(float(sim_matrix[m, 0]), -1) for m in range(M)])
 
-            img_path = self.keyframes_root / v_id / f"{k_n:03d}.jpg"
-            image_available = img_path.exists()
+            for ev_idx in range(1, num_events):
+                curr_dp = []
+                prev_dp = dp[ev_idx - 1]
+                for curr_m in range(M):
+                    best_score = -float("inf")
+                    best_prev = -1
+                    curr_sim = float(sim_matrix[curr_m, ev_idx])
+                    for prev_m in range(curr_m):
+                        if prev_dp[prev_m][0] > best_score:
+                            best_score = prev_dp[prev_m][0]
+                            best_prev = prev_m
+                    curr_dp.append((best_score + curr_sim, best_prev))
+                dp.append(curr_dp)
 
-            res = SearchResult(
-                rank=rank_idx,
-                video_id=v_id,
-                keyframe_n=k_n,
-                frame_idx=f_idx,
-                pts_time_s=seq["start_pts"],
-                submission_string=f"{v_id}, {f_idx}, {f_end_idx}",
-                final_score=float(seq["seq_score"]),
-                stage1_score=float(seq["c1"]["stage1_score"]),
-                stage2_rerank_score=float(seq["seq_score"]),
-                visual_similarity=float(seq["c1"].get("visual_score", 0.0)),
-                image_relpath=seq["c1"].get("image_relpath", f"keyframes/{v_id}/{k_n:03d}.jpg"),
-                image_available=image_available,
-                best_matching_objects=seq["c1"].get("matched_objects", []),
-                dam_full_captions=[
-                    f"Event 1 (t={seq['start_pts']:.1f}s): {seq['c1'].get('dam_summary_en', '')}",
-                    f"Event 2 (t={seq['end_pts']:.1f}s): {seq['c2'].get('dam_summary_en', '')}",
-                ],
-                has_speech=seq["c1"].get("has_speech", False),
-                adjacent_keyframes=[k_n, seq["end_keyframe_n"]],
+            # Extract best monotonic sequence for this video
+            best_last_m = int(np.argmax([d[0] for d in dp[-1]]))
+            best_seq_score = dp[-1][best_last_m][0]
+
+            path = []
+            curr_m = best_last_m
+            for ev_idx in range(num_events - 1, -1, -1):
+                path.append(kfs_in_v[curr_m][1])
+                curr_m = dp[ev_idx][curr_m][1]
+            path.reverse()
+
+            frames = [p["frame_idx"] for p in path]
+            times = [p.get("pts_time_s", 0.0) for p in path]
+            frames_str = ", ".join(map(str, frames))
+
+            # Build rich event dossiers
+            event_dossiers = []
+            for i, p in enumerate(path):
+                img_path = f"keyframes/{video_id}/{p.get('keyframe_n', 1):03d}.jpg"
+                event_dossiers.append(
+                    {
+                        "event_idx": i + 1,
+                        "frame_idx": p["frame_idx"],
+                        "pts_time_s": p.get("pts_time_s", 0.0),
+                        "keyframe_n": p.get("keyframe_n", 1),
+                        "image_relpath": img_path,
+                        "score_vis": round(float(sim_matrix[frames.index(p['frame_idx']) if p['frame_idx'] in frames else 0, i]), 4),
+                        "asr_transcript": p.get("asr_transcript", ""),
+                    }
+                )
+
+            valid_sequences.append(
+                {
+                    "video_id": video_id,
+                    "matched_frames": frames,
+                    "timestamps": times,
+                    "sequence_score": round(float(best_seq_score), 4),
+                    "submission_string": f"{video_id}, {frames_str}",
+                    "event_dossiers": event_dossiers,
+                }
             )
-            results.append(res)
 
-        return results
+        valid_sequences.sort(key=lambda x: x["sequence_score"], reverse=True)
+        for rank, s in enumerate(valid_sequences[:final_top_k], 1):
+            s["rank"] = rank
+
+        return valid_sequences[:final_top_k]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4. TRAKE Macro-Span Audio Narrative Reranker (Stage 3 & 4)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _evaluate_narrative_alignment(
+        self,
+        events_desc: list[str],
+        audio_span_text: str,
+    ) -> tuple[float, str]:
+        """Evaluate how well a continuous audio span matches the full multi-event sequence."""
+        if not audio_span_text or len(audio_span_text.strip()) < 10:
+            return 0.5, "No dialogue detected in action span"
+
+        span_lower = audio_span_text.lower()
+
+        # 1. Lexical Procedural Alignment Score
+        matched_events = 0
+        for ev in events_desc:
+            words = [w for w in ev.lower().replace(".", "").split() if len(w) > 2]
+            key_words = [w for w in words if w in ("măng", "bột", "dầu", "chảo", "đĩa", "dĩa", "chiên", "xào", "nấu", "rời", "tiếp", "tô")]
+            if key_words:
+                hits = sum(1 for kw in key_words if kw in span_lower)
+                if hits >= 1:
+                    matched_events += 1
+            else:
+                matched_events += 0.5
+
+        lexical_score = min(max(matched_events / max(len(events_desc), 1), 0.1), 1.0)
+
+        # 2. LLM Narrative Alignment
+        events_formatted = "\n".join(f"- E{i+1}: {d}" for i, d in enumerate(events_desc))
+        prompt = (
+            f"Bạn là giám khảo cuộc thi AI Challenge. Đánh giá mức độ liên quan (0.0 đến 1.0) của lời thoại video với chuỗi sự kiện được yêu cầu.\n\n"
+            f"CÁC SỰ KIỆN CẦN KHỚP:\n{events_formatted}\n\n"
+            f"LỜI THOẠI VIDEO:\n\"{audio_span_text[:3500]}\"\n\n"
+            f"Trả về JSON duy nhất: {{\"confidence_score\": <float 0.0-1.0>, \"reasoning\": \"<giải thích ngắn gọn tiếng Việt>\"}}"
+        )
+
+        llm_score = 0.5
+        reasoning = "Đánh giá sơ bộ dựa trên từ khóa sự kiện"
+
+        # Try Local Qwen
+        try:
+            raw_res = self.vqa_reasoner._answer_with_qwen(prompt)
+            if raw_res:
+                import re, json
+                match = re.search(r"\{.*\}", raw_res, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                    llm_score = float(data.get("confidence_score", 0.5))
+                    reasoning = str(data.get("reasoning", ""))
+        except Exception as e:
+            logger.warning(f"Qwen TRAKE narrative evaluation failed: {e}")
+
+        # Final blended narrative score
+        final_narrative_score = round(0.50 * lexical_score + 0.50 * llm_score, 4)
+        return min(max(final_narrative_score, 0.0), 1.0), reasoning
+
+    def rerank_trake_sequences(
+        self,
+        event_descriptions: list[str],
+        candidate_sequences: list[dict[str, Any]],
+        searcher: Any,
+        final_top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Stage 3 & 4: Re-rank candidate sequences using full macro-span narrative alignment."""
+        if not candidate_sequences:
+            return []
+
+        logger.info(f"⚡ Reranking {len(candidate_sequences)} TRAKE sequences via Macro-Span Audio Narrative...")
+
+        reranked = []
+        for seq in candidate_sequences:
+            vid = seq["video_id"]
+            frames = seq.get("matched_frames", [])
+            dp_score = float(seq.get("sequence_score", 0.5))
+
+            if not frames:
+                reranked.append(seq)
+                continue
+
+            start_f = min(frames)
+            end_f = max(frames)
+
+            # Stage 3: Extract macro-span audio transcript
+            audio_span = searcher.get_video_audio_span(vid, start_f, end_f) if hasattr(searcher, "get_video_audio_span") else ""
+
+            # Stage 4: Narrative verification score
+            if audio_span:
+                narrative_score, reasoning = self._evaluate_narrative_alignment(event_descriptions, audio_span)
+            else:
+                narrative_score = dp_score
+                reasoning = "No dialogue detected in action span"
+
+            # Final blended score
+            final_score = round(0.40 * dp_score + 0.60 * narrative_score, 4)
+
+            seq_copy = dict(seq)
+            seq_copy["dp_score"] = dp_score
+            seq_copy["narrative_score"] = round(narrative_score, 4)
+            seq_copy["final_score"] = final_score
+            seq_copy["narrative_reasoning"] = reasoning
+            seq_copy["audio_span"] = audio_span
+            reranked.append(seq_copy)
+
+        # Sort by final blended score
+        reranked.sort(key=lambda x: x["final_score"], reverse=True)
+        for rank, s in enumerate(reranked[:final_top_k], 1):
+            s["rank"] = rank
+
+        return reranked[:final_top_k]
+
