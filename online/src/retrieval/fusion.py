@@ -93,6 +93,12 @@ class MultimodalFusionEngine:
         """Instant CPU RRF fusion (< 5ms) on pre-computed branch hits with custom weights."""
         if weights is None:
             weights = {"vis": 0.35, "dam": 0.30, "asr": 0.35, "ocr": 0.00}
+        elif hasattr(weights, "model_dump"):
+            weights = weights.model_dump()
+        elif hasattr(weights, "dict"):
+            weights = weights.dict()
+        elif not isinstance(weights, dict):
+            weights = dict(weights)
         
         w_vis = weights.get("vis", 0.35)
         w_dam = weights.get("dam", 0.30)

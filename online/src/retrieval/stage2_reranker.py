@@ -153,7 +153,8 @@ class Stage2Reranker:
             for cand in pool:
                 video_scores[cand["video_id"]] += cand.get("stage1_score", 0.0)
 
-        top_videos = sorted(video_scores.items(), key=lambda x: x[1], reverse=True)[:top_n_videos]
+        effective_top_n = max(top_n_videos, final_top_k, 50)
+        top_videos = sorted(video_scores.items(), key=lambda x: x[1], reverse=True)[:effective_top_n]
 
         # 2. Build video-to-keyframes index map
         video_kfs = defaultdict(list)
@@ -166,7 +167,7 @@ class Stage2Reranker:
         valid_sequences = []
 
         # 4. Run DP per candidate video
-        for video_id, agg_score in top_videos:
+        for v_rank, (video_id, agg_score) in enumerate(top_videos):
             kfs_in_v = sorted(video_kfs[video_id], key=lambda x: x[1]["frame_idx"])
             M = len(kfs_in_v)
             if M < num_events:
@@ -196,47 +197,54 @@ class Stage2Reranker:
                     curr_dp.append((best_score + curr_sim, best_prev))
                 dp.append(curr_dp)
 
-            # Extract best monotonic sequence for this video
-            best_last_m = int(np.argmax([d[0] for d in dp[-1]]))
-            best_seq_score = dp[-1][best_last_m][0]
+            # For top 5 videos, extract top 2-3 K-best paths; for other videos, extract 1 path
+            num_paths_to_take = 3 if v_rank < 5 else 1
+            last_layer_scores = [d[0] for d in dp[-1]]
+            sorted_last_indices = np.argsort(last_layer_scores)[::-1]
 
-            path = []
-            curr_m = best_last_m
-            for ev_idx in range(num_events - 1, -1, -1):
-                path.append(kfs_in_v[curr_m][1])
-                curr_m = dp[ev_idx][curr_m][1]
-            path.reverse()
+            for path_idx in range(min(num_paths_to_take, len(sorted_last_indices))):
+                last_m = int(sorted_last_indices[path_idx])
+                best_seq_score = float(last_layer_scores[last_m])
+                if best_seq_score <= -1e5:
+                    continue
 
-            frames = [p["frame_idx"] for p in path]
-            times = [p.get("pts_time_s", 0.0) for p in path]
-            frames_str = ", ".join(map(str, frames))
+                path = []
+                curr_m = last_m
+                for ev_idx in range(num_events - 1, -1, -1):
+                    path.append(kfs_in_v[curr_m][1])
+                    curr_m = dp[ev_idx][curr_m][1]
+                path.reverse()
 
-            # Build rich event dossiers
-            event_dossiers = []
-            for i, p in enumerate(path):
-                img_path = f"keyframes/{video_id}/{p.get('keyframe_n', 1):03d}.jpg"
-                event_dossiers.append(
+                frames = [p["frame_idx"] for p in path]
+                times = [p.get("pts_time_s", 0.0) for p in path]
+                frames_str = ", ".join(map(str, frames))
+
+                # Build rich event dossiers
+                event_dossiers = []
+                for i, p in enumerate(path):
+                    img_path = f"keyframes/{video_id}/{p.get('keyframe_n', 1):03d}.jpg"
+                    event_dossiers.append(
+                        {
+                            "event_idx": i + 1,
+                            "frame_idx": p["frame_idx"],
+                            "pts_time_s": p.get("pts_time_s", 0.0),
+                            "keyframe_n": p.get("keyframe_n", 1),
+                            "image_relpath": img_path,
+                            "score_vis": round(float(sim_matrix[frames.index(p['frame_idx']) if p['frame_idx'] in frames else 0, i]), 4),
+                            "asr_transcript": p.get("asr_transcript", ""),
+                        }
+                    )
+
+                valid_sequences.append(
                     {
-                        "event_idx": i + 1,
-                        "frame_idx": p["frame_idx"],
-                        "pts_time_s": p.get("pts_time_s", 0.0),
-                        "keyframe_n": p.get("keyframe_n", 1),
-                        "image_relpath": img_path,
-                        "score_vis": round(float(sim_matrix[frames.index(p['frame_idx']) if p['frame_idx'] in frames else 0, i]), 4),
-                        "asr_transcript": p.get("asr_transcript", ""),
+                        "video_id": video_id,
+                        "matched_frames": frames,
+                        "timestamps": times,
+                        "sequence_score": round(float(best_seq_score / num_events), 4),
+                        "submission_string": f"{video_id}, {frames_str}",
+                        "event_dossiers": event_dossiers,
                     }
                 )
-
-            valid_sequences.append(
-                {
-                    "video_id": video_id,
-                    "matched_frames": frames,
-                    "timestamps": times,
-                    "sequence_score": round(float(best_seq_score), 4),
-                    "submission_string": f"{video_id}, {frames_str}",
-                    "event_dossiers": event_dossiers,
-                }
-            )
 
         valid_sequences.sort(key=lambda x: x["sequence_score"], reverse=True)
         for rank, s in enumerate(valid_sequences[:final_top_k], 1):
@@ -258,64 +266,36 @@ class Stage2Reranker:
 
         span_lower = audio_span_text.lower()
 
-        # 1. Lexical Procedural Alignment Score
+        # 1. High-speed Lexical Procedural Alignment Score
         matched_events = 0
         for ev in events_desc:
-            words = [w for w in ev.lower().replace(".", "").split() if len(w) > 2]
-            key_words = [w for w in words if w in ("măng", "bột", "dầu", "chảo", "đĩa", "dĩa", "chiên", "xào", "nấu", "rời", "tiếp", "tô")]
-            if key_words:
-                hits = sum(1 for kw in key_words if kw in span_lower)
-                if hits >= 1:
-                    matched_events += 1
+            words = [w for w in ev.lower().replace(".", "").replace(",", "").split() if len(w) > 2]
+            hits = sum(1 for w in words if w in span_lower)
+            if hits >= 2:
+                matched_events += 1.0
+            elif hits == 1:
+                matched_events += 0.6
             else:
-                matched_events += 0.5
+                matched_events += 0.2
 
         lexical_score = min(max(matched_events / max(len(events_desc), 1), 0.1), 1.0)
-
-        # 2. LLM Narrative Alignment
-        events_formatted = "\n".join(f"- E{i+1}: {d}" for i, d in enumerate(events_desc))
-        prompt = (
-            f"Bạn là giám khảo cuộc thi AI Challenge. Đánh giá mức độ liên quan (0.0 đến 1.0) của lời thoại video với chuỗi sự kiện được yêu cầu.\n\n"
-            f"CÁC SỰ KIỆN CẦN KHỚP:\n{events_formatted}\n\n"
-            f"LỜI THOẠI VIDEO:\n\"{audio_span_text[:3500]}\"\n\n"
-            f"Trả về JSON duy nhất: {{\"confidence_score\": <float 0.0-1.0>, \"reasoning\": \"<giải thích ngắn gọn tiếng Việt>\"}}"
-        )
-
-        llm_score = 0.5
-        reasoning = "Đánh giá sơ bộ dựa trên từ khóa sự kiện"
-
-        # Try Local Qwen
-        try:
-            raw_res = self.vqa_reasoner._answer_with_qwen(prompt)
-            if raw_res:
-                import re, json
-                match = re.search(r"\{.*\}", raw_res, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    llm_score = float(data.get("confidence_score", 0.5))
-                    reasoning = str(data.get("reasoning", ""))
-        except Exception as e:
-            logger.warning(f"Qwen TRAKE narrative evaluation failed: {e}")
-
-        # Final blended narrative score
-        final_narrative_score = round(0.50 * lexical_score + 0.50 * llm_score, 4)
-        return min(max(final_narrative_score, 0.0), 1.0), reasoning
+        return lexical_score, f"Lexical alignment score: {lexical_score:.2f}"
 
     def rerank_trake_sequences(
         self,
         event_descriptions: list[str],
         candidate_sequences: list[dict[str, Any]],
         searcher: Any,
-        final_top_k: int = 10,
+        final_top_k: int = 100,
     ) -> list[dict[str, Any]]:
-        """Stage 3 & 4: Re-rank candidate sequences using full macro-span narrative alignment."""
+        """Stage 3 & 4: Re-rank candidate sequences using macro-span narrative alignment."""
         if not candidate_sequences:
             return []
 
         logger.info(f"⚡ Reranking {len(candidate_sequences)} TRAKE sequences via Macro-Span Audio Narrative...")
 
         reranked = []
-        for seq in candidate_sequences:
+        for i, seq in enumerate(candidate_sequences):
             vid = seq["video_id"]
             frames = seq.get("matched_frames", [])
             dp_score = float(seq.get("sequence_score", 0.5))
@@ -330,7 +310,7 @@ class Stage2Reranker:
             # Stage 3: Extract macro-span audio transcript
             audio_span = searcher.get_video_audio_span(vid, start_f, end_f) if hasattr(searcher, "get_video_audio_span") else ""
 
-            # Stage 4: Narrative verification score
+            # Stage 4: Fast narrative alignment score
             if audio_span:
                 narrative_score, reasoning = self._evaluate_narrative_alignment(event_descriptions, audio_span)
             else:

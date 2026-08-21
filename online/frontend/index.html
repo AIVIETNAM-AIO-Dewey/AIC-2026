@@ -190,12 +190,44 @@
       </div>
       <div class="submission-actions">
         <button id="btn-copy-submission" class="btn-copy">
-          <span>📋 Copy Submission</span>
+          <span>📋 Copy #1</span>
+        </button>
+        <button id="btn-export-csv" class="btn-export">
+          <span>📥 Export 100-Row CSV</span>
         </button>
         <button id="btn-clear-submission" class="btn-text">Clear</button>
       </div>
     </div>
   </footer>
+
+  <!-- 100-ROW CSV EXPORT MODAL -->
+  <div id="export-modal" class="modal-backdrop hidden">
+    <div class="export-modal-card">
+      <div class="export-modal-header">
+        <div class="export-modal-title">📥 Export 100-Row Submission CSV</div>
+        <button id="btn-close-export-modal" class="btn-icon-close">✕</button>
+      </div>
+      <div class="export-modal-body">
+        <p class="export-modal-desc">
+          This will generate an official competition submission file containing <strong>exactly 100 candidate rows</strong> structured with hierarchical safety-net tiers (Row 1: your pick, Rows 2-8: temporal neighbors, Rows 9-25: secondary suspect videos, Rows 26-100: AI candidate pool).
+        </p>
+        <div class="export-field-group">
+          <label for="export-query-id">Query ID / Number:</label>
+          <input type="text" id="export-query-id" class="export-input" value="1" placeholder="e.g. 1, 2, Q01...">
+        </div>
+        <div class="export-preview-box">
+          <div class="export-preview-lbl">Row 1 Preview (Your Human Pick):</div>
+          <code id="export-row1-preview">L21_V001, 100</code>
+        </div>
+      </div>
+      <div class="export-modal-footer">
+        <button id="btn-download-csv-action" class="btn-action-download">
+          <span>⚡ Download CSV (100 Rows)</span>
+        </button>
+        <button id="btn-cancel-export-modal" class="btn-text">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <!-- FRAME INSPECTOR MODAL (Matching User's UI Design) -->
   <div id="inspector-modal" class="modal-backdrop hidden">

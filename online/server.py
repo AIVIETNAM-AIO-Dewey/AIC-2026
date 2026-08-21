@@ -225,76 +225,98 @@ async def search_endpoint(req: SearchRequest):
     session_id = req.session_id or parsed.session_id or str(uuid.uuid4())
     parsed.session_id = session_id
 
-    # 1. Retrieve 4 branches independently
     branch_limit = config["retrieval"].get("branch_limit", 500)
-    branches = _fusion.retrieve_branches(parsed, branch_limit=branch_limit)
 
-    # 2. Store branch hits in memory cache for instant weight adjustment re-runs
-    _branch_cache[session_id] = {
-        "parsed_query": parsed,
-        "branches": branches,
-        "created_at": time.time(),
-    }
-
-    # 3. Fuse branches with Weighted RRF & Synergy
-    fused_pool = _fusion.fuse_from_branch_hits(
-        vis_hits=branches["vis"],
-        dam_hits=branches["dam"],
-        asr_hits=branches["asr"],
-        ocr_hits=branches["ocr"],
-        weights=parsed.weights,
-        top_k_pool=req.top_k_pool,
-    )
-
-    # 4. Optional Stage 2 Reranking
-    results = fused_pool
-    if req.run_stage2:
-        if parsed.task_type == "KIS":
-            results = _reranker.rerank_kis(
-                parsed,
-                fused_pool,
-                final_top_k=req.final_top_k,
-                top_k_rerank=req.top_k_rerank,
+    # Branch A: TRAKE Multi-Event Pipeline
+    if parsed.task_type == "TRAKE" and parsed.trake_events:
+        event_queries = []
+        event_pools = []
+        event_branches = []
+        for ev in parsed.trake_events:
+            sub = ParsedQuery(
+                task_type="KIS",
+                original_query=ev.description,
+                global_scene_en=ev.scene_en,
+                objects_en=ev.objects_en,
+                speech_vi=ev.speech_vi,
+                ocr_keywords=ev.ocr_keywords,
+                weights=parsed.weights,
             )
-        elif parsed.task_type == "VQA":
-            results = _reranker.rerank_vqa(
-                parsed,
-                fused_pool,
-                final_top_k=req.final_top_k,
-                top_k_rerank=req.top_k_rerank,
+            event_queries.append(sub)
+            ev_branches = _fusion.retrieve_branches(sub, branch_limit=branch_limit)
+            event_branches.append(ev_branches)
+            ev_pool = _fusion.fuse_from_branch_hits(
+                vis_hits=ev_branches.get("vis", []),
+                dam_hits=ev_branches.get("dam", []),
+                asr_hits=ev_branches.get("asr", []),
+                ocr_hits=ev_branches.get("ocr", []),
+                weights=parsed.weights,
+                top_k_pool=100,
             )
-        elif parsed.task_type == "TRAKE":
-            # For TRAKE, run full pipeline if events are present
-            if parsed.trake_events:
-                event_queries = []
-                event_pools = []
-                for ev in parsed.trake_events:
-                    sub = ParsedQuery(
-                        task_type="KIS",
-                        original_query=ev.description,
-                        global_scene_en=ev.scene_en,
-                        objects_en=ev.objects_en,
-                        speech_vi=ev.speech_vi,
-                        ocr_keywords=ev.ocr_keywords,
-                        weights=parsed.weights,
-                    )
-                    event_queries.append(sub)
-                    ev_pool = _fusion.retrieve_and_fuse(sub, top_k_pool=100, branch_limit=branch_limit)
-                    event_pools.append(ev_pool)
+            event_pools.append(ev_pool)
 
-                raw_sequences = _reranker.solve_trake_video_guided_dp(
-                    event_queries=event_queries,
-                    candidate_pools=event_pools,
-                    searcher=_searcher,
-                    top_n_videos=10,
+        _branch_cache[session_id] = {
+            "parsed_query": parsed,
+            "branches": event_branches[0] if event_branches else {},
+            "event_branches": event_branches,
+            "event_queries": event_queries,
+            "created_at": time.time(),
+        }
+
+        raw_sequences = _reranker.solve_trake_video_guided_dp(
+            event_queries=event_queries,
+            candidate_pools=event_pools,
+            searcher=_searcher,
+            top_n_videos=max(50, req.final_top_k),
+            final_top_k=req.final_top_k,
+        )
+        event_descs = [ev.description for ev in parsed.trake_events]
+        results = _reranker.rerank_trake_sequences(
+            event_descriptions=event_descs,
+            candidate_sequences=raw_sequences,
+            searcher=_searcher,
+            final_top_k=req.final_top_k,
+        )
+        fused_pool = raw_sequences
+
+    # Branch B: KIS / VQA Standard Single-Query Pipeline
+    else:
+        # 1. Retrieve 4 branches independently
+        branches = _fusion.retrieve_branches(parsed, branch_limit=branch_limit)
+
+        # 2. Store branch hits in memory cache for instant weight adjustment re-runs
+        _branch_cache[session_id] = {
+            "parsed_query": parsed,
+            "branches": branches,
+            "created_at": time.time(),
+        }
+
+        # 3. Fuse branches with Weighted RRF & Synergy
+        fused_pool = _fusion.fuse_from_branch_hits(
+            vis_hits=branches["vis"],
+            dam_hits=branches["dam"],
+            asr_hits=branches["asr"],
+            ocr_hits=branches["ocr"],
+            weights=parsed.weights,
+            top_k_pool=req.top_k_pool,
+        )
+
+        # 4. Optional Stage 2 Reranking
+        results = fused_pool
+        if req.run_stage2:
+            if parsed.task_type == "KIS":
+                results = _reranker.rerank_kis(
+                    parsed,
+                    fused_pool,
                     final_top_k=req.final_top_k,
+                    top_k_rerank=req.top_k_rerank,
                 )
-                event_descs = [ev.description for ev in parsed.trake_events]
-                results = _reranker.rerank_trake_sequences(
-                    event_descriptions=event_descs,
-                    candidate_sequences=raw_sequences,
-                    searcher=_searcher,
+            elif parsed.task_type == "VQA":
+                results = _reranker.rerank_vqa(
+                    parsed,
+                    fused_pool,
                     final_top_k=req.final_top_k,
+                    top_k_rerank=req.top_k_rerank,
                 )
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
@@ -348,6 +370,38 @@ async def cached_re_fuse_endpoint(req: CachedReFuseRequest):
                 final_top_k=req.final_top_k,
                 top_k_rerank=req.top_k_rerank,
             )
+        elif parsed.task_type == "TRAKE":
+            event_branches = entry.get("event_branches", [])
+            event_queries = entry.get("event_queries", [])
+            if event_branches and event_queries:
+                event_pools = []
+                for ev_b, ev_q in zip(event_branches, event_queries):
+                    ev_pool = _fusion.fuse_from_branch_hits(
+                        vis_hits=ev_b.get("vis", []),
+                        dam_hits=ev_b.get("dam", []),
+                        asr_hits=ev_b.get("asr", []),
+                        ocr_hits=ev_b.get("ocr", []),
+                        weights=req.weights,
+                        top_k_pool=req.top_k_pool,
+                    )
+                    event_pools.append(ev_pool)
+
+                raw_sequences = _reranker.solve_trake_video_guided_dp(
+                    event_queries=event_queries,
+                    candidate_pools=event_pools,
+                    searcher=_searcher,
+                    top_n_videos=max(50, req.final_top_k),
+                    final_top_k=req.final_top_k,
+                )
+                event_descs = [ev.description for ev in parsed.trake_events]
+                results = _reranker.rerank_trake_sequences(
+                    event_descriptions=event_descs,
+                    candidate_sequences=raw_sequences,
+                    searcher=_searcher,
+                    final_top_k=req.final_top_k,
+                )
+            else:
+                results = fused_pool
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     return {

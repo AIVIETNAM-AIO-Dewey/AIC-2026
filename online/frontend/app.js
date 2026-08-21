@@ -59,11 +59,20 @@ const el = {
   valAsr: document.getElementById("val-w-asr"),
   valOcr: document.getElementById("val-w-ocr"),
   
-  // Submission
+  // Submission & Export
   submissionInput: document.getElementById("submission-input"),
   btnCopySubmission: document.getElementById("btn-copy-submission"),
+  btnExportCsv: document.getElementById("btn-export-csv"),
   btnClearSubmission: document.getElementById("btn-clear-submission"),
   toast: document.getElementById("toast"),
+
+  // 100-Row Export Modal
+  exportModal: document.getElementById("export-modal"),
+  btnCloseExportModal: document.getElementById("btn-close-export-modal"),
+  btnCancelExportModal: document.getElementById("btn-cancel-export-modal"),
+  btnDownloadCsvAction: document.getElementById("btn-download-csv-action"),
+  exportQueryId: document.getElementById("export-query-id"),
+  exportRow1Preview: document.getElementById("export-row1-preview"),
   
   // Inspector Modal
   modal: document.getElementById("inspector-modal"),
@@ -187,6 +196,12 @@ function bindEvents() {
 
   // Submission bar
   el.btnCopySubmission.addEventListener("click", copySubmissionToClipboard);
+  if (el.btnExportCsv) el.btnExportCsv.addEventListener("click", openExportModal);
+  if (el.btnCloseExportModal) el.btnCloseExportModal.addEventListener("click", closeExportModal);
+  if (el.btnCancelExportModal) el.btnCancelExportModal.addEventListener("click", closeExportModal);
+  if (el.btnDownloadCsvAction) el.btnDownloadCsvAction.addEventListener("click", executeDownload100Csv);
+  if (el.exportQueryId) el.exportQueryId.addEventListener("input", updateExportPreview);
+
   el.btnClearSubmission.addEventListener("click", () => {
     state.selectedSubmission = "";
     el.submissionInput.value = "No keyframe selected";
@@ -849,6 +864,13 @@ async function loadFilmstrip(videoId, currentKeyframeN, minFrame = null, maxFram
           const seq = state.activeInspectorItem;
           const evIdx = state.activeTrakeEventIndex;
           seq.matched_frames[evIdx] = kf.frame_idx;
+          
+          if (seq.event_dossiers && seq.event_dossiers[evIdx]) {
+            seq.event_dossiers[evIdx].keyframe_n = kf.keyframe_n;
+            seq.event_dossiers[evIdx].frame_idx = kf.frame_idx;
+            seq.event_dossiers[evIdx].pts_time_s = kf.pts_time_s;
+            seq.event_dossiers[evIdx].asr_transcript = kf.asr_transcript_vi || "";
+          }
           seq.submission_string = `${seq.video_id}, ${seq.matched_frames.join(', ')}`;
           
           if (state.selectedSubmission) {
@@ -856,7 +878,7 @@ async function loadFilmstrip(videoId, currentKeyframeN, minFrame = null, maxFram
             el.submissionInput.value = seq.submission_string;
           }
 
-          // Re-render tabs and refresh sequence card
+          // Re-render tabs and refresh sequence card + live preview!
           renderTrakeTabs(seq);
           displayTrakeActiveEvent(seq, evIdx);
           renderResults(state.searchResults);
@@ -956,6 +978,262 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 100-Candidate Submission CSV Exporter
+// ──────────────────────────────────────────────────────────────────────────────
+function openExportModal() {
+  if (!state.searchResults || state.searchResults.length === 0) {
+    showToast("Please run a search query first.");
+    return;
+  }
+  updateExportPreview();
+  el.exportModal.classList.remove("hidden");
+}
+
+function closeExportModal() {
+  el.exportModal.classList.add("hidden");
+}
+
+function updateExportPreview() {
+  const qId = el.exportQueryId ? el.exportQueryId.value.trim() || "1" : "1";
+  const rows = generate100SubmissionRows(qId);
+  if (rows.length > 0 && el.exportRow1Preview) {
+    el.exportRow1Preview.textContent = rows[0];
+  }
+}
+
+function generate100SubmissionRows(queryId) {
+  const rows = [];
+  const task = state.taskType;
+  const results = state.searchResults || [];
+  
+  if (task === "KIS") {
+    const topItem = state.activeInspectorItem || results[0];
+    if (!topItem) return [];
+
+    const topVid = topItem.video_id;
+    const topFrame = topItem.frame_idx;
+    const topKn = topItem.keyframe_n || 1;
+
+    // Row 1: Human pick
+    rows.push(`${queryId},${topVid},${topFrame}`);
+    const seen = new Set([`${topVid}_${topFrame}`]);
+
+    // Tier 2 (Rows 2–8): Adjacent frames of top video (±1, ±2, ±3)
+    if (state.activeVideoKeyframes && state.activeVideoKeyframes.length > 0 && state.activeVideoKeyframes[0].video_id === topVid) {
+      const currIdx = state.activeVideoKeyframes.findIndex(k => k.frame_idx === topFrame || k.keyframe_n === topKn);
+      if (currIdx !== -1) {
+        const offsets = [-1, 1, -2, 2, -3, 3, -4, 4];
+        for (const off of offsets) {
+          const target = currIdx + off;
+          if (target >= 0 && target < state.activeVideoKeyframes.length && rows.length < 10) {
+            const kf = state.activeVideoKeyframes[target];
+            const key = `${topVid}_${kf.frame_idx}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              rows.push(`${queryId},${topVid},${kf.frame_idx}`);
+            }
+          }
+        }
+      }
+    }
+
+    // Tier 3 (Rows 9–25): Top 2 frames from secondary suspect videos
+    const secondaryVideos = new Set();
+    results.forEach(cand => {
+      if (cand.video_id !== topVid) secondaryVideos.add(cand.video_id);
+    });
+
+    for (const vid of secondaryVideos) {
+      if (rows.length >= 30) break;
+      const vidCands = results.filter(c => c.video_id === vid);
+      for (const c of vidCands.slice(0, 2)) {
+        const key = `${c.video_id}_${c.frame_idx}`;
+        if (!seen.has(key) && rows.length < 30) {
+          seen.add(key);
+          rows.push(`${queryId},${c.video_id},${c.frame_idx}`);
+        }
+      }
+    }
+
+    // Tier 4 (Rows 26–100): Remaining candidates from searchResults
+    for (const cand of results) {
+      const key = `${cand.video_id}_${cand.frame_idx}`;
+      if (!seen.has(key) && rows.length < 100) {
+        seen.add(key);
+        rows.push(`${queryId},${cand.video_id},${cand.frame_idx}`);
+      }
+    }
+
+    // Fill to 100 if needed
+    let ptr = 0;
+    while (rows.length < 100 && ptr < results.length) {
+      const cand = results[ptr++];
+      const f = cand.frame_idx;
+      for (const delta of [-30, 30, -60, 60, -90, 90]) {
+        const fakeF = Math.max(1, f + delta);
+        const key = `${cand.video_id}_${fakeF}`;
+        if (!seen.has(key) && rows.length < 100) {
+          seen.add(key);
+          rows.push(`${queryId},${cand.video_id},${fakeF}`);
+        }
+      }
+    }
+  } else if (task === "VQA") {
+    const topItem = state.activeInspectorItem || results[0];
+    if (!topItem) return [];
+
+    const topVid = topItem.video_id;
+    const topFrame = topItem.frame_idx;
+    const topKn = topItem.keyframe_n || 1;
+    const chosenAnswer = (el.inspVqaInput && el.inspVqaInput.value.trim()) || topItem.vqa_answer || "màu xanh";
+
+    // Row 1: Human pick + answer
+    rows.push(`${queryId},${topVid},${topFrame},"${chosenAnswer.replace(/"/g, '""')}"`);
+    const seen = new Set([`${topVid}_${topFrame}`]);
+
+    // Tier 2 (Rows 2–8): Adjacent frames of top video with chosenAnswer
+    if (state.activeVideoKeyframes && state.activeVideoKeyframes.length > 0 && state.activeVideoKeyframes[0].video_id === topVid) {
+      const currIdx = state.activeVideoKeyframes.findIndex(k => k.frame_idx === topFrame || k.keyframe_n === topKn);
+      if (currIdx !== -1) {
+        const offsets = [-1, 1, -2, 2, -3, 3, -4, 4];
+        for (const off of offsets) {
+          const target = currIdx + off;
+          if (target >= 0 && target < state.activeVideoKeyframes.length && rows.length < 10) {
+            const kf = state.activeVideoKeyframes[target];
+            const key = `${topVid}_${kf.frame_idx}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              rows.push(`${queryId},${topVid},${kf.frame_idx},"${chosenAnswer.replace(/"/g, '""')}"`);
+            }
+          }
+        }
+      }
+    }
+
+    // Tier 3 & 4 (Rows 9–100): Secondary candidates
+    for (const cand of results) {
+      const key = `${cand.video_id}_${cand.frame_idx}`;
+      if (!seen.has(key) && rows.length < 100) {
+        seen.add(key);
+        const ans = cand.vqa_answer || chosenAnswer;
+        rows.push(`${queryId},${cand.video_id},${cand.frame_idx},"${ans.replace(/"/g, '""')}"`);
+      }
+    }
+
+    let ptr = 0;
+    while (rows.length < 100 && ptr < results.length) {
+      const cand = results[ptr++];
+      const f = cand.frame_idx;
+      for (const delta of [-30, 30, -60, 60, -90, 90]) {
+        const fakeF = Math.max(1, f + delta);
+        const key = `${cand.video_id}_${fakeF}`;
+        if (!seen.has(key) && rows.length < 100) {
+          seen.add(key);
+          const ans = cand.vqa_answer || chosenAnswer;
+          rows.push(`${queryId},${cand.video_id},${fakeF},"${ans.replace(/"/g, '""')}"`);
+        }
+      }
+    }
+  } else if (task === "TRAKE") {
+    const topSeq = state.activeInspectorItem || results[0];
+    if (!topSeq || !Array.isArray(topSeq.matched_frames)) return [];
+
+    const topVid = topSeq.video_id;
+    const topFrames = [...topSeq.matched_frames];
+
+    // Row 1: Human refined sequence
+    rows.push(`${queryId},${topVid},${topFrames.join(",")}`);
+    const seen = new Set([`${topVid}_${topFrames.join("_")}`]);
+
+    // Tier 2 (Rows 2–20): Monotonic perturbations of top sequence
+    for (let slot = 0; slot < topFrames.length; slot++) {
+      for (const delta of [-30, 30, -60, 60, -90, 90]) {
+        const candidateFrames = [...topFrames];
+        candidateFrames[slot] += delta;
+        
+        let isMonotonic = true;
+        for (let i = 0; i < candidateFrames.length - 1; i++) {
+          if (candidateFrames[i] >= candidateFrames[i + 1] || candidateFrames[i] <= 0) {
+            isMonotonic = false;
+            break;
+          }
+        }
+        if (isMonotonic) {
+          const key = `${topVid}_${candidateFrames.join("_")}`;
+          if (!seen.has(key) && rows.length < 25) {
+            seen.add(key);
+            rows.push(`${queryId},${topVid},${candidateFrames.join(",")}`);
+          }
+        }
+      }
+    }
+
+    // Tier 3 & 4 (Rows 21–100): Other candidate sequences from results
+    for (const seq of results) {
+      if (!seq.matched_frames) continue;
+      const key = `${seq.video_id}_${seq.matched_frames.join("_")}`;
+      if (!seen.has(key) && rows.length < 100) {
+        seen.add(key);
+        rows.push(`${queryId},${seq.video_id},${seq.matched_frames.join(",")}`);
+      }
+    }
+
+    // Fill to 100 with valid variations of other sequences
+    for (const seq of results) {
+      if (rows.length >= 100) break;
+      if (!seq.matched_frames) continue;
+      for (let slot = 0; slot < seq.matched_frames.length; slot++) {
+        for (const delta of [-30, 30, -60, 60]) {
+          const candidateFrames = [...seq.matched_frames];
+          candidateFrames[slot] += delta;
+          let isMonotonic = true;
+          for (let i = 0; i < candidateFrames.length - 1; i++) {
+            if (candidateFrames[i] >= candidateFrames[i + 1] || candidateFrames[i] <= 0) {
+              isMonotonic = false;
+              break;
+            }
+          }
+          if (isMonotonic) {
+            const key = `${seq.video_id}_${candidateFrames.join("_")}`;
+            if (!seen.has(key) && rows.length < 100) {
+              seen.add(key);
+              rows.push(`${queryId},${seq.video_id},${candidateFrames.join(",")}`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return rows.slice(0, 100);
+}
+
+function executeDownload100Csv() {
+  const qId = el.exportQueryId ? el.exportQueryId.value.trim() || "1" : "1";
+  const rows = generate100SubmissionRows(qId);
+  
+  if (rows.length === 0) {
+    showToast("No candidates available to export.");
+    return;
+  }
+
+  const csvContent = rows.join("\n") + "\n";
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  
+  const link = document.createElement("a");
+  link.setAttribute("href", url);
+  link.setAttribute("download", `submission_query_${qId}_${state.taskType.toLowerCase()}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  closeExportModal();
+  showToast(`📥 Successfully exported ${rows.length} submission rows for Query ${qId}!`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
