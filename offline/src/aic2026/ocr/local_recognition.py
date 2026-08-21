@@ -178,7 +178,14 @@ def _normalize_confidence(probability: object) -> float | None:
         return None
     if hasattr(probability, "item"):
         probability = probability.item()  # type: ignore[union-attr]
-    return min(max(float(probability), 0.0), 1.0)
+    value = float(probability)
+    # VietOCR 0.3.13 averages only positive token probabilities.  When a
+    # sample emits no such token, its upstream calculation is 0 / 0 and
+    # returns NaN.  Confidence is optional metadata, so preserve the
+    # transcript and record the unavailable score as null.
+    if not math.isfinite(value):
+        return None
+    return min(max(value, 0.0), 1.0)
 
 
 def export_l23_verified_evaluation(

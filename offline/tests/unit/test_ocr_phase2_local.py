@@ -323,6 +323,26 @@ def test_vietocr_batch_adapter_preserves_serial_text_confidence_and_order() -> N
     assert [item.transcript_raw for item in batched] == ["text-10", "text-200", "text-30"]
 
 
+def test_vietocr_adapter_records_nonfinite_native_confidence_as_unavailable() -> None:
+    class FakePredictor:
+        @staticmethod
+        def predict(image: Image.Image, *, return_prob: bool):
+            del image
+            assert return_prob is True
+            return "text", float("nan")
+
+        @staticmethod
+        def predict_batch(images: list[Image.Image], *, return_prob: bool):
+            assert return_prob is True
+            return ["text"] * len(images), [float("nan")] * len(images)
+
+    image = Image.new("RGB", (2, 2), "white")
+    recognizer = VietOcrRecognizer(FakePredictor(), model_revision="f" * 64)
+
+    assert recognizer.predict(image).confidence is None
+    assert recognizer.predict_batch([image, image])[0].confidence is None
+
+
 class _Phase1Detector:
     def detect(self, image_bgr, *, width: int, height: int):
         del image_bgr
