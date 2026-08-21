@@ -63,6 +63,8 @@ _parser: Optional[QueryParser] = None
 
 # In-memory video ID -> actual directory path map (supports nested keyframes-1, keyframes-2, etc.)
 _video_to_dir_map: dict[str, Path] = {}
+# In-memory Branch Cache: session_id -> { "parsed_query": ..., "branches": dict, "created_at": float }
+_branch_cache: dict[str, dict[str, Any]] = {}
 
 
 def _index_keyframe_directories(root_dir: Path):
