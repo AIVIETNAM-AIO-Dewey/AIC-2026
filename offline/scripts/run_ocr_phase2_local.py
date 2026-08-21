@@ -27,6 +27,7 @@ from aic2026.ocr.representative_recognition import (  # noqa: E402
     DEFAULT_FRAME_CACHE_MAX_BYTES,
     DEFAULT_RECOGNITION_BATCH_SIZE,
     local_runtime_identity,
+    merge_representative_recognition_partitions,
     run_representative_recognition,
 )
 from aic2026.ocr.tracking import TrackingConfig  # noqa: E402
@@ -91,6 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--frame-cache-max-bytes", type=int, default=DEFAULT_FRAME_CACHE_MAX_BYTES
     )
     representatives.add_argument("--resume", action="store_true")
+    representatives.add_argument("--representative-start", type=int, default=0)
+    representatives.add_argument("--representative-end", type=int)
+
+    merge = commands.add_parser(
+        "merge-representatives",
+        help="Merge completed recognition partitions into canonical representative order",
+    )
+    merge.add_argument("--representatives", type=Path, required=True)
+    merge.add_argument("--partition-output", type=Path, action="append", required=True)
+    merge.add_argument("--output", type=Path, required=True)
 
     consensus = commands.add_parser(
         "consensus", help="Build one deterministic result per Phase 1 trajectory"
@@ -211,7 +222,18 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             frame_cache_capacity=args.frame_cache_capacity,
             frame_cache_max_bytes=args.frame_cache_max_bytes,
+            representative_start=args.representative_start,
+            representative_end=args.representative_end,
             resume=args.resume,
+        )
+        print(json.dumps({"status": "completed", **counts}, ensure_ascii=False))
+        return 0
+
+    if args.command == "merge-representatives":
+        counts = merge_representative_recognition_partitions(
+            representatives=args.representatives.expanduser().resolve(),
+            partition_outputs=[item.expanduser().resolve() for item in args.partition_output],
+            output=args.output.expanduser().resolve(),
         )
         print(json.dumps({"status": "completed", **counts}, ensure_ascii=False))
         return 0

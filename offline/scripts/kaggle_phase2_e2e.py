@@ -165,7 +165,12 @@ def _copy_weight(source: Path, destination: Path) -> Path:
 
 
 def acquire_weights(
-    *, input_root: Path, cache_path: Path, explicit: Path | None, allow_download: bool
+    *,
+    input_root: Path,
+    cache_path: Path,
+    explicit: Path | None,
+    allow_download: bool,
+    search_attached: bool = True,
 ) -> Path:
     """Reuse a verified checkpoint, then an attached one, then the pinned URL."""
 
@@ -175,13 +180,14 @@ def acquire_weights(
         return cache_path
     if explicit is not None:
         return _copy_weight(explicit.expanduser().resolve(), cache_path)
-    for candidate in find_named_paths(input_root, "vgg_seq2seq.pth", directories=False):
-        try:
-            _verify_weight(candidate)
-        except (OSError, ValueError):
-            continue
-        log(f"copying verified attached weights: {candidate}")
-        return _copy_weight(candidate, cache_path)
+    if search_attached:
+        for candidate in find_named_paths(input_root, "vgg_seq2seq.pth", directories=False):
+            try:
+                _verify_weight(candidate)
+            except (OSError, ValueError):
+                continue
+            log(f"copying verified attached weights: {candidate}")
+            return _copy_weight(candidate, cache_path)
     if not allow_download:
         raise FileNotFoundError("pinned vgg_seq2seq.pth is not attached and download is disabled")
 
@@ -240,7 +246,9 @@ def _environment_report(python: Path, device: str) -> dict[str, Any] | None:
     return report
 
 
-def setup_environment(env_root: Path, device: str, input_root: Path) -> Path:
+def setup_environment(
+    env_root: Path, device: str, input_root: Path, *, search_attached: bool = True
+) -> Path:
     """Create once and thereafter reuse a Phase-2-only venv."""
 
     python = env_root / "bin/python"
@@ -251,11 +259,15 @@ def setup_environment(env_root: Path, device: str, input_root: Path) -> Path:
     if env_root.exists():
         shutil.rmtree(env_root)
 
-    candidates = [
-        item
-        for item in find_named_paths(input_root, env_root.name, directories=True)
-        if _environment_report(item / "bin/python", device) is not None
-    ]
+    candidates = (
+        [
+            item
+            for item in find_named_paths(input_root, env_root.name, directories=True)
+            if _environment_report(item / "bin/python", device) is not None
+        ]
+        if search_attached
+        else []
+    )
     if candidates:
         source = candidates[0]
         temporary = env_root.with_name(f".{env_root.name}.restoring-{os.getpid()}")
@@ -678,6 +690,7 @@ def process_shard(
     final_run_id: str,
     batch_size: int,
     commit_interval: int,
+    partitions_per_shard: int,
     deadline: float | None,
 ) -> dict[str, Path]:
     output_root = work_root / "stages" / shard.shard_id
@@ -706,43 +719,93 @@ def process_shard(
         if marker.get("status") == "completed" and not recognition_done:
             raise ValueError(f"completed recognition identity drift: {shard.shard_id}")
     if not recognition_done:
-        run(
-            [
+        base_command = [
+            str(python),
+            str(PHASE2_RUNNER),
+            "run-representatives",
+            "--phase1-config",
+            str(phase1_config),
+            "--frame-manifest",
+            str(shard.frame_manifest),
+            "--data-root",
+            str(data_root),
+            "--detections",
+            str(shard.detections),
+            "--trajectories",
+            str(shard.trajectories),
+            "--representatives",
+            str(shard.representatives),
+            "--model-config",
+            str(model_config),
+            "--weights",
+            str(weights),
+            "--weights-sha256",
+            WEIGHTS_SHA256,
+            "--device",
+            device,
+            "--source-commit-sha",
+            source_commit_sha,
+            "--batch-size",
+            str(batch_size),
+            "--commit-interval-records",
+            str(commit_interval),
+            "--resume",
+        ]
+        if partitions_per_shard == 1:
+            run(
+                [*base_command, "--output", str(recognition)],
+                deadline=deadline,
+            )
+        else:
+            representative_count = sum(
+                1 for line in shard.representatives.open(encoding="utf-8") if line.strip()
+            )
+            if representative_count < partitions_per_shard:
+                raise ValueError(
+                    f"too few representatives to partition {shard.shard_id}: {representative_count}"
+                )
+            partition_outputs: list[Path] = []
+            partition_futures: list[Future[None]] = []
+            with ThreadPoolExecutor(
+                max_workers=partitions_per_shard,
+                thread_name_prefix=f"{shard.shard_id}-recognition",
+            ) as partition_executor:
+                for index in range(partitions_per_shard):
+                    start = representative_count * index // partitions_per_shard
+                    end = representative_count * (index + 1) // partitions_per_shard
+                    partition = output_root / (
+                        f"recognition.part-{index + 1:03d}-of-{partitions_per_shard:03d}.jsonl"
+                    )
+                    partition_outputs.append(partition)
+                    partition_futures.append(
+                        partition_executor.submit(
+                            run,
+                            [
+                                *base_command,
+                                "--output",
+                                str(partition),
+                                "--representative-start",
+                                str(start),
+                                "--representative-end",
+                                str(end),
+                            ],
+                            deadline=deadline,
+                        )
+                    )
+                for future in partition_futures:
+                    future.result()
+            merge_command = [
                 str(python),
                 str(PHASE2_RUNNER),
-                "run-representatives",
-                "--phase1-config",
-                str(phase1_config),
-                "--frame-manifest",
-                str(shard.frame_manifest),
-                "--data-root",
-                str(data_root),
-                "--detections",
-                str(shard.detections),
-                "--trajectories",
-                str(shard.trajectories),
+                "merge-representatives",
                 "--representatives",
                 str(shard.representatives),
                 "--output",
                 str(recognition),
-                "--model-config",
-                str(model_config),
-                "--weights",
-                str(weights),
-                "--weights-sha256",
-                WEIGHTS_SHA256,
-                "--device",
-                device,
-                "--source-commit-sha",
-                source_commit_sha,
-                "--batch-size",
-                str(batch_size),
-                "--commit-interval-records",
-                str(commit_interval),
-                "--resume",
-            ],
-            deadline=deadline,
-        )
+            ]
+            for partition in partition_outputs:
+                merge_command.extend(("--partition-output", str(partition)))
+            run(merge_command, deadline=deadline)
 
     consensus = output_root / "consensus.jsonl"
     if not _verified_output(
@@ -997,6 +1060,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--no-weight-download", action="store_true")
+    parser.add_argument(
+        "--skip-attached-cache-search",
+        action="store_true",
+        help="Create/download Phase 2 dependencies directly instead of scanning attached outputs.",
+    )
     parser.add_argument("--work-root", type=Path, default=Path("/kaggle/working/ocr-phase2-e2e-v1"))
     parser.add_argument("--env-root", type=Path, default=Path("/kaggle/working/phase2-vietocr-env"))
     parser.add_argument("--phase2-python", type=Path)
@@ -1018,6 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--final-run-id", default="vietocr-local-v1")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--commit-interval-records", type=int, default=256)
+    parser.add_argument("--partitions-per-shard", type=int, default=1)
     parser.add_argument("--shard", action="append", default=[])
     parser.add_argument(
         "--save-progress-on-error",
@@ -1065,6 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--devices must not contain duplicates")
     if args.workers_per_gpu < 1:
         raise ValueError("--workers-per-gpu must be positive")
+    if not 1 <= args.partitions_per_shard <= 4:
+        raise ValueError("--partitions-per-shard must be inside [1, 4]")
     if args.soft_stop_seconds < 300:
         raise ValueError("--soft-stop-seconds must leave at least five minutes of useful runtime")
     deadline = started + args.soft_stop_seconds
@@ -1072,7 +1143,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.phase2_python is None:
         env_root = args.env_root.expanduser().resolve()
         env_root.relative_to(working)
-        python = setup_environment(env_root, devices[0], input_root)
+        python = setup_environment(
+            env_root,
+            devices[0],
+            input_root,
+            search_attached=not args.skip_attached_cache_search,
+        )
     else:
         python = args.phase2_python.expanduser().resolve()
         if _environment_report(python, devices[0]) is None:
@@ -1094,6 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_path=work_root / "models/vgg_seq2seq.pth",
         explicit=args.weights,
         allow_download=not args.no_weight_download,
+        search_attached=not args.skip_attached_cache_search,
     )
     smoke_model(
         python=python,
@@ -1143,6 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
                     final_run_id=args.final_run_id,
                     batch_size=args.batch_size,
                     commit_interval=args.commit_interval_records,
+                    partitions_per_shard=args.partitions_per_shard,
                     deadline=deadline,
                 )
             ] = shard

@@ -38,6 +38,7 @@ from aic2026.ocr.representative_recognition import (
     _LegacyTrackingIdentityView,
     _reconstruct_crop_image,
     _tracking_identity_hashes,
+    merge_representative_recognition_partitions,
     recognition_execution_policy_sha256,
     run_representative_recognition,
 )
@@ -535,6 +536,8 @@ def _run_representatives(
     batch_size: int = 32,
     frame_cache_capacity: int = 8,
     frame_cache_max_bytes: int = DEFAULT_FRAME_CACHE_MAX_BYTES,
+    representative_start: int = 0,
+    representative_end: int | None = None,
     clock=None,
 ):
     manifest, detections, trajectories, representatives = artifacts
@@ -568,10 +571,60 @@ def _run_representatives(
         batch_size=batch_size,
         frame_cache_capacity=frame_cache_capacity,
         frame_cache_max_bytes=frame_cache_max_bytes,
+        representative_start=representative_start,
+        representative_end=representative_end,
         resume=resume,
         fault_injector=fault_injector,
         clock=clock or _PairClock(),
     )
+
+
+def test_representative_partitions_merge_in_exact_input_order(tmp_path: Path) -> None:
+    artifacts = _phase1_shard(tmp_path)
+    weights = tmp_path / "model.pth"
+    weights.write_bytes(b"fixture-weights")
+    revision = sha256_file(weights)
+    first = tmp_path / "recognition.part-001.jsonl"
+    second = tmp_path / "recognition.part-002.jsonl"
+
+    _run_representatives(
+        tmp_path,
+        artifacts=artifacts,
+        output=first,
+        recognizer=_RepresentativeRecognizer(revision, ["Tiếng Việt"]),
+        representative_start=0,
+        representative_end=1,
+    )
+    _run_representatives(
+        tmp_path,
+        artifacts=artifacts,
+        output=second,
+        recognizer=_RepresentativeRecognizer(revision, ["English"]),
+        representative_start=1,
+        representative_end=2,
+    )
+
+    merged = tmp_path / "recognition.jsonl"
+    counts = merge_representative_recognition_partitions(
+        representatives=artifacts[3],
+        partition_outputs=[second, first],
+        output=merged,
+    )
+
+    assert counts["records"] == 2
+    assert counts["partitions"] == 2
+    assert [row["transcript_nfc"] for row in iter_jsonl(merged)] == [
+        "Tiếng Việt",
+        "English",
+    ]
+    receipt = RepresentativeRecognitionReceipt.model_validate_json(
+        merged.with_suffix(".jsonl.receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt.status == "completed"
+    assert receipt.source_total_representatives is None
+    assert receipt.partition_start == 0
+    assert receipt.partition_end is None
+    assert receipt.total_representatives == 2
 
 
 def test_representative_runner_resume_truncates_torn_tail_and_is_byte_identical(

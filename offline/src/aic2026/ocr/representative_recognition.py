@@ -236,6 +236,9 @@ class RepresentativeRecognitionReceipt(StrictModel):
     package_versions: dict[str, str] = Field(min_length=1)
     runtime: dict[str, str] = Field(min_length=1)
     runtime_identity_sha256: str = Field(pattern=SHA256_PATTERN)
+    source_total_representatives: int | None = Field(default=None, ge=0)
+    partition_start: int = Field(default=0, ge=0)
+    partition_end: int | None = Field(default=None, ge=0)
     total_representatives: int = Field(ge=0)
     commit_interval_records: int = Field(ge=1)
     batch_size: int = Field(ge=1, le=MAX_RECOGNITION_BATCH_SIZE)
@@ -273,6 +276,16 @@ class RepresentativeRecognitionReceipt(StrictModel):
             raise ValueError("recognition execution policy SHA-256 is inconsistent")
         if self.committed_records > self.total_representatives:
             raise ValueError("receipt commits more records than the representative input")
+        source_total = (
+            self.total_representatives
+            if self.source_total_representatives is None
+            else self.source_total_representatives
+        )
+        partition_end = source_total if self.partition_end is None else self.partition_end
+        if not 0 <= self.partition_start <= partition_end <= source_total:
+            raise ValueError("recognition partition bounds are invalid")
+        if partition_end - self.partition_start != self.total_representatives:
+            raise ValueError("recognition partition size differs from total_representatives")
         if self.output_sha256 != self.committed_sha256:
             raise ValueError("output and committed SHA-256 must agree")
         if self.status == "completed" and self.committed_records != self.total_representatives:
@@ -360,6 +373,9 @@ def _identity_fields(
     runtime: Mapping[str, str],
     runtime_identity_sha256: str,
     total_representatives: int,
+    source_total_representatives: int | None,
+    partition_start: int,
+    partition_end: int | None,
     commit_interval_records: int,
     batch_size: int,
     frame_cache_capacity: int,
@@ -384,6 +400,9 @@ def _identity_fields(
         "package_versions": dict(package_versions),
         "runtime": dict(runtime),
         "runtime_identity_sha256": runtime_identity_sha256,
+        "source_total_representatives": source_total_representatives,
+        "partition_start": partition_start,
+        "partition_end": partition_end,
         "total_representatives": total_representatives,
         "commit_interval_records": commit_interval_records,
         "batch_size": batch_size,
@@ -777,6 +796,8 @@ def run_representative_recognition(
     batch_size: int = DEFAULT_RECOGNITION_BATCH_SIZE,
     frame_cache_capacity: int = DEFAULT_FRAME_CACHE_CAPACITY,
     frame_cache_max_bytes: int = DEFAULT_FRAME_CACHE_MAX_BYTES,
+    representative_start: int = 0,
+    representative_end: int | None = None,
     resume: bool = False,
     fault_injector: FaultInjector | None = None,
     clock: Clock = perf_counter,
@@ -826,10 +847,20 @@ def run_representative_recognition(
         raise ValueError("frame manifest is not the shard manifest bound by Phase 1")
 
     frames_by_uid = _load_manifest_frames(paths["frame_manifest"])
-    representative_records = [
+    source_representative_records = [
         RepresentativeCropBinding.model_validate(row)
         for row in iter_jsonl(paths["representatives"])
     ]
+    source_total_representatives = len(source_representative_records)
+    if type(representative_start) is not int or representative_start < 0:
+        raise ValueError("representative_start must be a non-negative integer")
+    if representative_end is None:
+        representative_end = source_total_representatives
+    if type(representative_end) is not int or not (
+        representative_start < representative_end <= source_total_representatives
+    ):
+        raise ValueError("representative partition must be a non-empty in-bounds range")
+    representative_records = source_representative_records[representative_start:representative_end]
     for binding in representative_records:
         frame = frames_by_uid.get(binding.frame_uid)
         if frame is None:
@@ -866,6 +897,17 @@ def run_representative_recognition(
         runtime=runtime,
         runtime_identity_sha256=runtime_identity_sha256,
         total_representatives=len(representative_records),
+        source_total_representatives=(
+            None
+            if representative_start == 0 and representative_end == source_total_representatives
+            else source_total_representatives
+        ),
+        partition_start=representative_start,
+        partition_end=(
+            None
+            if representative_start == 0 and representative_end == source_total_representatives
+            else representative_end
+        ),
         commit_interval_records=commit_interval_records,
         batch_size=batch_size,
         frame_cache_capacity=frame_cache_capacity,
@@ -1152,4 +1194,133 @@ def run_representative_recognition(
         "frame_cache_misses": base_frame_cache_misses + frame_cache.misses,
         "frame_cache_evictions": base_frame_cache_evictions + frame_cache.evictions,
         "frame_cache_oversized": base_frame_cache_oversized + frame_cache.oversized,
+    }
+
+
+_MERGED_RECEIPT_IDENTITY_FIELDS = (
+    "run_id",
+    "source_commit_sha",
+    "phase1_config_sha256",
+    "phase1_tracking_identity_mode",
+    "phase1_tracking_config_sha256",
+    "phase1_resource_limits_sha256",
+    "frame_manifest_sha256",
+    "detections_sha256",
+    "trajectories_sha256",
+    "representatives_sha256",
+    "model_id",
+    "model_revision",
+    "model_weights_sha256",
+    "model_config_sha256",
+    "model_vocab_sha256",
+    "package_versions",
+    "runtime",
+    "runtime_identity_sha256",
+    "commit_interval_records",
+    "batch_size",
+    "frame_cache_capacity",
+    "frame_cache_max_bytes",
+    "recognition_execution_policy_sha256",
+    "trust_boundary",
+)
+
+
+def merge_representative_recognition_partitions(
+    *, representatives: Path, partition_outputs: Sequence[Path], output: Path
+) -> dict[str, int | str]:
+    """Concatenate authenticated contiguous partitions into canonical input order."""
+
+    if len(partition_outputs) < 2:
+        raise ValueError("at least two partition outputs are required")
+    output = output.resolve()
+    receipt_path = output.with_suffix(output.suffix + ".receipt.json")
+    if output.exists() or receipt_path.exists():
+        raise FileExistsError("fresh merged recognition output and receipt are required")
+
+    representative_records = [
+        RepresentativeCropBinding.model_validate(row)
+        for row in iter_jsonl(representatives.resolve())
+    ]
+    representative_hash = sha256_file(representatives.resolve())
+    partitions: list[tuple[int, int, Path, bytes, RepresentativeRecognitionReceipt]] = []
+    baseline: dict[str, object] | None = None
+    for raw_path in partition_outputs:
+        path = raw_path.resolve()
+        marker = path.with_suffix(path.suffix + ".receipt.json")
+        receipt = RepresentativeRecognitionReceipt.model_validate_json(
+            marker.read_text(encoding="utf-8")
+        )
+        if receipt.status != "completed":
+            raise ValueError(f"recognition partition is not completed: {path}")
+        if receipt.representatives_sha256 != representative_hash:
+            raise ValueError(f"recognition partition input drift: {path}")
+        if (
+            receipt.source_total_representatives != len(representative_records)
+            or receipt.partition_end is None
+        ):
+            raise ValueError(f"recognition partition bounds are not explicit: {path}")
+        payload = path.read_bytes()
+        if (
+            len(payload) != receipt.committed_bytes
+            or hashlib.sha256(payload).hexdigest() != receipt.output_sha256
+        ):
+            raise ValueError(f"recognition partition checksum drift: {path}")
+        start = receipt.partition_start
+        end = receipt.partition_end
+        _parse_prefix(
+            payload,
+            representative_records[start:end],
+            model_id=receipt.model_id,
+            model_revision=receipt.model_revision,
+        )
+        identity = {field: getattr(receipt, field) for field in _MERGED_RECEIPT_IDENTITY_FIELDS}
+        if baseline is None:
+            baseline = identity
+        elif identity != baseline:
+            raise ValueError("recognition partitions have different identities")
+        partitions.append((start, end, path, payload, receipt))
+
+    partitions.sort(key=lambda item: item[0])
+    cursor = 0
+    for start, end, path, _, _ in partitions:
+        if start != cursor:
+            raise ValueError(f"recognition partition coverage gap/overlap before {path}")
+        cursor = end
+    if cursor != len(representative_records):
+        raise ValueError("recognition partitions do not cover every representative")
+    assert baseline is not None
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".partial")
+    with temporary.open("xb") as stream:
+        for _, _, _, payload, _ in partitions:
+            stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    merged_hash = sha256_file(temporary)
+    os.replace(temporary, output)
+    _fsync_directory(output.parent)
+    receipts = [item[4] for item in partitions]
+    merged_receipt = RepresentativeRecognitionReceipt(
+        **baseline,
+        status="completed",
+        source_total_representatives=None,
+        partition_start=0,
+        partition_end=None,
+        total_representatives=len(representative_records),
+        committed_records=len(representative_records),
+        committed_bytes=output.stat().st_size,
+        committed_sha256=merged_hash,
+        output_sha256=merged_hash,
+        inference_batches=sum(item.inference_batches for item in receipts),
+        frame_cache_hits=sum(item.frame_cache_hits for item in receipts),
+        frame_cache_misses=sum(item.frame_cache_misses for item in receipts),
+        frame_cache_evictions=sum(item.frame_cache_evictions for item in receipts),
+        frame_cache_oversized=sum(item.frame_cache_oversized for item in receipts),
+    )
+    _write_receipt(receipt_path, merged_receipt)
+    return {
+        "records": len(representative_records),
+        "partitions": len(partitions),
+        "output_sha256": merged_hash,
     }
