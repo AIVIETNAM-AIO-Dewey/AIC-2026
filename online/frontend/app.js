@@ -88,6 +88,7 @@ const el = {
   inspScoreRank: document.getElementById("insp-score-rank"),
   inspAsrText: document.getElementById("insp-asr-text"),
   inspDamText: document.getElementById("insp-dam-text"),
+  inspOcrText: document.getElementById("insp-ocr-text"),
   inspObjectsList: document.getElementById("insp-objects-list"),
   
   // TRAKE and VQA Inspector Additions
@@ -740,10 +741,13 @@ function populateInspectorCommon(item) {
 
   el.inspAsrText.textContent = item.asr_transcript || "(No speech / silent frame)";
   el.inspDamText.textContent = item.dam_summary || "(No visual description available)";
+  if (el.inspOcrText) {
+    el.inspOcrText.textContent = item.ocr_text || "(No text detected on screen)";
+  }
 
   updateInspectorSubmitBtn();
 
-  // Load detailed DAM bounding boxes from API
+  // Load detailed DAM bounding boxes & metadata from API
   fetch(`/api/keyframe/${item.video_id}/${item.keyframe_n}`)
     .then((r) => (r.ok ? r.json() : null))
     .then((data) => {
@@ -751,6 +755,9 @@ function populateInspectorCommon(item) {
         state.activeBBoxObjects = data.dam_objects || [];
         if (data.macro_audio_transcript) {
           el.inspAsrText.textContent = data.macro_audio_transcript;
+        }
+        if (el.inspOcrText && data.keyframe && data.keyframe.ocr_text) {
+          el.inspOcrText.textContent = data.keyframe.ocr_text;
         }
         renderMatchedObjectsList(state.activeBBoxObjects);
         drawBBoxesOnCanvas();

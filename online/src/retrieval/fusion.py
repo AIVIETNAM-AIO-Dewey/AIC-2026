@@ -168,8 +168,13 @@ class MultimodalFusionEngine:
             c["video_id"] = h["video_id"]
             c["frame_idx"] = h["frame_idx"]
             c["keyframe_n"] = h["keyframe_n"]
+            c["pts_time_s"] = c["pts_time_s"] or h.get("pts_time_s", 0.0)
+            c["image_relpath"] = c["image_relpath"] or h.get("image_relpath", "")
+            c["dam_summary"] = c["dam_summary"] or h.get("dam_summary", "")
+            c["asr_transcript"] = c["asr_transcript"] or h.get("transcript", "")
+            c["ocr_text"] = h.get("ocr_text", "")
             c["rank_ocr"] = h["rank"]
-            c["score_ocr"] = 1.0
+            c["score_ocr"] = h.get("score", 1.0)
 
         fused_pool = []
         for key, c in candidates.items():
