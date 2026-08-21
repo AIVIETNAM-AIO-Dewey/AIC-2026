@@ -61,8 +61,36 @@ _fusion: Optional[MultimodalFusionEngine] = None
 _reranker: Optional[Stage2Reranker] = None
 _parser: Optional[QueryParser] = None
 
-# In-memory Branch Cache: session_id -> { "parsed_query": ..., "branches": dict, "created_at": float }
-_branch_cache: dict[str, dict[str, Any]] = {}
+# In-memory video ID -> actual directory path map (supports nested keyframes-1, keyframes-2, etc.)
+_video_to_dir_map: dict[str, Path] = {}
+
+
+def _index_keyframe_directories(root_dir: Path):
+    """Recursively discover and index all video keyframe directories so users never need to move files."""
+    if not root_dir.exists():
+        return
+    logger.info(f"⚡ Discovering video keyframe directories under {root_dir}...")
+    t0 = time.perf_counter()
+    count = 0
+    try:
+        # Check direct children
+        for d in root_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if d.name.startswith("L") and "_" in d.name:
+                _video_to_dir_map[d.name] = d
+                count += 1
+            else:
+                # Check nested children (e.g. keyframes-1, keyframes-2, keyframes-3...)
+                for sub in d.iterdir():
+                    if sub.is_dir() and sub.name.startswith("L") and "_" in sub.name:
+                        _video_to_dir_map[sub.name] = sub
+                        count += 1
+    except Exception as e:
+        logger.warning(f"Error during keyframe directory indexing: {e}")
+
+    dt = (time.perf_counter() - t0) * 1000.0
+    logger.info(f"✅ Indexed {len(_video_to_dir_map)} video keyframe folders in {dt:.1f}ms (Supports multi-batch folders)")
 
 
 @asynccontextmanager
@@ -72,11 +100,14 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting AIC Retrieval Engine Server...")
     t0 = time.perf_counter()
 
-    # 1. Load memory-mapped vector search matrices & metadata
+    # 1. Discover all keyframe directories (supports keyframes, keyframes-2, keyframes-3, etc.)
+    _index_keyframe_directories(KEYFRAMES_DIR)
+
+    # 2. Load memory-mapped vector search matrices & metadata
     idx_path = config["paths"]["unified_index"]
     _searcher = FastVectorSearchEngine(unified_index_dir=idx_path)
 
-    # 2. Warm up GPU embedding & reranker models
+    # 3. Warm up GPU embedding & reranker models
     _registry = ModelRegistry.get_instance(
         siglip_id=config["models"]["siglip"],
         bge_id=config["models"]["bge_m3"],
@@ -87,7 +118,7 @@ async def lifespan(app: FastAPI):
     _registry._load_bge()
     _registry._load_reranker()
 
-    # 3. Instantiate fusion & reranker engines
+    # 4. Instantiate fusion & reranker engines
     _fusion = MultimodalFusionEngine(
         searcher=_searcher,
         registry=_registry,
@@ -100,7 +131,7 @@ async def lifespan(app: FastAPI):
     )
     _reranker = Stage2Reranker(registry=_registry, vqa_reasoner=vqa_reasoner)
 
-    # 4. Query parser with Gemini & Ollama Qwen
+    # 5. Query parser with Gemini & Ollama Qwen
     _parser = QueryParser(
         gemini_model_id=config["models"].get("gemini_model_id", "gemini-3.6-flash"),
         qwen_model_id=config["models"].get("qwen_model_id", "qwen2.5:7b"),
@@ -358,8 +389,30 @@ async def get_video_keyframes(video_id: str):
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 KEYFRAMES_DIR = Path(config["paths"]["keyframes_root"])
 
-if KEYFRAMES_DIR.exists():
-    app.mount("/keyframes", StaticFiles(directory=str(KEYFRAMES_DIR)), name="keyframes")
+
+@app.get("/keyframes/{video_id}/{filename}")
+async def serve_keyframe_image(video_id: str, filename: str):
+    """Dynamically serve keyframe image across single or multi-batch folders (keyframes-1, keyframes-2, etc.)."""
+    # 1. Look up in indexed directory map
+    v_dir = _video_to_dir_map.get(video_id)
+    if v_dir:
+        target = v_dir / filename
+        if target.exists():
+            return FileResponse(target)
+
+    # 2. Fallback direct check
+    direct = KEYFRAMES_DIR / video_id / filename
+    if direct.exists():
+        return FileResponse(direct)
+
+    # 3. Dynamic glob search fallback
+    for match in KEYFRAMES_DIR.glob(f"*/{video_id}/{filename}"):
+        if match.exists():
+            _video_to_dir_map[video_id] = match.parent
+            return FileResponse(match)
+
+    raise HTTPException(status_code=404, detail=f"Keyframe image {video_id}/{filename} not found")
+
 
 # Mount frontend at / with html=True to automatically serve index.html, style.css, and app.js
 if FRONTEND_DIR.exists():
