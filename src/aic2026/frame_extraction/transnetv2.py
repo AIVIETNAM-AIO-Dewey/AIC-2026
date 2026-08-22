@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import deque
 from queue import Empty, Queue
 from pathlib import Path
 from threading import Thread
@@ -88,13 +89,15 @@ def run_transnetv2_inference(
     )
     assert process.stdout is not None
     lines: Queue[str | None] = Queue()
+    output_tail: deque[str] = deque(maxlen=80)
 
     def forward_output() -> None:
         for line in process.stdout:
             lines.put(line)
         lines.put(None)
 
-    Thread(target=forward_output, name="transnetv2-output", daemon=True).start()
+    output_thread = Thread(target=forward_output, name="transnetv2-output", daemon=True)
+    output_thread.start()
     started_at = time.monotonic()
     print(
         f"[transnetv2] process_started pid={process.pid}; streaming output and heartbeat every 30s",
@@ -113,13 +116,19 @@ def run_transnetv2_inference(
                     flush=True,
                 )
                 continue
-            break
+            output_thread.join()
+            continue
         if line is None:
             break
+        output_tail.append(line.rstrip())
         print(line, end="", file=sys.stderr, flush=True)
     return_code = process.wait()
     if return_code != 0:
-        raise RuntimeError(f"TransNetV2 inference failed for {video_path} with code {return_code}")
+        tail = "\n".join(output_tail) or "<no child-process output captured>"
+        raise RuntimeError(
+            f"TransNetV2 inference failed for {video_path} with code {return_code}. "
+            f"Last output:\n{tail}"
+        )
     scenes_path = Path(str(linked_video) + ".scenes.txt")
     if not scenes_path.is_file():
         raise FileNotFoundError(f"TransNetV2 did not create scenes file: {scenes_path}")
