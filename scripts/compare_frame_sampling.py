@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--tolerance-s", type=float, default=0.5)
     parser.add_argument("--preview-pairs", type=int, default=8)
+    parser.add_argument("--preview-selection", choices=("evenly", "page"), default="evenly")
+    parser.add_argument("--preview-page", type=int, default=1)
     parser.add_argument("--jpeg-quality", type=int, default=2)
     return parser
 
@@ -64,18 +66,36 @@ def _temporal_gap_stats(samples: list[FrameSampleCandidate]) -> dict[str, float 
     }
 
 
-def _evenly_pick(samples: list[FrameSampleCandidate], count: int) -> list[FrameSampleCandidate]:
+def _select_previews(
+    samples: list[FrameSampleCandidate],
+    *,
+    count: int,
+    selection: str,
+    page: int,
+) -> list[tuple[int, FrameSampleCandidate]]:
+    if not samples or count <= 0:
+        return []
+    if selection == "page":
+        start = (page - 1) * count
+        if start >= len(samples):
+            page_count = (len(samples) + count - 1) // count
+            raise ValueError(f"--preview-page must be between 1 and {page_count}")
+        return [
+            (index + 1, samples[index])
+            for index in range(start, min(start + count, len(samples)))
+        ]
     if count >= len(samples):
-        return samples
+        return list(enumerate(samples, start=1))
     if count <= 0:
         return []
     if count == 1:
-        return [samples[len(samples) // 2]]
+        index = len(samples) // 2
+        return [(index + 1, samples[index])]
     indices = {
         round(index * (len(samples) - 1) / (count - 1))
         for index in range(count)
     }
-    return [samples[index] for index in sorted(indices)]
+    return [(index + 1, samples[index]) for index in sorted(indices)]
 
 
 def _sample_payload(sample: FrameSampleCandidate) -> dict[str, object]:
@@ -88,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--tolerance-s must be non-negative")
     if args.preview_pairs < 0:
         raise ValueError("--preview-pairs must be non-negative")
+    if args.preview_page < 1:
+        raise ValueError("--preview-page must be positive")
     if args.preview_pairs and args.video_path is None:
         raise ValueError("--video-path is required when --preview-pairs is positive")
 
@@ -129,14 +151,19 @@ def main(argv: list[str] | None = None) -> int:
     write_jsonl_atomic(merged_path, map(_sample_payload, merged))
 
     preview_records: list[dict[str, object]] = []
-    selected = _evenly_pick(additions, args.preview_pairs)
+    selected = _select_previews(
+        additions,
+        count=args.preview_pairs,
+        selection=args.preview_selection,
+        page=args.preview_page,
+    )
     if selected:
         assert args.video_path is not None
         video_path = args.video_path.expanduser().resolve()
         preview_dir = output_dir / "preview"
-        for pair_n, adaptive_sample in enumerate(selected, start=1):
+        for rendered_n, (addition_position, adaptive_sample) in enumerate(selected, start=1):
             original, delta_s = _nearest(adaptive_sample, organizer, organizer_times)
-            pair_dir = preview_dir / f"{pair_n:02d}"
+            pair_dir = preview_dir / f"addition_{addition_position:04d}"
             original_image = pair_dir / f"organizer_{original.frame_idx:08d}.jpg"
             adaptive_image = pair_dir / f"transnetv2_{adaptive_sample.frame_idx:08d}.jpg"
             if not original_image.is_file():
@@ -155,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             preview_records.append(
                 {
-                    "pair_n": pair_n,
+                    "pair_n": rendered_n,
+                    "addition_position": addition_position,
                     "delta_s": delta_s,
                     "organizer": _sample_payload(original),
                     "transnetv2": _sample_payload(adaptive_sample),
@@ -164,7 +192,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             print(
-                f"[sampling_comparison] preview={pair_n}/{len(selected)} "
+                f"[sampling_comparison] preview={rendered_n}/{len(selected)} "
+                f"addition={addition_position}/{len(additions)} "
                 f"organizer={original.pts_time_s:.3f}s "
                 f"transnetv2={adaptive_sample.pts_time_s:.3f}s delta={delta_s:.3f}s",
                 file=sys.stderr,
@@ -189,6 +218,14 @@ def main(argv: list[str] | None = None) -> int:
             delta <= args.tolerance_s for delta in organizer_matches
         ),
         "dedupe_tolerance_s": args.tolerance_s,
+        "preview_selection": args.preview_selection,
+        "preview_page": args.preview_page,
+        "preview_page_size": args.preview_pairs,
+        "preview_page_count": (
+            (len(additions) + args.preview_pairs - 1) // args.preview_pairs
+            if args.preview_pairs
+            else 0
+        ),
         "organizer_gap_stats": _temporal_gap_stats(organizer),
         "merged_gap_stats": _temporal_gap_stats(merged),
         "artifacts": {
@@ -209,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  overlapping organizer (+/-{args.tolerance_s:.1f}s): {summary['adaptive_candidates_overlapping_organizer']}")
     print(f"  new TransNetV2 additions: {summary['transnetv2_additions_after_dedupe']}")
     print(f"  merged frames: {summary['merged_frames']}")
+    print(
+        f"  preview: selection={args.preview_selection} page={args.preview_page}/"
+        f"{summary['preview_page_count']} size={args.preview_pairs}"
+    )
     print(f"  organizer max gap: {summary['organizer_gap_stats']['max_s']:.3f}s")
     print(f"  merged max gap: {summary['merged_gap_stats']['max_s']:.3f}s")
     print(json.dumps({"status": "completed", "summary": str(summary_path)}))
