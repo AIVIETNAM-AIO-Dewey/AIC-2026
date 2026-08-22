@@ -66,9 +66,16 @@ def main(argv: list[str] | None = None) -> int:
     roots = runtime_roots(args, config, required=("output_root",))
     output_root = roots["output_root"]
     video_id = args.video_id or str(config.get("video_id", "L21_V001"))
+    search_root = None if args.video_path is not None else _search_root(args, config, roots)
+    print(
+        f"[shot_detection] resolving video_id={video_id} "
+        f"explicit_video_path={args.video_path is not None}",
+        file=sys.stderr,
+        flush=True,
+    )
     inputs = locate_inputs(
         video_id=video_id,
-        search_root=_search_root(args, config, roots),
+        search_root=search_root,
         video_path=args.video_path,
     )
     print(f"[shot_detection] video_id={video_id}", file=sys.stderr, flush=True)
@@ -96,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         "backend": backend,
         "output": str(output),
     }
+    print(
+        f"[shot_detection] fingerprinting inputs={len(input_paths)}",
+        file=sys.stderr,
+        flush=True,
+    )
     manifest = create_manifest(
         run_id=run_id,
         stage="shot_detection",
@@ -104,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         input_paths=input_paths,
         repo_root=REPO_ROOT,
     )
+    print("[shot_detection] input fingerprints ready", file=sys.stderr, flush=True)
     manifest, complete = prepare_resume(
         manifest_path=manifest_path,
         output_path=output,
