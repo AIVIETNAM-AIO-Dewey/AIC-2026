@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+from queue import Empty, Queue
 from pathlib import Path
+from threading import Thread
 
 from aic2026.contracts import ShotRecord
 
@@ -67,10 +70,12 @@ def run_transnetv2_inference(
 
     command = [str(entrypoint.resolve()), str(linked_video)]
     if entrypoint.suffix == ".py":
-        command = [sys.executable, *command]
+        command = [sys.executable, "-u", *command]
     if weights is not None:
         command.extend(["--weights", str(weights.resolve())])
 
+    environment = os.environ.copy()
+    environment["PYTHONUNBUFFERED"] = "1"
     print("$ " + " ".join(command), file=sys.stderr, flush=True)
     process = subprocess.Popen(
         command,
@@ -78,9 +83,39 @@ def run_transnetv2_inference(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
+        env=environment,
     )
     assert process.stdout is not None
-    for line in process.stdout:
+    lines: Queue[str | None] = Queue()
+
+    def forward_output() -> None:
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    Thread(target=forward_output, name="transnetv2-output", daemon=True).start()
+    started_at = time.monotonic()
+    print(
+        f"[transnetv2] process_started pid={process.pid}; streaming output and heartbeat every 30s",
+        file=sys.stderr,
+        flush=True,
+    )
+    while True:
+        try:
+            line = lines.get(timeout=30)
+        except Empty:
+            if process.poll() is None:
+                elapsed = time.monotonic() - started_at
+                print(
+                    f"[transnetv2] still_running elapsed_s={elapsed:.0f}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            break
+        if line is None:
+            break
         print(line, end="", file=sys.stderr, flush=True)
     return_code = process.wait()
     if return_code != 0:
