@@ -44,17 +44,36 @@ def _drive_dependencies() -> tuple[Any, Any, Any, Any]:
 
 
 def _oauth_config() -> dict[str, Any]:
-    raw = os.environ.get("AIC_GDRIVE_OAUTH_JSON", "").strip()
+    raw = os.environ.get("AIC_GDRIVE_OAUTH_JSON", "").strip().lstrip("\ufeff")
     if not raw:
         raise ValueError("Kaggle Secret AIC_GDRIVE_OAUTH_JSON is unavailable")
+    if not raw.startswith("{"):
+        raise ValueError(
+            "AIC_GDRIVE_OAUTH_JSON must be a JSON object starting with '{'. "
+            "Do not paste Markdown fences, a file path, or only the client secret."
+        )
     try:
         config = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise ValueError("AIC_GDRIVE_OAUTH_JSON must contain valid JSON") from error
+        raise ValueError(
+            "AIC_GDRIVE_OAUTH_JSON must contain valid JSON using double quotes "
+            f"(parse error at line {error.lineno}, column {error.colno})."
+        ) from error
+    if not isinstance(config, dict):
+        raise ValueError("AIC_GDRIVE_OAUTH_JSON must decode to a JSON object")
+    if "installed" in config or "web" in config:
+        raise ValueError(
+            "AIC_GDRIVE_OAUTH_JSON contains downloaded OAuth client settings, "
+            "which do not include a refresh_token. Store an authorized-user JSON "
+            "object with top-level client_id, client_secret, and refresh_token keys."
+        )
     required = ("client_id", "client_secret", "refresh_token")
     missing = [key for key in required if not str(config.get(key, "")).strip()]
     if missing:
-        raise ValueError(f"AIC_GDRIVE_OAUTH_JSON is missing keys: {missing}")
+        raise ValueError(
+            "AIC_GDRIVE_OAUTH_JSON is missing required top-level keys: "
+            f"{', '.join(missing)}"
+        )
     return config
 
 
