@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     limit = _configured_limit(args.limit, config)
     output_root = roots["output_root"]
     search_root = _search_root(args, config, roots)
+    print(f"[frame_extraction] video_id={video_id}", file=sys.stderr, flush=True)
+    print(f"[frame_extraction] search_root={search_root}", file=sys.stderr, flush=True)
     inputs = locate_inputs(
         video_id=video_id,
         search_root=search_root,
@@ -79,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
         map_csv=args.map_csv,
         media_info=args.media_info,
     )
+    print(f"[frame_extraction] video={inputs.video_path}", file=sys.stderr, flush=True)
+    print(f"[frame_extraction] map_csv={inputs.map_csv}", file=sys.stderr, flush=True)
+    print(f"[frame_extraction] media_info={inputs.media_info}", file=sys.stderr, flush=True)
     frames_dir = (
         args.frames_dir.expanduser().resolve()
         if args.frames_dir
@@ -92,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = output.with_suffix(".manifest.json")
     jpeg_quality = int(config.get("jpeg_quality", 2))
     fallback_timestamps = _config_list(config, "fallback_timestamps_s", [0, 1, 2, 3, 4])
+    print(f"[frame_extraction] output={output}", file=sys.stderr, flush=True)
+    print(f"[frame_extraction] frames_dir={frames_dir}", file=sys.stderr, flush=True)
     resolved = {
         "schema_version": config.get("schema_version", "1.0"),
         "video_id": video_id,
@@ -125,6 +132,11 @@ def main(argv: list[str] | None = None) -> int:
     if complete:
         records = [FrameSampleRecord.model_validate(value) for value in iter_jsonl(output)]
         print(
+            f"[frame_extraction] already_complete frames={len(records)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
             json.dumps(
                 {"status": "already_complete", "frames": len(records), "output": str(output)}
             )
@@ -136,6 +148,12 @@ def main(argv: list[str] | None = None) -> int:
         if recovered_final:
             records = [FrameSampleRecord.model_validate(value) for value in iter_jsonl(output)]
         else:
+            source = "map-keyframes" if inputs.map_csv is not None else "fallback"
+            print(
+                f"[frame_extraction] extracting source={source} limit={limit}",
+                file=sys.stderr,
+                flush=True,
+            )
             records = extract_frame_samples(
                 video_id=video_id,
                 video_path=inputs.video_path,
@@ -145,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
                 limit=limit,
                 fallback_timestamps_s=fallback_timestamps,
                 jpeg_quality=jpeg_quality,
+            )
+            print(
+                f"[frame_extraction] extracted frames={len(records)}",
+                file=sys.stderr,
+                flush=True,
             )
             write_jsonl_atomic(output, records)
         counters = {"frames": len(records)}
