@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload adaptive frame artifacts to a browsable Google Drive folder."""
+"""Mirror an organizer-compatible keyframe package to Google Drive."""
 
 from __future__ import annotations
 
@@ -9,20 +9,19 @@ import json
 import mimetypes
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video-id", required=True)
-    parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--folder-name")
+    parser.add_argument("--package-root", type=Path)
+    parser.add_argument("--remote-root-name", default="transnetv2-only")
     parser.add_argument("--progress-every", type=int, default=25)
+    parser.add_argument("--preflight-only", action="store_true")
     return parser
 
 
@@ -35,12 +34,12 @@ def _drive_dependencies() -> tuple[Any, Any, Any, Any]:
     except ModuleNotFoundError as error:
         raise ModuleNotFoundError(
             "Google Drive export requires google-api-python-client, google-auth, "
-            "and google-auth-httplib2. Install them in the Kaggle notebook export cell."
+            "and google-auth-httplib2."
         ) from error
     return Request, Credentials, build, MediaFileUpload
 
 
-def _oauth_config() -> dict[str, str]:
+def _oauth_config() -> dict[str, Any]:
     raw = os.environ.get("AIC_GDRIVE_OAUTH_JSON", "").strip()
     if not raw:
         raise ValueError("Kaggle Secret AIC_GDRIVE_OAUTH_JSON is unavailable")
@@ -52,46 +51,54 @@ def _oauth_config() -> dict[str, str]:
     missing = [key for key in required if not str(config.get(key, "")).strip()]
     if missing:
         raise ValueError(f"AIC_GDRIVE_OAUTH_JSON is missing keys: {missing}")
-    return {key: str(value) for key, value in config.items() if value is not None}
+    return config
+
+
+def _folder_id() -> str:
+    folder_id = os.environ.get("AIC_GDRIVE_FOLDER_ID", "").strip()
+    if not folder_id:
+        raise ValueError("Kaggle Secret AIC_GDRIVE_FOLDER_ID is unavailable")
+    return folder_id
+
+
+def _credential_scopes(config: dict[str, Any]) -> list[str] | None:
+    raw = config.get("scopes")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+        return raw
+    raise ValueError("OAuth JSON scopes must be a string or list of strings")
 
 
 def _escape_query(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _find_or_create_folder(service: Any, *, name: str, parent_id: str | None) -> dict[str, Any]:
-    parent_query = f"'{_escape_query(parent_id)}' in parents" if parent_id else "'root' in parents"
-    query = (
-        f"name = '{_escape_query(name)}' and mimeType = '{FOLDER_MIME_TYPE}' "
-        f"and {parent_query} and trashed = false"
-    )
-    response = service.files().list(
-        q=query,
-        fields="files(id,name,webViewLink)",
-        spaces="drive",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute(num_retries=3)
-    matches = response.get("files", [])
-    if matches:
-        return matches[0]
-    body: dict[str, Any] = {"name": name, "mimeType": FOLDER_MIME_TYPE}
-    if parent_id:
-        body["parents"] = [parent_id]
-    return service.files().create(
-        body=body,
-        fields="id,name,webViewLink",
+def _get_folder(service: Any, folder_id: str) -> dict[str, Any]:
+    folder = service.files().get(
+        fileId=folder_id,
+        fields="id,name,mimeType,capabilities(canAddChildren)",
         supportsAllDrives=True,
     ).execute(num_retries=3)
+    if folder.get("mimeType") != FOLDER_MIME_TYPE:
+        raise ValueError("AIC_GDRIVE_FOLDER_ID does not point to a Google Drive folder")
+    if not (folder.get("capabilities") or {}).get("canAddChildren", False):
+        raise PermissionError("OAuth credential cannot add files to AIC_GDRIVE_FOLDER_ID")
+    return folder
 
 
 def _list_children(service: Any, folder_id: str) -> dict[str, dict[str, Any]]:
-    files: dict[str, dict[str, Any]] = {}
+    children: dict[str, dict[str, Any]] = {}
     page_token: str | None = None
     while True:
         response = service.files().list(
             q=f"'{_escape_query(folder_id)}' in parents and trashed = false",
-            fields="nextPageToken,files(id,name,size,md5Checksum,webViewLink)",
+            fields=(
+                "nextPageToken,files("
+                "id,name,mimeType,size,md5Checksum,webViewLink)"
+            ),
             pageSize=1000,
             pageToken=page_token,
             spaces="drive",
@@ -99,10 +106,35 @@ def _list_children(service: Any, folder_id: str) -> dict[str, dict[str, Any]]:
             includeItemsFromAllDrives=True,
         ).execute(num_retries=3)
         for item in response.get("files", []):
-            files[item["name"]] = item
+            if item["name"] in children:
+                raise ValueError(
+                    f"Drive folder {folder_id} contains duplicate name: {item['name']}"
+                )
+            children[item["name"]] = item
         page_token = response.get("nextPageToken")
         if not page_token:
-            return files
+            return children
+
+
+def _find_or_create_folder(
+    service: Any,
+    *,
+    parent_id: str,
+    name: str,
+    children: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    existing = children.get(name)
+    if existing is not None:
+        if existing.get("mimeType") != FOLDER_MIME_TYPE:
+            raise ValueError(f"Drive path component exists as a file: {name}")
+        return existing
+    folder = service.files().create(
+        body={"name": name, "mimeType": FOLDER_MIME_TYPE, "parents": [parent_id]},
+        fields="id,name,mimeType,webViewLink",
+        supportsAllDrives=True,
+    ).execute(num_retries=3)
+    children[name] = folder
+    return folder
 
 
 def _md5(path: Path) -> str:
@@ -113,7 +145,7 @@ def _md5(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _upload(
+def _upload_file(
     service: Any,
     media_upload_class: Any,
     *,
@@ -122,8 +154,12 @@ def _upload(
     existing: dict[str, Any] | None,
 ) -> dict[str, Any]:
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    media = media_upload_class(str(path), mimetype=mime_type, resumable=path.stat().st_size > 5_000_000)
-    fields = "id,name,size,md5Checksum,webViewLink"
+    media = media_upload_class(
+        str(path),
+        mimetype=mime_type,
+        resumable=path.stat().st_size > 5_000_000,
+    )
+    fields = "id,name,mimeType,size,md5Checksum,webViewLink"
     if existing is None:
         request = service.files().create(
             body={"name": path.name, "parents": [folder_id]},
@@ -132,6 +168,8 @@ def _upload(
             supportsAllDrives=True,
         )
     else:
+        if existing.get("mimeType") == FOLDER_MIME_TYPE:
+            raise ValueError(f"Drive file path exists as a folder: {path.name}")
         request = service.files().update(
             fileId=existing["id"],
             media_body=media,
@@ -152,79 +190,106 @@ def _upload(
     return response
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.progress_every < 1:
-        raise ValueError("--progress-every must be positive")
+def _build_service() -> tuple[Any, Any]:
     oauth = _oauth_config()
     Request, Credentials, build, MediaFileUpload = _drive_dependencies()
     credentials = Credentials(
         token=None,
-        refresh_token=oauth["refresh_token"],
-        token_uri=oauth.get("token_uri", TOKEN_URI),
-        client_id=oauth["client_id"],
-        client_secret=oauth["client_secret"],
-        scopes=[DRIVE_SCOPE],
+        refresh_token=str(oauth["refresh_token"]),
+        token_uri=str(oauth.get("token_uri", TOKEN_URI)),
+        client_id=str(oauth["client_id"]),
+        client_secret=str(oauth["client_secret"]),
+        scopes=_credential_scopes(oauth),
     )
     credentials.refresh(Request())
-    service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False), MediaFileUpload
 
-    output_root = args.output_root.expanduser().resolve()
-    frames_dir = output_root / "adaptive_keyframes" / args.video_id
-    adaptive_manifest = (
-        output_root / "frame_extraction" / "adaptive_manifests" / f"{args.video_id}.jsonl"
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.progress_every < 1:
+        raise ValueError("--progress-every must be positive")
+    service, MediaFileUpload = _build_service()
+    parent_id = _folder_id()
+    parent = _get_folder(service, parent_id)
+    if args.preflight_only:
+        print(json.dumps({"status": "ready", "folder_name": parent["name"]}))
+        return 0
+    if args.package_root is None:
+        raise ValueError("--package-root is required unless --preflight-only is used")
+
+    package_root = args.package_root.expanduser().resolve()
+    if not package_root.is_dir():
+        raise FileNotFoundError(f"Package root does not exist: {package_root}")
+    local_files = sorted(path for path in package_root.rglob("*") if path.is_file())
+    if not local_files:
+        raise ValueError(f"Package root has no files: {package_root}")
+
+    child_cache: dict[str, dict[str, dict[str, Any]]] = {}
+    parent_children = _list_children(service, parent_id)
+    remote_root = _find_or_create_folder(
+        service,
+        parent_id=parent_id,
+        name=args.remote_root_name,
+        children=parent_children,
     )
-    comparison_dir = output_root / "frame_extraction" / "comparison" / args.video_id
-    if not frames_dir.is_dir() or not adaptive_manifest.is_file():
-        raise FileNotFoundError("Adaptive frames and manifest must be extracted before Drive export")
-    upload_paths = sorted(frames_dir.glob("*.jpg"))
-    upload_paths.append(adaptive_manifest)
-    for name in (
-        "summary.json",
-        "organizer_samples.jsonl",
-        "transnetv2_adaptive_samples.jsonl",
-        "transnetv2_additions.jsonl",
-        "merged_samples.jsonl",
-    ):
-        path = comparison_dir / name
-        if path.is_file():
-            upload_paths.append(path)
+    remote_folders: dict[PurePosixPath, str] = {PurePosixPath("."): remote_root["id"]}
+    child_cache[remote_root["id"]] = _list_children(service, remote_root["id"])
 
-    folder_name = args.folder_name or f"AIC2026-{args.video_id}-adaptive-frames"
-    parent_id = oauth.get("folder_id", "").strip() or None
-    folder = _find_or_create_folder(service, name=folder_name, parent_id=parent_id)
-    existing = _list_children(service, folder["id"])
+    local_directories = sorted(
+        (path for path in package_root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.relative_to(package_root).parts),
+    )
+    for directory in local_directories:
+        relative = PurePosixPath(directory.relative_to(package_root).as_posix())
+        remote_parent_id = remote_folders[relative.parent]
+        if remote_parent_id not in child_cache:
+            child_cache[remote_parent_id] = _list_children(service, remote_parent_id)
+        children = child_cache[remote_parent_id]
+        remote = _find_or_create_folder(
+            service,
+            parent_id=remote_parent_id,
+            name=relative.name,
+            children=children,
+        )
+        remote_folders[relative] = remote["id"]
+        child_cache[remote["id"]] = _list_children(service, remote["id"])
+
     uploaded = 0
     skipped = 0
-    for index, path in enumerate(upload_paths, start=1):
-        remote = existing.get(path.name)
+    for index, path in enumerate(local_files, start=1):
+        relative = PurePosixPath(path.relative_to(package_root).as_posix())
+        remote_parent_id = remote_folders[relative.parent]
+        children = child_cache[remote_parent_id]
+        remote = children.get(path.name)
         if remote is not None and remote.get("md5Checksum") == _md5(path):
             skipped += 1
         else:
-            remote = _upload(
+            remote = _upload_file(
                 service,
                 MediaFileUpload,
                 path=path,
-                folder_id=folder["id"],
+                folder_id=remote_parent_id,
                 existing=remote,
             )
-            existing[path.name] = remote
+            children[path.name] = remote
             uploaded += 1
-        if index == 1 or index % args.progress_every == 0 or index == len(upload_paths):
+        if index == 1 or index % args.progress_every == 0 or index == len(local_files):
             print(
-                f"[gdrive_export] files={index}/{len(upload_paths)} "
+                f"[gdrive_export] files={index}/{len(local_files)} "
                 f"uploaded={uploaded} skipped={skipped}",
                 file=sys.stderr,
                 flush=True,
             )
 
-    folder_url = f"https://drive.google.com/drive/folders/{folder['id']}"
+    folder_url = f"https://drive.google.com/drive/folders/{remote_root['id']}"
     print(
         json.dumps(
             {
                 "status": "completed",
-                "folder_id": folder["id"],
+                "folder_id": remote_root["id"],
                 "folder_url": folder_url,
+                "files": len(local_files),
                 "uploaded": uploaded,
                 "skipped": skipped,
             }
