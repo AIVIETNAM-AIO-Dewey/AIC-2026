@@ -71,10 +71,20 @@ def run_transnetv2_inference(
     if weights is not None:
         command.extend(["--weights", str(weights.resolve())])
 
-    result = subprocess.run(command, cwd=work_dir, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        stderr = result.stderr.strip()[:2000]
-        raise RuntimeError(f"TransNetV2 inference failed for {video_path}: {stderr}")
+    print("$ " + " ".join(command), file=sys.stderr, flush=True)
+    process = subprocess.Popen(
+        command,
+        cwd=work_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", file=sys.stderr, flush=True)
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"TransNetV2 inference failed for {video_path} with code {return_code}")
     scenes_path = Path(str(linked_video) + ".scenes.txt")
     if not scenes_path.is_file():
         raise FileNotFoundError(f"TransNetV2 did not create scenes file: {scenes_path}")

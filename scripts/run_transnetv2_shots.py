@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         search_root=_search_root(args, config, roots),
         video_path=args.video_path,
     )
+    print(f"[shot_detection] video_id={video_id}", file=sys.stderr, flush=True)
+    print(f"[shot_detection] video={inputs.video_path}", file=sys.stderr, flush=True)
     output = (
         args.output.expanduser().resolve()
         if args.output
@@ -122,6 +124,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.scenes_file is None:
                 if args.entrypoint is None:
                     raise ValueError("--entrypoint is required when --scenes-file is not provided")
+                print(
+                    f"[shot_detection] running TransNetV2 entrypoint={args.entrypoint}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if args.weights is not None:
+                    print(
+                        f"[shot_detection] weights={args.weights}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 scenes_path = run_transnetv2_inference(
                     video_path=inputs.video_path,
                     entrypoint=args.entrypoint,
@@ -130,8 +143,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 scenes_path = args.scenes_file.expanduser().resolve()
+                print(
+                    f"[shot_detection] reading scenes_file={scenes_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             fps = args.fps if args.fps is not None else probe_video(inputs.video_path).fps
+            print(f"[shot_detection] fps={fps:.6f}", file=sys.stderr, flush=True)
             scenes = parse_scenes_txt(scenes_path)
+            print(f"[shot_detection] parsed_scenes={len(scenes)}", file=sys.stderr, flush=True)
             records = build_shot_records(
                 video_id=video_id,
                 scenes=scenes,
@@ -139,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_video=inputs.video_path,
             )
             write_jsonl_atomic(output, records)
+            print(f"[shot_detection] wrote_records={output}", file=sys.stderr, flush=True)
         counters = {"shots": len(records)}
         if recovered_final:
             counters["recovered_final"] = 1
