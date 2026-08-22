@@ -13,3 +13,6 @@ adaptive_sampling:
   cadence_s: 1.5
   max_frames_per_shot: 10
   dedupe_tolerance_s: 0.5
+
+shot_detection:
+  backend: pytorch

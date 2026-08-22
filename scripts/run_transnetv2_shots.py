@@ -29,6 +29,7 @@ from aic2026.frame_extraction.transnetv2 import (  # noqa: E402
     build_shot_records,
     parse_scenes_txt,
     run_transnetv2_inference,
+    run_transnetv2_pytorch_inference,
 )
 
 
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scenes-file", type=Path)
     parser.add_argument("--entrypoint", type=Path)
     parser.add_argument("--weights", type=Path)
+    parser.add_argument("--backend", choices=("pytorch", "tensorflow"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--fps", type=float)
     return parser
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = read_config(args.config)
     seed = resolve_seed(args.seed, config)
+    backend = args.backend or str(config.get("shot_detection", {}).get("backend", "pytorch"))
     roots = runtime_roots(args, config, required=("output_root",))
     output_root = roots["output_root"]
     video_id = args.video_id or str(config.get("video_id", "L21_V001"))
@@ -90,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         "scenes_file": str(args.scenes_file) if args.scenes_file else None,
         "entrypoint": str(args.entrypoint) if args.entrypoint else None,
         "weights": str(args.weights) if args.weights else None,
+        "backend": backend,
         "output": str(output),
     }
     manifest = create_manifest(
@@ -125,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.entrypoint is None:
                     raise ValueError("--entrypoint is required when --scenes-file is not provided")
                 print(
-                    f"[shot_detection] running TransNetV2 entrypoint={args.entrypoint}",
+                    f"[shot_detection] running TransNetV2 backend={backend} entrypoint={args.entrypoint}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -135,12 +139,23 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                         flush=True,
                     )
-                scenes_path = run_transnetv2_inference(
-                    video_path=inputs.video_path,
-                    entrypoint=args.entrypoint,
-                    weights=args.weights,
-                    work_dir=output_root / "shot_detection" / "transnetv2_work" / video_id,
-                )
+                work_dir = output_root / "shot_detection" / "transnetv2_work" / video_id
+                if backend == "pytorch":
+                    if args.weights is None:
+                        raise ValueError("--weights is required for the PyTorch backend")
+                    scenes_path = run_transnetv2_pytorch_inference(
+                        video_path=inputs.video_path,
+                        model_module=args.entrypoint,
+                        weights=args.weights,
+                        work_dir=work_dir,
+                    )
+                else:
+                    scenes_path = run_transnetv2_inference(
+                        video_path=inputs.video_path,
+                        entrypoint=args.entrypoint,
+                        weights=args.weights,
+                        work_dir=work_dir,
+                    )
             else:
                 scenes_path = args.scenes_file.expanduser().resolve()
                 print(

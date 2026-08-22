@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -132,4 +133,131 @@ def run_transnetv2_inference(
     scenes_path = Path(str(linked_video) + ".scenes.txt")
     if not scenes_path.is_file():
         raise FileNotFoundError(f"TransNetV2 did not create scenes file: {scenes_path}")
+    return scenes_path
+
+
+def run_transnetv2_pytorch_inference(
+    *,
+    video_path: Path,
+    model_module: Path,
+    weights: Path,
+    work_dir: Path,
+    batch_size: int = 8,
+    threshold: float = 0.5,
+) -> Path:
+    """Run the official PyTorch architecture with an external `.pth` checkpoint."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if not 0 < threshold < 1:
+        raise ValueError("threshold must be between 0 and 1")
+    if not model_module.is_file():
+        raise FileNotFoundError(f"TransNetV2 PyTorch module does not exist: {model_module}")
+    if not weights.is_file():
+        raise FileNotFoundError(f"TransNetV2 PyTorch checkpoint does not exist: {weights}")
+
+    try:
+        import numpy as np
+        import torch
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "PyTorch TransNetV2 requires Kaggle's torch and numpy runtime."
+        ) from error
+
+    module_spec = importlib.util.spec_from_file_location("aic2026_transnetv2_pytorch", model_module)
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError(f"Could not load TransNetV2 PyTorch module: {model_module}")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    model_class = getattr(module, "TransNetV2", None)
+    if model_class is None:
+        raise ImportError(f"TransNetV2 class is missing from PyTorch module: {model_module}")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    decode_command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path.resolve()),
+        "-vf",
+        "scale=48:27",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "pipe:1",
+    ]
+    print("$ " + " ".join(decode_command), file=sys.stderr, flush=True)
+    try:
+        decoded = subprocess.run(decode_command, capture_output=True, check=False)
+    except FileNotFoundError as error:
+        raise FileNotFoundError("ffmpeg binary is required for PyTorch TransNetV2 inference.") from error
+    if decoded.returncode != 0:
+        stderr = decoded.stderr.decode("utf-8", errors="replace")[-4000:]
+        raise RuntimeError(f"ffmpeg decode failed for {video_path}:\n{stderr}")
+
+    frame_bytes = 27 * 48 * 3
+    if not decoded.stdout or len(decoded.stdout) % frame_bytes:
+        raise RuntimeError(
+            f"ffmpeg emitted invalid RGB thumbnail data for {video_path}: {len(decoded.stdout)} bytes"
+        )
+    frames = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape((-1, 27, 48, 3)).copy()
+    print(f"[transnetv2:pytorch] decoded_frames={len(frames)}", file=sys.stderr, flush=True)
+
+    remainder = len(frames) % 50
+    end_padding = 25 + 50 - (remainder if remainder else 50)
+    padded = np.concatenate(
+        [
+            np.repeat(frames[:1], 25, axis=0),
+            frames,
+            np.repeat(frames[-1:], end_padding, axis=0),
+        ],
+        axis=0,
+    )
+    starts = list(range(0, len(padded) - 99, 50))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[transnetv2:pytorch] device={device} windows={len(starts)}", file=sys.stderr, flush=True)
+    model = model_class()
+    try:
+        state_dict = torch.load(weights, map_location="cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch.load(weights, map_location="cpu")
+    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    model.load_state_dict(state_dict)
+    model.to(device).eval()
+
+    predictions: list[object] = []
+    with torch.no_grad():
+        for batch_number, offset in enumerate(range(0, len(starts), batch_size), start=1):
+            batch_starts = starts[offset : offset + batch_size]
+            inputs = np.stack([padded[start : start + 100] for start in batch_starts])
+            logits, _ = model(torch.from_numpy(inputs).to(device))
+            predictions.append(torch.sigmoid(logits[:, 25:75, 0]).cpu().numpy())
+            if batch_number == 1 or batch_number % 16 == 0 or offset + batch_size >= len(starts):
+                completed = min(offset + batch_size, len(starts))
+                print(
+                    f"[transnetv2:pytorch] inferred_windows={completed}/{len(starts)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    scores = np.concatenate(predictions, axis=0).reshape(-1)[: len(frames)]
+    boundaries = (scores > threshold).astype(np.uint8)
+    scenes: list[tuple[int, int]] = []
+    previous, start = 0, 0
+    for index, boundary in enumerate(boundaries):
+        if previous == 1 and boundary == 0:
+            start = index
+        if previous == 0 and boundary == 1 and index != 0:
+            scenes.append((start, index))
+        previous = int(boundary)
+    if previous == 0:
+        scenes.append((start, len(boundaries) - 1))
+    if not scenes:
+        scenes = [(0, len(frames) - 1)]
+
+    scenes_path = work_dir / f"{video_path.name}.scenes.txt"
+    np.savetxt(scenes_path, np.asarray(scenes, dtype=np.int32), fmt="%d")
+    print(f"[transnetv2:pytorch] scenes={len(scenes)} output={scenes_path}", file=sys.stderr, flush=True)
     return scenes_path
