@@ -9,11 +9,15 @@ import json
 import mimetypes
 import os
 import sys
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+MAX_ATTEMPTS = 3
+API_REQUEST_RETRIES = 3
+T = TypeVar("T")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,16 +76,60 @@ def _credential_scopes(config: dict[str, Any]) -> list[str] | None:
     raise ValueError("OAuth JSON scopes must be a string or list of strings")
 
 
+def _error_label(error: Exception) -> str:
+    status = getattr(getattr(error, "resp", None), "status", None)
+    suffix = f" status={status}" if status is not None else ""
+    return f"{type(error).__name__}{suffix}"
+
+
+def _with_retry(operation: str, callback: Callable[[], T]) -> T:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(
+            f"[gdrive_export] operation={operation} attempt={attempt}/{MAX_ATTEMPTS}",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            result = callback()
+        except Exception as error:
+            print(
+                f"[gdrive_export] operation={operation} result=failed "
+                f"error={_error_label(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if attempt == MAX_ATTEMPTS:
+                raise
+            delay_s = 2 ** (attempt - 1)
+            print(
+                f"[gdrive_export] operation={operation} retry_in_s={delay_s}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay_s)
+        else:
+            print(
+                f"[gdrive_export] operation={operation} result=success",
+                file=sys.stderr,
+                flush=True,
+            )
+            return result
+    raise RuntimeError(f"Retry loop ended unexpectedly: {operation}")
+
+
 def _escape_query(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _get_folder(service: Any, folder_id: str) -> dict[str, Any]:
-    folder = service.files().get(
-        fileId=folder_id,
-        fields="id,name,mimeType,capabilities(canAddChildren)",
-        supportsAllDrives=True,
-    ).execute(num_retries=3)
+    folder = _with_retry(
+        "parent_folder_access",
+        lambda: service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,capabilities(canAddChildren)",
+            supportsAllDrives=True,
+        ).execute(num_retries=0),
+    )
     if folder.get("mimeType") != FOLDER_MIME_TYPE:
         raise ValueError("AIC_GDRIVE_FOLDER_ID does not point to a Google Drive folder")
     if not (folder.get("capabilities") or {}).get("canAddChildren", False):
@@ -104,7 +152,7 @@ def _list_children(service: Any, folder_id: str) -> dict[str, dict[str, Any]]:
             spaces="drive",
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
-        ).execute(num_retries=3)
+        ).execute(num_retries=API_REQUEST_RETRIES)
         for item in response.get("files", []):
             if item["name"] in children:
                 raise ValueError(
@@ -127,13 +175,15 @@ def _find_or_create_folder(
     if existing is not None:
         if existing.get("mimeType") != FOLDER_MIME_TYPE:
             raise ValueError(f"Drive path component exists as a file: {name}")
+        print(f"[gdrive_export] folder=reused name={name}", file=sys.stderr, flush=True)
         return existing
     folder = service.files().create(
         body={"name": name, "mimeType": FOLDER_MIME_TYPE, "parents": [parent_id]},
         fields="id,name,mimeType,webViewLink",
         supportsAllDrives=True,
-    ).execute(num_retries=3)
+    ).execute(num_retries=API_REQUEST_RETRIES)
     children[name] = folder
+    print(f"[gdrive_export] folder=created name={name}", file=sys.stderr, flush=True)
     return folder
 
 
@@ -177,10 +227,10 @@ def _upload_file(
             supportsAllDrives=True,
         )
     if not media.resumable():
-        return request.execute(num_retries=3)
+        return request.execute(num_retries=API_REQUEST_RETRIES)
     response = None
     while response is None:
-        status, response = request.next_chunk(num_retries=3)
+        status, response = request.next_chunk(num_retries=API_REQUEST_RETRIES)
         if status is not None:
             print(
                 f"[gdrive_export] uploading {path.name}: {status.progress() * 100:.1f}%",
@@ -192,6 +242,7 @@ def _upload_file(
 
 def _build_service() -> tuple[Any, Any]:
     oauth = _oauth_config()
+    print("[gdrive_export] oauth_config=loaded", file=sys.stderr, flush=True)
     Request, Credentials, build, MediaFileUpload = _drive_dependencies()
     credentials = Credentials(
         token=None,
@@ -201,17 +252,31 @@ def _build_service() -> tuple[Any, Any]:
         client_secret=str(oauth["client_secret"]),
         scopes=_credential_scopes(oauth),
     )
-    credentials.refresh(Request())
-    return build("drive", "v3", credentials=credentials, cache_discovery=False), MediaFileUpload
+    _with_retry("oauth_refresh", lambda: credentials.refresh(Request()))
+    service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    print("[gdrive_export] drive_client=ready", file=sys.stderr, flush=True)
+    return service, MediaFileUpload
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.progress_every < 1:
         raise ValueError("--progress-every must be positive")
+    print(
+        f"[gdrive_export] api_request_retries={API_REQUEST_RETRIES}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print("[gdrive_export] phase=authentication", file=sys.stderr, flush=True)
     service, MediaFileUpload = _build_service()
     parent_id = _folder_id()
+    print("[gdrive_export] phase=parent_folder_preflight", file=sys.stderr, flush=True)
     parent = _get_folder(service, parent_id)
+    print(
+        f"[gdrive_export] parent_folder=ready name={parent['name']} writable=true",
+        file=sys.stderr,
+        flush=True,
+    )
     if args.preflight_only:
         print(json.dumps({"status": "ready", "folder_name": parent["name"]}))
         return 0
@@ -224,6 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     local_files = sorted(path for path in package_root.rglob("*") if path.is_file())
     if not local_files:
         raise ValueError(f"Package root has no files: {package_root}")
+    print(
+        f"[gdrive_export] phase=mirror package_root={package_root} files={len(local_files)}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     child_cache: dict[str, dict[str, dict[str, Any]]] = {}
     parent_children = _list_children(service, parent_id)

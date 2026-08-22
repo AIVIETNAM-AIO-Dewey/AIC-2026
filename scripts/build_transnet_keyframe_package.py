@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-manifest", type=Path)
     parser.add_argument("--package-root", type=Path)
+    parser.add_argument("--progress-every", type=int, default=25)
     return parser
 
 
@@ -71,6 +72,8 @@ def _validate_source_records(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.progress_every < 1:
+        raise ValueError("--progress-every must be positive")
     output_root = args.output_root.expanduser().resolve()
     source_manifest = (
         args.source_manifest.expanduser().resolve()
@@ -89,7 +92,11 @@ def main(argv: list[str] | None = None) -> int:
         FrameSampleRecord.model_validate(value)
         for value in iter_jsonl(source_manifest)
     ]
+    print(f"[keyframe_package] source_manifest={source_manifest}", file=sys.stderr, flush=True)
+    print(f"[keyframe_package] source_records={len(records)}", file=sys.stderr, flush=True)
+    print(f"[keyframe_package] package_root={package_root}", file=sys.stderr, flush=True)
     records = _validate_source_records(records, output_root=output_root)
+    print("[keyframe_package] source_validation=passed", file=sys.stderr, flush=True)
 
     batch = args.video_id.split("_", maxsplit=1)[0]
     frames_dir = package_root / f"Keyframes_{batch}" / "keyframes" / args.video_id
@@ -120,6 +127,16 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         package_records.append(FrameSampleRecord.model_validate(payload))
+        if (
+            keyframe_n == 1
+            or keyframe_n % args.progress_every == 0
+            or keyframe_n == len(records)
+        ):
+            print(
+                f"[keyframe_package] packaged={keyframe_n}/{len(records)}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
@@ -146,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     temporary_map.replace(map_path)
     write_jsonl_atomic(manifest_path, package_records)
 
+    print("[keyframe_package] package_validation=running", file=sys.stderr, flush=True)
     mapped = read_frame_map(map_path)
     expected_names = [f"{index:06d}.jpg" for index in range(1, len(records) + 1)]
     actual_names = sorted(path.name for path in frames_dir.glob("*.jpg"))
@@ -160,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             or abs(row.pts_time_s - record.pts_time_s) > 1e-5
         ):
             raise ValueError(f"Packaged map does not match frame record n={record.keyframe_n}")
+    print("[keyframe_package] package_validation=passed", file=sys.stderr, flush=True)
 
     print(
         json.dumps(
