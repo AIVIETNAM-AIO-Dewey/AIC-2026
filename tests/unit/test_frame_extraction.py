@@ -5,7 +5,9 @@ from pathlib import Path
 from aic2026.contracts import ShotRecord
 from aic2026.frame_extraction.discovery import find_support_file, find_video_file, locate_inputs
 from aic2026.frame_extraction.sampling import (
+    FrameSampleCandidate,
     adaptive_samples_from_shots,
+    dedupe_samples,
     fallback_samples,
     map_keyframe_samples,
     sample_indices_for_shot,
@@ -97,3 +99,35 @@ def test_adaptive_samples_from_shot_records() -> None:
     assert len(samples) == 1
     assert samples[0].shot_id == "L21_V001:s00001"
     assert samples[0].sampling_source == "transnetv2"
+
+
+def test_dedupe_preserves_organizer_priority_across_time_order() -> None:
+    adaptive = FrameSampleCandidate(
+        sample_n=1,
+        pts_time_s=10.0,
+        fps=30.0,
+        frame_idx=300,
+        sampling_source="transnetv2",
+    )
+    organizer = FrameSampleCandidate(
+        sample_n=1,
+        pts_time_s=10.3,
+        fps=30.0,
+        frame_idx=309,
+        sampling_source="map-keyframes",
+        keyframe_n=1,
+    )
+    next_organizer = FrameSampleCandidate(
+        sample_n=2,
+        pts_time_s=10.4,
+        fps=30.0,
+        frame_idx=312,
+        sampling_source="map-keyframes",
+        keyframe_n=2,
+    )
+
+    merged = dedupe_samples([adaptive, next_organizer, organizer], tolerance_s=0.5)
+
+    assert len(merged) == 2
+    assert all(sample.sampling_source == "map-keyframes" for sample in merged)
+    assert [sample.frame_idx for sample in merged] == [309, 312]

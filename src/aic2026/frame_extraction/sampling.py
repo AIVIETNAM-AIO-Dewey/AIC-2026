@@ -160,16 +160,21 @@ def dedupe_samples(
     ordered = sorted(
         samples,
         key=lambda sample: (
-            sample.pts_time_s,
             priority.get(sample.sampling_source, 99),
+            sample.pts_time_s,
             sample.frame_idx,
         ),
     )
     kept: list[FrameSampleCandidate] = []
     for sample in ordered:
-        if any(abs(sample.pts_time_s - previous.pts_time_s) <= tolerance_s for previous in kept):
+        sample_priority = priority.get(sample.sampling_source, 99)
+        if sample_priority > 0 and any(
+            abs(sample.pts_time_s - previous.pts_time_s) <= tolerance_s
+            for previous in kept
+        ):
             continue
         kept.append(sample)
+    chronological = sorted(kept, key=lambda sample: (sample.pts_time_s, sample.frame_idx))
     return [
         FrameSampleCandidate(
             sample_n=index,
@@ -182,5 +187,5 @@ def dedupe_samples(
             shot_start_idx=sample.shot_start_idx,
             shot_end_idx=sample.shot_end_idx,
         )
-        for index, sample in enumerate(kept, start=1)
+        for index, sample in enumerate(chronological, start=1)
     ]
