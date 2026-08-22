@@ -5,11 +5,13 @@ from .models import (
     CaptionResult,
     DetectorMetadata,
     FrameRef,
+    FrameSampleRecord,
     MaskRLE,
     ObjectFrameRecord,
     ObjectRegion,
     RunManifest,
     SegmentationResult,
+    ShotRecord,
 )
 from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperator
 
@@ -21,6 +23,7 @@ __all__ = [
     "CaptionResult",
     "DetectorMetadata",
     "FrameRef",
+    "FrameSampleRecord",
     "MaskRLE",
     "ObjectFrameRecord",
     "ObjectRegion",
@@ -28,6 +31,7 @@ __all__ = [
     "QuerySpec",
     "RunManifest",
     "SegmentationResult",
+    "ShotRecord",
     "TaskType",
     "TemporalOperator",
 ]

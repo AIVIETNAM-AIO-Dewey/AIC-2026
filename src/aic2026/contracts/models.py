@@ -56,6 +56,74 @@ class FrameRef(StrictModel):
         return self
 
 
+class FrameSampleRecord(StrictModel):
+    schema_version: Literal["aic26.frame_sample.v1"] = "aic26.frame_sample.v1"
+    video_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    frame_uid: str = Field(min_length=3)
+    sample_n: PositiveInt
+    keyframe_n: PositiveInt | None = None
+    frame_idx: int = Field(ge=0)
+    pts_time_s: float = Field(ge=0)
+    fps: PositiveFloat
+    frame_relpath: str = Field(min_length=1)
+    width: PositiveInt
+    height: PositiveInt
+    source_video: str = Field(min_length=1)
+    sampling_source: Literal[
+        "map-keyframes",
+        "fallback",
+        "organizer",
+        "transnetv2",
+        "interval",
+    ]
+    shot_id: str | None = None
+    shot_start_idx: int | None = Field(default=None, ge=0)
+    shot_end_idx: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_identity_and_paths(self) -> FrameSampleRecord:
+        expected = f"{self.video_id}:{self.frame_idx}"
+        if self.frame_uid != expected:
+            raise ValueError(f"frame_uid must equal {expected!r}")
+        normalized_path = self.frame_relpath.replace("\\", "/")
+        if (
+            normalized_path.startswith("/")
+            or re.match(r"^[A-Za-z]:/", normalized_path)
+            or ".." in PurePosixPath(normalized_path).parts
+        ):
+            raise ValueError(
+                "frame_relpath must be relative, never a machine-specific absolute path"
+            )
+        has_shot_bounds = self.shot_start_idx is not None or self.shot_end_idx is not None
+        if has_shot_bounds:
+            if self.shot_id is None or self.shot_start_idx is None or self.shot_end_idx is None:
+                raise ValueError("shot metadata requires shot_id, shot_start_idx, and shot_end_idx")
+            if self.shot_end_idx < self.shot_start_idx:
+                raise ValueError("shot_end_idx must be >= shot_start_idx")
+        return self
+
+
+class ShotRecord(StrictModel):
+    schema_version: Literal["aic26.shot.v1"] = "aic26.shot.v1"
+    video_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    shot_id: str = Field(min_length=1)
+    shot_start_idx: int = Field(ge=0)
+    shot_end_idx: int = Field(ge=0)
+    start_time_s: float = Field(ge=0)
+    end_time_s: float = Field(ge=0)
+    fps: PositiveFloat
+    source_video: str = Field(min_length=1)
+    source: Literal["transnetv2"] = "transnetv2"
+
+    @model_validator(mode="after")
+    def validate_shot_bounds(self) -> ShotRecord:
+        if self.shot_end_idx < self.shot_start_idx:
+            raise ValueError("shot_end_idx must be >= shot_start_idx")
+        if self.end_time_s < self.start_time_s:
+            raise ValueError("end_time_s must be >= start_time_s")
+        return self
+
+
 class DetectorMetadata(StrictModel):
     source: Literal["organizer_frcnn"] = "organizer_frcnn"
     class_name: str = Field(min_length=1)
@@ -200,7 +268,13 @@ class ModelRevision(StrictModel):
 class RunManifest(StrictModel):
     schema_version: Literal["aic26.run_manifest.v1"] = "aic26.run_manifest.v1"
     run_id: str = Field(min_length=1)
-    stage: Literal["frame_manifest", "sam_masks", "dam_descriptions"]
+    stage: Literal[
+        "frame_manifest",
+        "sam_masks",
+        "dam_descriptions",
+        "frame_extraction",
+        "shot_detection",
+    ]
     status: Literal["running", "completed", "failed"]
     git_sha: str | None = None
     git_dirty: bool | None = None
