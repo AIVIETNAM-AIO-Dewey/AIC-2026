@@ -42,13 +42,13 @@ def test_discovery_finds_kaggle_style_inputs(tmp_path: Path) -> None:
     assert located.media_info == media.resolve()
 
 
-def test_map_sampling_uses_canonical_rounded_frame_indices(tmp_path: Path) -> None:
+def test_map_sampling_preserves_organizer_frame_indices(tmp_path: Path) -> None:
     map_csv = tmp_path / "L21_V001.csv"
     map_csv.write_text(
         "n,pts_time,fps,frame_idx\n"
         "1,0.0,30.0,0\n"
-        "2,0.0333333,30.0,0\n"
-        "3,3.0,30.0,90\n",
+        "2,11.7333,30.0,351\n"
+        "3,12.0,30.0,360\n",
         encoding="utf-8",
     )
 
@@ -56,8 +56,8 @@ def test_map_sampling_uses_canonical_rounded_frame_indices(tmp_path: Path) -> No
 
     assert [(sample.keyframe_n, sample.frame_idx) for sample in samples] == [
         (1, 0),
-        (2, 1),
-        (3, 90),
+        (2, 351),
+        (3, 360),
     ]
     assert all(sample.sampling_source == "map-keyframes" for sample in samples)
 

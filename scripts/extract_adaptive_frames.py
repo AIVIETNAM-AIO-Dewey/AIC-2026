@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from aic2026.common.io import iter_jsonl, write_jsonl_atomic  # noqa: E402
 from aic2026.contracts import FrameSampleRecord  # noqa: E402
-from aic2026.frame_extraction.ffmpeg import extract_frame, probe_video  # noqa: E402
+from aic2026.frame_extraction.ffmpeg import extract_frames_by_index, probe_video  # noqa: E402
 from aic2026.frame_extraction.sampling import FrameSampleCandidate  # noqa: E402
 
 
@@ -71,12 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         output_root / "frame_extraction" / "adaptive_manifests" / f"{args.video_id}.jsonl"
     )
     records: list[FrameSampleRecord] = []
-    reused = 0
 
     print(f"[adaptive_extraction] video={video_path}", file=sys.stderr, flush=True)
     print(f"[adaptive_extraction] candidates={len(candidates)}", file=sys.stderr, flush=True)
     print(f"[adaptive_extraction] frames_dir={frames_dir}", file=sys.stderr, flush=True)
-    for sample_n, candidate in enumerate(candidates, start=1):
+    missing: list[tuple[int, Path]] = []
+    reused = 0
+    for candidate in candidates:
         expected_idx = round(candidate.pts_time_s * probe.fps)
         if candidate.frame_idx != expected_idx:
             raise ValueError(
@@ -86,17 +87,26 @@ def main(argv: list[str] | None = None) -> int:
         frame_path = frames_dir / f"{candidate.frame_idx:08d}.jpg"
         size = _valid_image(frame_path)
         if size is None:
-            extract_frame(
-                video_path=video_path,
-                pts_time_s=candidate.pts_time_s,
-                output_path=frame_path,
-                jpeg_quality=args.jpeg_quality,
-            )
-            size = _valid_image(frame_path)
-            if size is None:
-                raise ValueError(f"Extracted image is invalid: {frame_path}")
+            missing.append((candidate.frame_idx, frame_path))
         else:
             reused += 1
+
+    print(
+        f"[adaptive_extraction] exact_index_batch missing={len(missing)} reused={reused}",
+        file=sys.stderr,
+        flush=True,
+    )
+    extract_frames_by_index(
+        video_path=video_path,
+        outputs=missing,
+        jpeg_quality=args.jpeg_quality,
+    )
+
+    for sample_n, candidate in enumerate(candidates, start=1):
+        frame_path = frames_dir / f"{candidate.frame_idx:08d}.jpg"
+        size = _valid_image(frame_path)
+        if size is None:
+            raise ValueError(f"Extracted image is invalid: {frame_path}")
         width, height = size
         records.append(
             FrameSampleRecord(
@@ -111,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                 height=height,
                 source_video=str(video_path),
                 sampling_source="transnetv2",
+                extraction_method="frame-index-select",
                 shot_id=candidate.shot_id,
                 shot_start_idx=candidate.shot_start_idx,
                 shot_end_idx=candidate.shot_end_idx,

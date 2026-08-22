@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 from queue import Empty, Queue
 from pathlib import Path
 from threading import Thread
 
 from aic2026.contracts import ShotRecord
+
+
+@dataclass(frozen=True, slots=True)
+class TransNetV2InferenceResult:
+    scenes_path: Path
+    metrics_path: Path
 
 
 def parse_scenes_txt(path: Path) -> list[tuple[int, int]]:
@@ -144,7 +152,7 @@ def run_transnetv2_pytorch_inference(
     work_dir: Path,
     batch_size: int = 8,
     threshold: float = 0.5,
-) -> Path:
+) -> TransNetV2InferenceResult:
     """Run the official PyTorch architecture with an external `.pth` checkpoint."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -173,6 +181,8 @@ def run_transnetv2_pytorch_inference(
         raise ImportError(f"TransNetV2 class is missing from PyTorch module: {model_module}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    total_started_at = time.monotonic()
+    decode_started_at = time.monotonic()
     decode_command = [
         "ffmpeg",
         "-hide_banner",
@@ -248,6 +258,7 @@ def run_transnetv2_pytorch_inference(
             f"ffmpeg emitted invalid RGB thumbnail data for {video_path}: {len(decoded_bytes)} bytes"
         )
     frames = np.frombuffer(decoded_bytes, dtype=np.uint8).reshape((-1, 27, 48, 3)).copy()
+    decode_elapsed_s = time.monotonic() - decode_started_at
     print(f"[transnetv2:pytorch] decoded_frames={len(frames)}", file=sys.stderr, flush=True)
 
     remainder = len(frames) % 50
@@ -262,7 +273,14 @@ def run_transnetv2_pytorch_inference(
     )
     starts = list(range(0, len(padded) - 99, 50))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[transnetv2:pytorch] device={device} windows={len(starts)}", file=sys.stderr, flush=True)
+    device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "<all>")
+    print(
+        f"[transnetv2:pytorch] device={device} device_name={device_name} "
+        f"visible_devices={visible_devices} windows={len(starts)} batch_size={batch_size}",
+        file=sys.stderr,
+        flush=True,
+    )
     model = model_class()
     try:
         state_dict = torch.load(weights, map_location="cpu", weights_only=True)
@@ -274,6 +292,10 @@ def run_transnetv2_pytorch_inference(
     model.to(device).eval()
 
     predictions: list[object] = []
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
+    inference_started_at = time.monotonic()
     with torch.no_grad():
         for batch_number, offset in enumerate(range(0, len(starts), batch_size), start=1):
             batch_starts = starts[offset : offset + batch_size]
@@ -287,6 +309,15 @@ def run_transnetv2_pytorch_inference(
                     file=sys.stderr,
                     flush=True,
                 )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    inference_elapsed_s = time.monotonic() - inference_started_at
+    peak_allocated_bytes = (
+        int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+    )
+    peak_reserved_bytes = (
+        int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else 0
+    )
     scores = np.concatenate(predictions, axis=0).reshape(-1)[: len(frames)]
     boundaries = (scores > threshold).astype(np.uint8)
     scenes: list[tuple[int, int]] = []
@@ -304,5 +335,37 @@ def run_transnetv2_pytorch_inference(
 
     scenes_path = work_dir / f"{video_path.name}.scenes.txt"
     np.savetxt(scenes_path, np.asarray(scenes, dtype=np.int32), fmt="%d")
+    total_elapsed_s = time.monotonic() - total_started_at
+    metrics_path = work_dir / "transnetv2_metrics.json"
+    metrics = {
+        "video": str(video_path.resolve()),
+        "decoded_frames": len(frames),
+        "windows": len(starts),
+        "scenes": len(scenes),
+        "batch_size": batch_size,
+        "threshold": threshold,
+        "device": str(device),
+        "device_name": device_name,
+        "cuda_visible_devices": visible_devices,
+        "decode_elapsed_s": decode_elapsed_s,
+        "inference_elapsed_s": inference_elapsed_s,
+        "total_elapsed_s": total_elapsed_s,
+        "peak_allocated_bytes": peak_allocated_bytes,
+        "peak_reserved_bytes": peak_reserved_bytes,
+    }
+    metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[transnetv2:pytorch] timing decode_s={decode_elapsed_s:.3f} "
+        f"inference_s={inference_elapsed_s:.3f} total_s={total_elapsed_s:.3f}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"[transnetv2:pytorch] peak_allocated_mib={peak_allocated_bytes / 2**20:.1f} "
+        f"peak_reserved_mib={peak_reserved_bytes / 2**20:.1f}",
+        file=sys.stderr,
+        flush=True,
+    )
     print(f"[transnetv2:pytorch] scenes={len(scenes)} output={scenes_path}", file=sys.stderr, flush=True)
-    return scenes_path
+    print(f"[transnetv2:pytorch] metrics={metrics_path}", file=sys.stderr, flush=True)
+    return TransNetV2InferenceResult(scenes_path=scenes_path, metrics_path=metrics_path)

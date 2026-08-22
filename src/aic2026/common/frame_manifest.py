@@ -35,16 +35,13 @@ def read_frame_map(path: Path) -> list[FrameMapRow]:
             try:
                 pts_time_s = float(raw["pts_time"])
                 fps = float(raw["fps"])
-                raw_frame_idx = int(raw["frame_idx"])
-                # The true frame index in digital video is round(pts_time * fps).
-                # Resolve float floor truncation (e.g. 0.999 -> 0 instead of 1) to guarantee unique, strictly increasing frame indices.
-                exact_frame_idx = round(pts_time_s * fps)
-                resolved_frame_idx = exact_frame_idx if abs(exact_frame_idx - raw_frame_idx) <= 1 else raw_frame_idx
                 row = FrameMapRow(
                     keyframe_n=int(raw["n"]),
                     pts_time_s=pts_time_s,
                     fps=fps,
-                    frame_idx=resolved_frame_idx,
+                    # The organizer-provided integer is the submission contract.
+                    # Timestamp rounding is not allowed to rewrite it.
+                    frame_idx=int(raw["frame_idx"]),
                 )
             except (TypeError, ValueError) as error:
                 raise ValueError(f"Invalid numeric value at {path}:{line_number}") from error

@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--remote", default="gdrive")
     parser.add_argument("--root-folder-id", required=True)
-    parser.add_argument("--remote-root-name", default="transnetv2-only")
+    parser.add_argument("--remote-root-name", default="self-cut-btc-compatible")
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--preflight-only", action="store_true")
     return parser
@@ -169,41 +170,60 @@ def main(argv: list[str] | None = None) -> int:
         f"phase=copy result=attempting files={len(local_files)} "
         f"destination={_remote_folder(args)}"
     )
-    _run_streamed(
-        _rclone_command(
-            args,
-            "copy",
-            str(package_root),
-            _remote_folder(args),
+    with tempfile.TemporaryDirectory(prefix="aic2026-rclone-") as temporary_dir:
+        combined_report = Path(temporary_dir) / "combined.txt"
+        _run_streamed(
+            _rclone_command(
+                args,
+                "copy",
+                str(package_root),
+                _remote_folder(args),
+            )
+            + [
+                "--checksum",
+                "--check-first",
+                "--combined",
+                str(combined_report),
+                "--retries",
+                "3",
+                "--low-level-retries",
+                "10",
+                "--retries-sleep",
+                "2s",
+                "--transfers",
+                "4",
+                "--checkers",
+                "8",
+                "--stats",
+                "10s",
+                "--stats-one-line",
+                "--stats-one-line-date",
+                "--stats-log-level",
+                "NOTICE",
+                "-v",
+            ]
         )
-        + [
-            "--checksum",
-            "--check-first",
-            "--retries",
-            "3",
-            "--low-level-retries",
-            "10",
-            "--retries-sleep",
-            "2s",
-            "--transfers",
-            "4",
-            "--checkers",
-            "8",
-            "--stats",
-            "10s",
-            "--stats-one-line",
-            "--stats-one-line-date",
-            "--stats-log-level",
-            "NOTICE",
-            "-v",
-        ]
+        statuses = {"=": 0, "+": 0, "*": 0, "-": 0, "!": 0}
+        if combined_report.is_file():
+            for line in combined_report.read_text(encoding="utf-8").splitlines():
+                marker = line[:1]
+                if marker in statuses:
+                    statuses[marker] += 1
+    uploaded = statuses["+"] + statuses["*"]
+    skipped = statuses["="]
+    _log(
+        f"phase=copy result=success files={len(local_files)} "
+        f"uploaded={uploaded} skipped={skipped}"
     )
-    _log(f"phase=copy result=success files={len(local_files)}")
     print(
         json.dumps(
             {
                 "status": "completed",
                 "files": len(local_files),
+                "uploaded": uploaded,
+                "skipped": skipped,
+                "remote_only": statuses["-"],
+                "errors": statuses["!"],
                 "remote_path": _remote_folder(args),
                 **folder_report,
             }

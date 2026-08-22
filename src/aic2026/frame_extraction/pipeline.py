@@ -8,7 +8,7 @@ from PIL import Image
 
 from aic2026.contracts import FrameSampleRecord
 
-from .ffmpeg import extract_frame, probe_video
+from .ffmpeg import extract_frames_by_index, probe_video
 from .sampling import FrameSampleCandidate, fallback_samples, map_keyframe_samples
 
 
@@ -51,17 +51,20 @@ def extract_frame_samples(
         limit=limit,
         fallback_timestamps_s=fallback_timestamps_s,
     )
-    records: list[FrameSampleRecord] = []
     output_root = output_root.expanduser().resolve()
     frames_dir = frames_dir.expanduser().resolve()
+    frame_paths = {
+        sample.frame_idx: frames_dir / f"{sample.sample_n:03d}.jpg"
+        for sample in samples
+    }
+    extract_frames_by_index(
+        video_path=video_path,
+        outputs=[(sample.frame_idx, frame_paths[sample.frame_idx]) for sample in samples],
+        jpeg_quality=jpeg_quality,
+    )
+    records: list[FrameSampleRecord] = []
     for sample in samples:
-        frame_path = frames_dir / f"{sample.sample_n:03d}.jpg"
-        extract_frame(
-            video_path=video_path,
-            pts_time_s=sample.pts_time_s,
-            output_path=frame_path,
-            jpeg_quality=jpeg_quality,
-        )
+        frame_path = frame_paths[sample.frame_idx]
         with Image.open(frame_path) as image:
             width, height = image.size
             image.verify()
@@ -79,6 +82,7 @@ def extract_frame_samples(
                 height=height,
                 source_video=str(video_path),
                 sampling_source=sample.sampling_source,  # type: ignore[arg-type]
+                extraction_method="frame-index-select",
                 shot_id=sample.shot_id,
                 shot_start_idx=sample.shot_start_idx,
                 shot_end_idx=sample.shot_end_idx,

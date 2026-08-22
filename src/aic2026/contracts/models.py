@@ -76,6 +76,7 @@ class FrameSampleRecord(StrictModel):
         "transnetv2",
         "interval",
     ]
+    extraction_method: Literal["timestamp-seek", "frame-index-select"] = "timestamp-seek"
     shot_id: str | None = None
     shot_start_idx: int | None = Field(default=None, ge=0)
     shot_end_idx: int | None = Field(default=None, ge=0)

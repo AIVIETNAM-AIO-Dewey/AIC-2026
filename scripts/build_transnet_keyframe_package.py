@@ -54,11 +54,11 @@ def _validate_source_records(
             raise ValueError(
                 f"TransNet-only package cannot include source={record.sampling_source!r}"
             )
-        expected_idx = round(record.pts_time_s * record.fps)
-        if record.frame_idx != expected_idx:
+        expected_time = record.frame_idx / record.fps
+        if abs(record.pts_time_s - expected_time) > max(1e-6, 1 / record.fps):
             raise ValueError(
-                f"Non-canonical frame_idx for {record.frame_uid}: "
-                f"got {record.frame_idx}, expected {expected_idx}"
+                f"Timestamp is inconsistent with frame_idx for {record.frame_uid}: "
+                f"got {record.pts_time_s}, expected approximately {expected_time}"
             )
         image_path = output_root / record.frame_relpath
         if not image_path.is_file():
@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     package_root = (
         args.package_root.expanduser().resolve()
         if args.package_root
-        else output_root / "gdrive_export" / "transnetv2-only"
+        else output_root / "exports" / "self-cut-btc-compatible"
     )
     records = [
         FrameSampleRecord.model_validate(value)

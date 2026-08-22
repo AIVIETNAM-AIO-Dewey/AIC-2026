@@ -16,3 +16,4 @@ adaptive_sampling:
 
 shot_detection:
   backend: pytorch
+  batch_size: 16

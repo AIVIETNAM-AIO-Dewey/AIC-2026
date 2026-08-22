@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("pytorch", "tensorflow"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--fps", type=float)
+    parser.add_argument("--batch-size", type=int)
     return parser
 
 
@@ -63,6 +64,13 @@ def main(argv: list[str] | None = None) -> int:
     config = read_config(args.config)
     seed = resolve_seed(args.seed, config)
     backend = args.backend or str(config.get("shot_detection", {}).get("backend", "pytorch"))
+    batch_size = (
+        args.batch_size
+        if args.batch_size is not None
+        else int(config.get("shot_detection", {}).get("batch_size", 16))
+    )
+    if batch_size < 1:
+        raise ValueError("--batch-size must be positive")
     roots = runtime_roots(args, config, required=("output_root",))
     output_root = roots["output_root"]
     video_id = args.video_id or str(config.get("video_id", "L21_V001"))
@@ -101,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         "entrypoint": str(args.entrypoint) if args.entrypoint else None,
         "weights": str(args.weights) if args.weights else None,
         "backend": backend,
+        "batch_size": batch_size,
         "output": str(output),
     }
     print(
@@ -156,12 +165,15 @@ def main(argv: list[str] | None = None) -> int:
                 if backend == "pytorch":
                     if args.weights is None:
                         raise ValueError("--weights is required for the PyTorch backend")
-                    scenes_path = run_transnetv2_pytorch_inference(
+                    inference_result = run_transnetv2_pytorch_inference(
                         video_path=inputs.video_path,
                         model_module=args.entrypoint,
                         weights=args.weights,
                         work_dir=work_dir,
+                        batch_size=batch_size,
                     )
+                    scenes_path = inference_result.scenes_path
+                    metrics_path = inference_result.metrics_path
                 else:
                     scenes_path = run_transnetv2_inference(
                         video_path=inputs.video_path,
@@ -194,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         output_paths = [("shot_records", output)]
         if scenes_path is not None and Path(scenes_path).exists():
             output_paths.append(("scenes", Path(scenes_path)))
+        if "metrics_path" in locals() and metrics_path.exists():
+            output_paths.append(("metrics", metrics_path))
         manifest = complete_manifest(
             manifest,
             counters=counters,
@@ -205,7 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(error, KeyboardInterrupt | SystemExit):
             write_manifest(manifest_path, fail_manifest(manifest, error))
         raise
-    print(json.dumps({"status": "completed", **counters, "output": str(output)}))
+    report = {"status": "completed", **counters, "output": str(output)}
+    if "metrics_path" in locals() and metrics_path.exists():
+        report["metrics"] = str(metrics_path)
+    print(json.dumps(report))
     return 0
 
 
