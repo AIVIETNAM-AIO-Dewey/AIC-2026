@@ -178,6 +178,11 @@ def run_transnetv2_pytorch_inference(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-stats_period",
+        "10",
+        "-progress",
+        "pipe:2",
+        "-nostats",
         "-i",
         str(video_path.resolve()),
         "-vf",
@@ -190,19 +195,59 @@ def run_transnetv2_pytorch_inference(
     ]
     print("$ " + " ".join(decode_command), file=sys.stderr, flush=True)
     try:
-        decoded = subprocess.run(decode_command, capture_output=True, check=False)
+        process = subprocess.Popen(
+            decode_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
     except FileNotFoundError as error:
         raise FileNotFoundError("ffmpeg binary is required for PyTorch TransNetV2 inference.") from error
-    if decoded.returncode != 0:
-        stderr = decoded.stderr.decode("utf-8", errors="replace")[-4000:]
-        raise RuntimeError(f"ffmpeg decode failed for {video_path}:\n{stderr}")
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stderr_tail: deque[str] = deque(maxlen=80)
 
+    def forward_decode_progress() -> None:
+        progress: dict[str, str] = {}
+        for raw_line in process.stderr:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            stderr_tail.append(line)
+            key, separator, value = line.partition("=")
+            if separator:
+                progress[key] = value
+                if key == "progress":
+                    details = " ".join(
+                        f"{name}={progress[name]}"
+                        for name in ("frame", "fps", "out_time", "speed", "progress")
+                        if name in progress
+                    )
+                    print(f"[transnetv2:decode] {details}", file=sys.stderr, flush=True)
+                    progress.clear()
+            else:
+                print(f"[transnetv2:decode] {line}", file=sys.stderr, flush=True)
+
+    progress_thread = Thread(
+        target=forward_decode_progress,
+        name="transnetv2-decode-progress",
+        daemon=True,
+    )
+    progress_thread.start()
+    print(f"[transnetv2:decode] process_started pid={process.pid}", file=sys.stderr, flush=True)
+    decoded_bytes = bytearray()
+    while chunk := process.stdout.read(1024 * 1024):
+        decoded_bytes.extend(chunk)
+    return_code = process.wait()
+    progress_thread.join()
+    if return_code != 0:
+        stderr = "\n".join(stderr_tail) or "<no ffmpeg output captured>"
+        raise RuntimeError(f"ffmpeg decode failed for {video_path}:\n{stderr}")
     frame_bytes = 27 * 48 * 3
-    if not decoded.stdout or len(decoded.stdout) % frame_bytes:
+    if not decoded_bytes or len(decoded_bytes) % frame_bytes:
         raise RuntimeError(
-            f"ffmpeg emitted invalid RGB thumbnail data for {video_path}: {len(decoded.stdout)} bytes"
+            f"ffmpeg emitted invalid RGB thumbnail data for {video_path}: {len(decoded_bytes)} bytes"
         )
-    frames = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape((-1, 27, 48, 3)).copy()
+    frames = np.frombuffer(decoded_bytes, dtype=np.uint8).reshape((-1, 27, 48, 3)).copy()
     print(f"[transnetv2:pytorch] decoded_frames={len(frames)}", file=sys.stderr, flush=True)
 
     remainder = len(frames) % 50
