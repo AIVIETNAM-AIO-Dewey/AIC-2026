@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
