@@ -17,6 +17,13 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 MAX_ATTEMPTS = 3
 API_REQUEST_RETRIES = 3
+PERMANENT_OAUTH_ERRORS = {
+    "access_denied",
+    "deleted_client",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+}
 T = TypeVar("T")
 
 
@@ -98,10 +105,30 @@ def _credential_scopes(config: dict[str, Any]) -> list[str] | None:
 def _error_label(error: Exception) -> str:
     status = getattr(getattr(error, "resp", None), "status", None)
     suffix = f" status={status}" if status is not None else ""
-    return f"{type(error).__name__}{suffix}"
+    oauth_code = _oauth_error_code(error)
+    oauth_suffix = f" oauth_error={oauth_code}" if oauth_code else ""
+    return f"{type(error).__name__}{suffix}{oauth_suffix}"
 
 
-def _with_retry(operation: str, callback: Callable[[], T]) -> T:
+def _oauth_error_code(error: Exception) -> str | None:
+    for value in error.args:
+        if isinstance(value, dict):
+            code = value.get("error")
+            if isinstance(code, str) and code:
+                return code
+    return None
+
+
+def _is_retryable_oauth_error(error: Exception) -> bool:
+    return _oauth_error_code(error) not in PERMANENT_OAUTH_ERRORS
+
+
+def _with_retry(
+    operation: str,
+    callback: Callable[[], T],
+    *,
+    should_retry: Callable[[Exception], bool] | None = None,
+) -> T:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         print(
             f"[gdrive_export] operation={operation} attempt={attempt}/{MAX_ATTEMPTS}",
@@ -117,6 +144,14 @@ def _with_retry(operation: str, callback: Callable[[], T]) -> T:
                 file=sys.stderr,
                 flush=True,
             )
+            if should_retry is not None and not should_retry(error):
+                print(
+                    f"[gdrive_export] operation={operation} retry=disabled "
+                    "reason=permanent_error",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
             if attempt == MAX_ATTEMPTS:
                 raise
             delay_s = 2 ** (attempt - 1)
@@ -271,7 +306,28 @@ def _build_service() -> tuple[Any, Any]:
         client_secret=str(oauth["client_secret"]),
         scopes=_credential_scopes(oauth),
     )
-    _with_retry("oauth_refresh", lambda: credentials.refresh(Request()))
+    try:
+        _with_retry(
+            "oauth_refresh",
+            lambda: credentials.refresh(Request()),
+            should_retry=_is_retryable_oauth_error,
+        )
+    except Exception as error:
+        oauth_code = _oauth_error_code(error)
+        if oauth_code in {"invalid_client", "unauthorized_client"}:
+            raise RuntimeError(
+                "OAuth client was rejected. Generate the refresh_token in OAuth "
+                "Playground with 'Use your own OAuth credentials' enabled, then use "
+                "the exact same client_id and client_secret in "
+                "AIC_GDRIVE_OAUTH_JSON. Do not mix a Playground default token with "
+                "your own OAuth client."
+            ) from error
+        if oauth_code == "invalid_grant":
+            raise RuntimeError(
+                "OAuth refresh_token is expired, revoked, or belongs to another "
+                "OAuth client. Re-authorize with offline access and replace the token."
+            ) from error
+        raise
     service = build("drive", "v3", credentials=credentials, cache_discovery=False)
     print("[gdrive_export] drive_client=ready", file=sys.stderr, flush=True)
     return service, MediaFileUpload
