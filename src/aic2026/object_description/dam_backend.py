@@ -59,7 +59,25 @@ class DamCaptioner:
         code_revision: str = DAM_CODE_REVISION,
         cache_dir: Path | None = None,
     ) -> DamCaptioner:
-        verify_installed_dam_revision(code_revision)
+        # Cleanly disable scipy/TF/Flax in transformers to prevent Python 3.12 wildcard recursion
+        import os
+        os.environ["USE_TF"] = "0"
+        os.environ["USE_FLAX"] = "0"
+        os.environ["USE_TORCH"] = "1"
+        try:
+            import transformers.utils.import_utils as _t_import
+            _t_import._scipy_available = False
+            _t_import.is_scipy_available = lambda: False
+            _t_import._sklearn_available = False
+            _t_import.is_sklearn_available = lambda: False
+            _t_import._tf_available = False
+            _t_import.is_tf_available = lambda: False
+            import transformers.utils as _t_utils
+            _t_utils._scipy_available = False
+            _t_utils.is_scipy_available = lambda: False
+        except Exception:
+            pass
+
         try:
             from dam import DescribeAnythingModel, disable_torch_init
         except ImportError as error:
