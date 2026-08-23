@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 import re
 import shlex
 import subprocess
@@ -54,22 +55,37 @@ def _run(command: list[str], *, capture: bool = True) -> str:
 
 
 def _retry(label: str, attempts: int, callback: Callable[[], T]) -> T:
-    last_error: BaseException | None = None
+    last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         _log(f"operation={label} attempt={attempt}/{attempts} result=attempting")
         try:
             result = callback()
             _log(f"operation={label} attempt={attempt}/{attempts} result=success")
             return result
-        except BaseException as error:
+        except Exception as error:
             last_error = error
+            detail = str(error).lower()
+            retryable = not any(
+                marker in detail
+                for marker in (
+                    "unauthorized_client",
+                    "invalid_grant",
+                    "invalid credentials",
+                    "failed to decrypt configuration",
+                    "permission denied",
+                )
+            )
             _log(
                 f"operation={label} attempt={attempt}/{attempts} result=failed "
-                f"error={type(error).__name__} detail={str(error)[:500]!r}"
+                f"error={type(error).__name__} retryable={str(retryable).lower()} "
+                f"detail={str(error)[:500]!r}"
             )
+            if not retryable:
+                raise
             if attempt < attempts:
-                delay = min(30, 2 ** (attempt - 1))
-                _log(f"operation={label} retry_in_s={delay}")
+                nominal = min(240.0, 15.0 * (2 ** (attempt - 1)))
+                delay = random.SystemRandom().uniform(nominal * 0.75, nominal * 1.25)
+                _log(f"operation={label} retry_in_s={delay:.1f}")
                 time.sleep(delay)
     assert last_error is not None
     raise RuntimeError(f"{label} failed after {attempts} attempts") from last_error
@@ -89,6 +105,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--identity-file", type=Path)
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--attempts", type=int)
+    parser.add_argument("--tpslimit", type=float, default=1.0)
+    parser.add_argument("--tpslimit-burst", type=int, default=2)
+    parser.add_argument("--transfers", type=int, default=2)
+    parser.add_argument("--checkers", type=int, default=2)
     return parser
 
 
@@ -103,6 +123,10 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--remote-root-name must be one path component")
     if args.attempts is not None and args.attempts < 1:
         raise ValueError("--attempts must be positive")
+    if args.tpslimit <= 0 or args.tpslimit_burst < 1:
+        raise ValueError("rclone TPS limits must be positive")
+    if args.transfers < 1 or args.checkers < 1:
+        raise ValueError("rclone transfers/checkers must be positive")
 
 
 def _rclone(args: argparse.Namespace, command: str, *values: str) -> list[str]:
@@ -114,6 +138,10 @@ def _rclone(args: argparse.Namespace, command: str, *values: str) -> list[str]:
         str(args.config),
         "--drive-root-folder-id",
         args.root_folder_id,
+        "--tpslimit",
+        str(args.tpslimit),
+        "--tpslimit-burst",
+        str(args.tpslimit_burst),
     ]
 
 
@@ -385,6 +413,10 @@ def _publish(args: argparse.Namespace) -> dict[str, Any]:
             "--stats",
             "10s",
             "--stats-one-line",
+            "--transfers",
+            str(args.transfers),
+            "--checkers",
+            str(args.checkers),
             "-v",
         ]
         _run(

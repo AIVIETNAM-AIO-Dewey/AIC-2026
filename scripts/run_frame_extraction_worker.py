@@ -6,14 +6,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Full, Queue
 from typing import Any
+
+
+@dataclass(frozen=True)
+class UploadJob:
+    video_id: str
+    result: dict[str, Any]
 
 
 def _log(message: str) -> None:
@@ -41,6 +50,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--accept-new-work-seconds", type=float, default=40500.0)
     parser.add_argument("--upload-attempts", type=int, default=10)
     parser.add_argument("--scan-attempts", type=int, default=5)
+    parser.add_argument("--upload-queue-size", type=int, default=2)
+    parser.add_argument("--upload-jitter-max-seconds", type=float, default=60.0)
+    parser.add_argument("--rclone-tpslimit", type=float, default=1.0)
+    parser.add_argument("--rclone-tpslimit-burst", type=int, default=2)
+    parser.add_argument("--rclone-transfers", type=int, default=2)
+    parser.add_argument("--rclone-checkers", type=int, default=2)
     parser.add_argument("--keep-local", action="store_true")
     return parser
 
@@ -106,6 +121,14 @@ def _sync_base(args: argparse.Namespace) -> list[str]:
         args.remote_root_name,
         "--worker-id",
         args.worker_id,
+        "--tpslimit",
+        str(args.rclone_tpslimit),
+        "--tpslimit-burst",
+        str(args.rclone_tpslimit_burst),
+        "--transfers",
+        str(args.rclone_transfers),
+        "--checkers",
+        str(args.rclone_checkers),
     ]
 
 
@@ -244,7 +267,7 @@ def _run_pair(
     return reports, failures
 
 
-def _build_video(
+def _package_video(
     args: argparse.Namespace, video_id: str, video_path: Path
 ) -> dict[str, Any]:
     shots = args.output_root / "shot_detection" / f"{video_id}.jsonl"
@@ -294,12 +317,10 @@ def _build_video(
         _json_report(_run_streamed(command, prefix=f"[{video_id}:build] "))
         for command in commands
     ]
-    upload = _publish(args, video_id)
     return {
         "candidates": reports[0],
         "extraction": reports[1],
         "package": reports[2],
-        "upload": upload,
     }
 
 
@@ -346,6 +367,14 @@ def _copy_benchmark(args: argparse.Namespace, benchmark_path: Path) -> None:
         str(args.upload_attempts),
         "--low-level-retries",
         "10",
+        "--tpslimit",
+        str(args.rclone_tpslimit),
+        "--tpslimit-burst",
+        str(args.rclone_tpslimit_burst),
+        "--transfers",
+        str(args.rclone_transfers),
+        "--checkers",
+        str(args.rclone_checkers),
         "-v",
     ]
     _run_streamed(command, prefix="[benchmark:upload] ")
@@ -353,6 +382,10 @@ def _copy_benchmark(args: argparse.Namespace, benchmark_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.upload_queue_size < 1:
+        raise ValueError("--upload-queue-size must be positive")
+    if args.upload_jitter_max_seconds < 0:
+        raise ValueError("--upload-jitter-max-seconds cannot be negative")
     assignment = _load_json(args.assignment)
     video_ids = assignment.get("video_ids") if isinstance(assignment, dict) else None
     if not isinstance(video_ids, list) or not video_ids or len(video_ids) != len(set(video_ids)):
@@ -375,8 +408,17 @@ def main(argv: list[str] | None = None) -> int:
         "worker_id": args.worker_id,
         "assignment_count": len(video_ids),
         "batch_size": args.batch_size,
+        "upload_queue_size": args.upload_queue_size,
+        "upload_jitter_max_seconds": args.upload_jitter_max_seconds,
+        "rclone": {
+            "tpslimit": args.rclone_tpslimit,
+            "tpslimit_burst": args.rclone_tpslimit_burst,
+            "transfers": args.rclone_transfers,
+            "checkers": args.rclone_checkers,
+        },
         "started_at": datetime.now(timezone.utc).isoformat(),
         "initial_completed": initial["completed"],
+        "enqueued": [],
         "processed": {},
         "failures": {},
         "sampling_policy": {
@@ -388,8 +430,82 @@ def main(argv: list[str] | None = None) -> int:
     }
     _log(
         f"phase=queue assignment={len(video_ids)} completed={len(initial['completed'])} "
-        f"pending={len(pending)}"
+        f"pending={len(pending)} capacity={args.upload_queue_size} uploader_threads=1"
     )
+    summary_lock = threading.Lock()
+    upload_queue: Queue[UploadJob | None] = Queue(maxsize=args.upload_queue_size)
+
+    def persist_progress(*, upload_remote: bool) -> None:
+        with summary_lock:
+            summary["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+            payload = json.dumps(summary, indent=2) + "\n"
+            temporary = benchmark_path.with_suffix(benchmark_path.suffix + ".tmp")
+            temporary.write_text(payload, encoding="utf-8")
+            os.replace(temporary, benchmark_path)
+        if upload_remote:
+            try:
+                _copy_benchmark(args, benchmark_path)
+            except BaseException as error:
+                _log(
+                    f"phase=benchmark_upload result=failed error={type(error).__name__} "
+                    "will_retry_after_next_checkpoint=true"
+                )
+
+    def upload_loop() -> None:
+        _log("phase=uploader result=started threads=1")
+        while True:
+            job = upload_queue.get()
+            if job is None:
+                upload_queue.task_done()
+                _log("phase=uploader result=stopped")
+                return
+            video_id = job.video_id
+            try:
+                jitter = random.SystemRandom().uniform(
+                    0.0, args.upload_jitter_max_seconds
+                )
+                _log(
+                    f"phase=upload_jitter video_id={video_id} delay_s={jitter:.1f} "
+                    f"queue_remaining={upload_queue.qsize()}"
+                )
+                if jitter:
+                    time.sleep(jitter)
+                _log(f"phase=upload video_id={video_id} result=starting")
+                job.result["upload"] = _publish(args, video_id)
+                with summary_lock:
+                    summary["processed"][video_id] = job.result
+                _log(f"phase=checkpoint video_id={video_id} result=completed")
+                try:
+                    _cleanup(args, video_id)
+                except BaseException as error:
+                    _log(
+                        f"phase=cleanup video_id={video_id} result=warning "
+                        f"error={type(error).__name__}"
+                    )
+            except BaseException as error:
+                with summary_lock:
+                    summary["failures"][video_id] = f"{type(error).__name__}: {error}"
+                _log(
+                    f"phase=checkpoint video_id={video_id} result=failed "
+                    f"error={type(error).__name__}"
+                )
+            finally:
+                try:
+                    persist_progress(upload_remote=True)
+                except BaseException as error:
+                    _log(
+                        f"phase=benchmark_checkpoint result=warning "
+                        f"error={type(error).__name__}"
+                    )
+                finally:
+                    upload_queue.task_done()
+
+    uploader = threading.Thread(
+        target=upload_loop,
+        name=f"{args.worker_id}-drive-uploader",
+        daemon=True,
+    )
+    uploader.start()
     index = 0
     while index < len(pending):
         elapsed = time.time() - args.session_start_epoch
@@ -403,12 +519,13 @@ def main(argv: list[str] | None = None) -> int:
         index += len(pair)
         _log(f"phase=gpu_pair result=accepted videos={','.join(pair)} elapsed_s={elapsed:.1f}")
         shot_reports, shot_failures = _run_pair(args, pair, video_paths)
-        summary["failures"].update(shot_failures)
+        with summary_lock:
+            summary["failures"].update(shot_failures)
         for video_id in pair:
             if video_id not in shot_reports:
                 continue
             try:
-                result = _build_video(args, video_id, video_paths[video_id])
+                result = _package_video(args, video_id, video_paths[video_id])
                 metrics_path = (
                     args.output_root
                     / "shot_detection"
@@ -419,36 +536,60 @@ def main(argv: list[str] | None = None) -> int:
                 result["shot_detection"] = shot_reports[video_id]
                 if metrics_path.is_file():
                     result["metrics"] = _load_json(metrics_path)
-                summary["processed"][video_id] = result
-                _log(f"phase=checkpoint video_id={video_id} result=completed")
-                _cleanup(args, video_id)
+                while True:
+                    try:
+                        upload_queue.put(UploadJob(video_id, result), timeout=10)
+                        with summary_lock:
+                            summary["enqueued"].append(video_id)
+                        _log(
+                            f"phase=queue_enqueue video_id={video_id} result=success "
+                            f"depth={upload_queue.qsize()}/{args.upload_queue_size}"
+                        )
+                        break
+                    except Full:
+                        _log(
+                            f"phase=queue_backpressure video_id={video_id} result=waiting "
+                            f"depth={upload_queue.qsize()}/{args.upload_queue_size}"
+                        )
             except BaseException as error:
-                summary["failures"][video_id] = f"{type(error).__name__}: {error}"
+                with summary_lock:
+                    summary["failures"][video_id] = f"{type(error).__name__}: {error}"
                 _log(
-                    f"phase=checkpoint video_id={video_id} result=failed "
+                    f"phase=package video_id={video_id} result=failed "
                     f"error={type(error).__name__}"
                 )
-        summary["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-        benchmark_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        _copy_benchmark(args, benchmark_path)
+        persist_progress(upload_remote=False)
+
+    _log(
+        f"phase=queue_drain result=waiting depth={upload_queue.qsize()} "
+        f"unfinished={upload_queue.unfinished_tasks}"
+    )
+    upload_queue.join()
+    upload_queue.put(None)
+    uploader.join()
+    _log("phase=queue_drain result=completed")
 
     final = _scan(args, video_ids)
-    summary.update(
-        {
-            "status": (
-                "completed"
-                if not final["pending"]
-                else "completed_with_failures"
-                if summary["failures"]
-                else "checkpointed"
-            ),
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "session_elapsed_s": time.time() - args.session_start_epoch,
-            "remote_completed": final["completed"],
-            "remaining": final["pending"],
-        }
-    )
-    benchmark_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    with summary_lock:
+        summary.update(
+            {
+                "status": (
+                    "completed"
+                    if not final["pending"]
+                    else "completed_with_failures"
+                    if summary["failures"]
+                    else "checkpointed"
+                ),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "session_elapsed_s": time.time() - args.session_start_epoch,
+                "remote_completed": final["completed"],
+                "remaining": final["pending"],
+            }
+        )
+        final_payload = json.dumps(summary, indent=2) + "\n"
+    temporary = benchmark_path.with_suffix(benchmark_path.suffix + ".tmp")
+    temporary.write_text(final_payload, encoding="utf-8")
+    os.replace(temporary, benchmark_path)
     _copy_benchmark(args, benchmark_path)
     print(json.dumps(summary, sort_keys=True), flush=True)
     return 1 if summary["failures"] else 0
