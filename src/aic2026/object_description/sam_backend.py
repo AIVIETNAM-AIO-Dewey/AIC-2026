@@ -55,22 +55,32 @@ class SamMaskGenerator:
         cache_dir: Path | None = None,
         device: str = "cuda",
     ) -> SamMaskGenerator:
-        # Prevent transformers from importing broken scipy/sklearn array_api_compat on Python 3.12
+        # Cleanly disable sklearn check in transformers to avoid broken scipy recursion on Python 3.12
         import sys
-        sys.modules.setdefault("sklearn", None)
-        sys.modules.setdefault("sklearn.metrics", None)
+        if sys.modules.get("sklearn") is None:
+            sys.modules.pop("sklearn", None)
+        if sys.modules.get("sklearn.metrics") is None:
+            sys.modules.pop("sklearn.metrics", None)
 
         try:
+            import transformers.utils.import_utils as _t_import
+            _t_import.is_sklearn_available = lambda: False
+            import transformers.utils as _t_utils
+            _t_utils.is_sklearn_available = lambda: False
+        except Exception:
+            pass
+
+        try:
+            from transformers.models.sam.modeling_sam import SamModel as MaskModelClass
+            from transformers.models.sam.processing_sam import SamProcessor as MaskProcessorClass
+        except (ImportError, AttributeError):
             try:
-                from transformers.models.sam import SamModel as MaskModelClass
-                from transformers.models.sam import SamProcessor as MaskProcessorClass
-            except (ImportError, AttributeError):
                 from transformers import AutoModelForMaskGeneration as MaskModelClass
                 from transformers import AutoProcessor as MaskProcessorClass
-        except ImportError as error:
-            raise RuntimeError(
-                "transformers with SAM support is required; install requirements/runtime.txt"
-            ) from error
+            except ImportError as error:
+                raise RuntimeError(
+                    "transformers with SAM support is required; install requirements/runtime.txt"
+                ) from error
         local_files_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
         processor = MaskProcessorClass.from_pretrained(
             model_id,
