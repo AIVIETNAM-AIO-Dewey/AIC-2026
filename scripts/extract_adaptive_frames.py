@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[adaptive_extraction] frames_dir={frames_dir}", file=sys.stderr, flush=True)
     missing: list[tuple[int, Path]] = []
     reused = 0
-    for candidate in candidates:
+    for sample_n, candidate in enumerate(candidates, start=1):
         expected_idx = round(candidate.pts_time_s * probe.fps)
         if candidate.frame_idx != expected_idx:
             raise ValueError(
