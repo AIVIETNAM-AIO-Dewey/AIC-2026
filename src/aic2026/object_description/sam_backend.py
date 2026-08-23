@@ -40,9 +40,14 @@ class BboxMaskGenerator:
         ]
 
 
+SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+SAM_CHECKPOINT_FILENAME = "sam_vit_b_01ec64.pth"
+
+
 class SamMaskGenerator:
-    def __init__(self, processor: Any, model: Any, device: str) -> None:
-        self.processor = processor
+    def __init__(self, backend_type: str, predictor_or_processor: Any, model: Any = None, device: str = "cuda") -> None:
+        self.backend_type = backend_type
+        self.predictor = predictor_or_processor  # For segment_anything: SamPredictor; for HF: processor
         self.model = model
         self.device = device
 
@@ -55,9 +60,27 @@ class SamMaskGenerator:
         cache_dir: Path | None = None,
         device: str = "cuda",
     ) -> SamMaskGenerator:
-        # Ensure transformers strictly uses pure PyTorch and does not probe broken TF/sklearn/scipy on Kaggle
+        # 1. Try Meta's official segment_anything library (Fastest, zero transformers/TF recursion)
+        try:
+            from segment_anything import sam_model_registry, SamPredictor
+            target_dir = Path(cache_dir or "/kaggle/working/aic2026-model-cache/sam")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_file = target_dir / SAM_CHECKPOINT_FILENAME
+            if not checkpoint_file.exists() or checkpoint_file.stat().st_size < 100_000_000:
+                print(f"📥 Downloading Meta SAM ViT-B checkpoint to {checkpoint_file} ...")
+                import urllib.request
+                urllib.request.urlretrieve(SAM_CHECKPOINT_URL, checkpoint_file)
+                print("✓ SAM checkpoint downloaded successfully!")
+            
+            sam = sam_model_registry["vit_b"](checkpoint=str(checkpoint_file)).to(device)
+            sam.eval()
+            predictor = SamPredictor(sam)
+            return cls(backend_type="meta", predictor_or_processor=predictor, device=device)
+        except ImportError:
+            pass
+
+        # 2. Fallback to Hugging Face transformers
         import os
-        import sys
         os.environ["USE_TF"] = "0"
         os.environ["USE_FLAX"] = "0"
         os.environ["USE_TORCH"] = "1"
@@ -84,7 +107,7 @@ class SamMaskGenerator:
                 from transformers import AutoProcessor as MaskProcessorClass
             except ImportError as error:
                 raise RuntimeError(
-                    "transformers with SAM support is required; install requirements/runtime.txt"
+                    "segment_anything or transformers is required; run: pip install git+https://github.com/facebookresearch/segment-anything.git"
                 ) from error
         local_files_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
         processor = MaskProcessorClass.from_pretrained(
@@ -102,21 +125,45 @@ class SamMaskGenerator:
             local_files_only=local_files_only,
         ).to(device)
         model.eval()
-        return cls(processor=processor, model=model, device=device)
+        return cls(backend_type="hf", predictor_or_processor=processor, model=model, device=device)
 
     def generate(
         self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]
     ) -> list[MaskPrediction]:
         if not boxes_xyxy:
             return []
+        
+        width, height = image.size
+        
+        # Branch A: Meta official segment_anything (Fast & Direct)
+        if self.backend_type == "meta":
+            rgb_np = np.array(image.convert("RGB"))
+            self.predictor.set_image(rgb_np)
+            predictions: list[MaskPrediction] = []
+            for box in boxes_xyxy:
+                fallback = rectangle_mask(height, width, box)
+                try:
+                    masks, scores, _ = self.predictor.predict(
+                        box=np.array(box),
+                        multimask_output=False,
+                    )
+                    mask = np.asarray(masks[0], dtype=bool)
+                    score = float(scores[0])
+                    if mask.shape != (height, width) or not mask.any() or not math.isfinite(score):
+                        raise ValueError("Invalid mask")
+                    predictions.append(MaskPrediction(mask=mask, source="sam", iou_score=score))
+                except Exception:
+                    predictions.append(MaskPrediction(mask=fallback, source="bbox_fallback", iou_score=None))
+            return predictions
+
+        # Branch B: Hugging Face transformers
         try:
             import torch
         except ImportError as error:
             raise RuntimeError("PyTorch is required to run SAM") from error
 
         rgb = image.convert("RGB")
-        width, height = rgb.size
-        inputs = self.processor(
+        inputs = self.predictor(
             images=rgb,
             input_boxes=[[list(box) for box in boxes_xyxy]],
             return_tensors="pt",
@@ -124,7 +171,7 @@ class SamMaskGenerator:
         inputs = {name: value.to(self.device) for name, value in inputs.items()}
         with torch.inference_mode():
             outputs = self.model(**inputs)
-        masks_by_image = self.processor.image_processor.post_process_masks(
+        masks_by_image = self.predictor.image_processor.post_process_masks(
             outputs.pred_masks.detach().cpu(),
             inputs["original_sizes"].detach().cpu(),
             inputs["reshaped_input_sizes"].detach().cpu(),
