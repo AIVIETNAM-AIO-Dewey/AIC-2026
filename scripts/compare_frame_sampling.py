@@ -128,10 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     adaptive_times = [sample.pts_time_s for sample in adaptive]
     adaptive_matches = [_nearest(sample, organizer, organizer_times)[1] for sample in adaptive]
     organizer_matches = [_nearest(sample, adaptive, adaptive_times)[1] for sample in organizer]
-    short_shots = sum(
-        ((shot.shot_end_idx - shot.shot_start_idx + 1) / shot.fps) <= 3.0
+    shot_durations = [
+        (shot.shot_end_idx - shot.shot_start_idx + 1) / shot.fps
         for shot in shots
-    )
+    ]
+    shot_duration_groups = {
+        "single_frame_lt_2s": sum(duration < 2.0 for duration in shot_durations),
+        "two_frames_2s_to_lt_4s": sum(2.0 <= duration < 4.0 for duration in shot_durations),
+        "cadence_4s_to_lt_7s": sum(4.0 <= duration < 7.0 for duration in shot_durations),
+        "cadence_capped_ge_7s": sum(duration >= 7.0 for duration in shot_durations),
+    }
 
     output_dir = (
         args.output_root.expanduser().resolve()
@@ -205,8 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         "video_id": args.video_id,
         "fps": shots[0].fps,
         "shots": len(shots),
-        "short_shots_le_3s": short_shots,
-        "long_shots_gt_3s": len(shots) - short_shots,
+        "shot_duration_groups": shot_duration_groups,
+        "sampling_policy": {
+            "single_frame": "duration < 2s: midpoint",
+            "two_frames": "2s <= duration < 4s: quarter and three-quarter positions",
+            "cadence": "duration >= 4s: centers of 1.5s intervals",
+            "extreme_cap": "duration >= 7s: at most 10 evenly spaced candidates",
+        },
         "organizer_frames": len(organizer),
         "adaptive_candidates_before_dedupe": len(adaptive),
         "adaptive_candidates_overlapping_organizer": sum(

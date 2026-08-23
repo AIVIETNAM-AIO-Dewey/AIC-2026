@@ -9,7 +9,9 @@ jpeg_quality: 2
 fallback_timestamps_s: [0, 1, 2, 3, 4]
 
 adaptive_sampling:
-  short_shot_max_s: 3.0
+  single_frame_before_s: 2.0
+  cadence_from_s: 4.0
+  extreme_shot_from_s: 7.0
   cadence_s: 1.5
   max_frames_per_shot: 10
   dedupe_tolerance_s: 0.5

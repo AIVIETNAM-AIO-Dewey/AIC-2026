@@ -81,7 +81,9 @@ def sample_indices_for_shot(
     shot_start_idx: int,
     shot_end_idx: int,
     fps: float,
-    short_shot_max_s: float = 3.0,
+    single_frame_before_s: float = 2.0,
+    cadence_from_s: float = 4.0,
+    extreme_shot_from_s: float = 7.0,
     cadence_s: float = 1.5,
     max_frames_per_shot: int = 10,
 ) -> list[int]:
@@ -89,12 +91,30 @@ def sample_indices_for_shot(
         raise ValueError("shot_end_idx must be >= shot_start_idx")
     if fps <= 0 or not math.isfinite(fps):
         raise ValueError("fps must be positive and finite")
+    if not 0 < single_frame_before_s <= cadence_from_s <= extreme_shot_from_s:
+        raise ValueError(
+            "sampling thresholds must satisfy "
+            "0 < single_frame_before_s <= cadence_from_s <= extreme_shot_from_s"
+        )
     if cadence_s <= 0 or max_frames_per_shot < 1:
         raise ValueError("cadence_s and max_frames_per_shot must be positive")
 
-    duration_s = (shot_end_idx - shot_start_idx + 1) / fps
-    if duration_s <= short_shot_max_s:
+    frame_count = shot_end_idx - shot_start_idx + 1
+    duration_s = frame_count / fps
+    if duration_s < single_frame_before_s:
         return [round((shot_start_idx + shot_end_idx) / 2)]
+
+    if duration_s < cadence_from_s:
+        # Midpoints of the first and second halves of the shot.
+        return sorted(
+            {
+                min(
+                    shot_end_idx,
+                    shot_start_idx + round(frame_count * fraction),
+                )
+                for fraction in (0.25, 0.75)
+            }
+        )
 
     offsets: list[float] = []
     current = cadence_s / 2
@@ -110,13 +130,18 @@ def sample_indices_for_shot(
             for offset in offsets
         }
     )
-    return _evenly_pick(indices, max_frames_per_shot)
+    if duration_s >= extreme_shot_from_s:
+        return _evenly_pick(indices, max_frames_per_shot)
+    return indices
 
 
 def adaptive_samples_from_shots(
     shots: list[ShotRecord],
     *,
     sampling_source: str = "transnetv2",
+    single_frame_before_s: float = 2.0,
+    cadence_from_s: float = 4.0,
+    extreme_shot_from_s: float = 7.0,
     cadence_s: float = 1.5,
     max_frames_per_shot: int = 10,
 ) -> list[FrameSampleCandidate]:
@@ -126,6 +151,9 @@ def adaptive_samples_from_shots(
             shot_start_idx=shot.shot_start_idx,
             shot_end_idx=shot.shot_end_idx,
             fps=shot.fps,
+            single_frame_before_s=single_frame_before_s,
+            cadence_from_s=cadence_from_s,
+            extreme_shot_from_s=extreme_shot_from_s,
             cadence_s=cadence_s,
             max_frames_per_shot=max_frames_per_shot,
         )

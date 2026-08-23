@@ -70,8 +70,11 @@ def test_fallback_sampling_builds_smoke_timestamps() -> None:
     assert all(sample.sampling_source == "fallback" for sample in samples)
 
 
-def test_adaptive_sampling_short_long_and_cap_rules() -> None:
-    assert sample_indices_for_shot(shot_start_idx=0, shot_end_idx=74, fps=25.0) == [37]
+def test_adaptive_sampling_duration_bands_and_cap_rules() -> None:
+    assert sample_indices_for_shot(shot_start_idx=0, shot_end_idx=48, fps=25.0) == [24]
+    assert sample_indices_for_shot(shot_start_idx=0, shot_end_idx=49, fps=25.0) == [12, 38]
+    assert sample_indices_for_shot(shot_start_idx=0, shot_end_idx=74, fps=25.0) == [19, 56]
+    assert sample_indices_for_shot(shot_start_idx=0, shot_end_idx=99, fps=25.0) == [19, 56, 94]
 
     long_indices = sample_indices_for_shot(shot_start_idx=0, shot_end_idx=249, fps=25.0)
     assert long_indices == [19, 56, 94, 131, 169, 206, 244]
@@ -87,9 +90,9 @@ def test_adaptive_samples_from_shot_records() -> None:
         video_id="L21_V001",
         shot_id="L21_V001:s00001",
         shot_start_idx=0,
-        shot_end_idx=74,
+        shot_end_idx=48,
         start_time_s=0.0,
-        end_time_s=2.96,
+        end_time_s=1.92,
         fps=25.0,
         source_video="/kaggle/input/video.mp4",
     )
