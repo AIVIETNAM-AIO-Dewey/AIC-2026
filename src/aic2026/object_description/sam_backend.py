@@ -87,6 +87,8 @@ class SamMaskGenerator:
 
         try:
             import transformers.utils.import_utils as _t_import
+            _t_import._scipy_available = False
+            _t_import.is_scipy_available = lambda: False
             _t_import._tf_available = False
             _t_import.is_tf_available = lambda: False
             _t_import._flax_available = False
