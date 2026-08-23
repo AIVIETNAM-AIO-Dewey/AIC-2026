@@ -55,18 +55,23 @@ class SamMaskGenerator:
         cache_dir: Path | None = None,
         device: str = "cuda",
     ) -> SamMaskGenerator:
-        # Cleanly disable sklearn check in transformers to avoid broken scipy recursion on Python 3.12
+        # Ensure transformers strictly uses pure PyTorch and does not probe broken TF/sklearn/scipy on Kaggle
+        import os
         import sys
-        if sys.modules.get("sklearn") is None:
-            sys.modules.pop("sklearn", None)
-        if sys.modules.get("sklearn.metrics") is None:
-            sys.modules.pop("sklearn.metrics", None)
+        os.environ["USE_TF"] = "0"
+        os.environ["USE_FLAX"] = "0"
+        os.environ["USE_TORCH"] = "1"
 
         try:
             import transformers.utils.import_utils as _t_import
+            _t_import._tf_available = False
+            _t_import.is_tf_available = lambda: False
+            _t_import._flax_available = False
+            _t_import.is_flax_available = lambda: False
+            _t_import._sklearn_available = False
             _t_import.is_sklearn_available = lambda: False
-            import transformers.utils as _t_utils
-            _t_utils.is_sklearn_available = lambda: False
+            _t_import._torchvision_available = False
+            _t_import.is_torchvision_available = lambda: False
         except Exception:
             pass
 
