@@ -55,21 +55,31 @@ class SamMaskGenerator:
         cache_dir: Path | None = None,
         device: str = "cuda",
     ) -> SamMaskGenerator:
+        # Prevent transformers from importing broken scipy/sklearn array_api_compat on Python 3.12
+        import sys
+        sys.modules.setdefault("sklearn", None)
+        sys.modules.setdefault("sklearn.metrics", None)
+
         try:
-            from transformers import AutoModelForMaskGeneration, AutoProcessor
+            try:
+                from transformers.models.sam import SamModel as MaskModelClass
+                from transformers.models.sam import SamProcessor as MaskProcessorClass
+            except (ImportError, AttributeError):
+                from transformers import AutoModelForMaskGeneration as MaskModelClass
+                from transformers import AutoProcessor as MaskProcessorClass
         except ImportError as error:
             raise RuntimeError(
                 "transformers with SAM support is required; install requirements/runtime.txt"
             ) from error
         local_files_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
-        processor = AutoProcessor.from_pretrained(
+        processor = MaskProcessorClass.from_pretrained(
             model_id,
             revision=revision,
             cache_dir=str(cache_dir) if cache_dir else None,
             trust_remote_code=False,
             local_files_only=local_files_only,
         )
-        model = AutoModelForMaskGeneration.from_pretrained(
+        model = MaskModelClass.from_pretrained(
             model_id,
             revision=revision,
             cache_dir=str(cache_dir) if cache_dir else None,
