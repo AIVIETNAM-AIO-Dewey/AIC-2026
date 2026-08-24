@@ -6,6 +6,7 @@ from aic2026.object_description import DAM_PROMPT, normalize_caption
 
 
 def test_prompt_contains_required_image_token_and_word_constraint() -> None:
+    assert DAM_PROMPT.startswith("<image>")
     assert "at most 50 words" in DAM_PROMPT
     assert "Describe only the masked region" in DAM_PROMPT
 
