@@ -265,29 +265,52 @@ class UnifiedVideoPipeline:
                         raw_dets = load_organizer_detections(det_json)
                         matched_dets = filter_detections(raw_dets, filter_cfg)
 
-                for r_idx, det in enumerate(matched_dets, start=1):
-                    # SAM segmentation
-                    boxes = [list(det.bbox_xyxy_px)]
-                    mask_preds = self.sam_generator.generate_masks(image_rgb, boxes)
-                    if not mask_preds:
-                        continue
-                    pred = mask_preds[0]
+                if matched_dets:
+                    for r_idx, det in enumerate(matched_dets, start=1):
+                        # SAM segmentation
+                        boxes = [list(det.bbox_xyxy_px)]
+                        mask_preds = self.sam_generator.generate_masks(image_rgb, boxes)
+                        if not mask_preds:
+                            continue
+                        pred = mask_preds[0]
 
-                    # DAM caption
+                        # DAM caption
+                        caption_result = self.dam_captioner.describe_region(
+                            image=image_rgb,
+                            mask=pred.mask_bool,
+                            bbox_xyxy_px=det.bbox_xyxy_px,
+                            class_entity=det.class_entity,
+                            max_words=maximum_words,
+                        )
+                        if caption_result.status == "ok" and caption_result.description_en:
+                            dam_captions.append(
+                                DamRegionCaption(
+                                    region_id=f"reg_{r_idx:03d}",
+                                    class_label=det.class_entity,
+                                    bbox_xyxy_px=det.bbox_xyxy_px,
+                                    sam_iou=float(pred.iou_score) if pred.iou_score is not None else None,
+                                    caption_en=caption_result.description_en,
+                                    word_count=caption_result.word_count,
+                                )
+                            )
+                else:
+                    # Fallback: Describe the entire frame as a global scene
+                    full_box = (0, 0, img_w, img_h)
+                    full_mask = np.ones((img_h, img_w), dtype=bool)
                     caption_result = self.dam_captioner.describe_region(
                         image=image_rgb,
-                        mask=pred.mask_bool,
-                        bbox_xyxy_px=det.bbox_xyxy_px,
-                        class_entity=det.class_entity,
+                        mask=full_mask,
+                        bbox_xyxy_px=full_box,
+                        class_entity="scene",
                         max_words=maximum_words,
                     )
                     if caption_result.status == "ok" and caption_result.description_en:
                         dam_captions.append(
                             DamRegionCaption(
-                                region_id=f"reg_{r_idx:03d}",
-                                class_label=det.class_entity,
-                                bbox_xyxy_px=det.bbox_xyxy_px,
-                                sam_iou=float(pred.iou_score) if pred.iou_score is not None else None,
+                                region_id="reg_full_scene",
+                                class_label="scene",
+                                bbox_xyxy_px=full_box,
+                                sam_iou=1.0,
                                 caption_en=caption_result.description_en,
                                 word_count=caption_result.word_count,
                             )
