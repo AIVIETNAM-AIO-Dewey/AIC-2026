@@ -147,7 +147,7 @@ class DamCaptioner:
         model = DescribeAnythingModel(
             model_path=model_path,
             conv_mode="v1",
-            prompt_mode="focal_prompt",
+            prompt_mode="full+focal_crop",
         )
         model.eval()
         return cls(model)
