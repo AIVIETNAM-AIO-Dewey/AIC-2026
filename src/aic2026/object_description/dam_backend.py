@@ -138,11 +138,21 @@ class DamCaptioner:
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
         disable_torch_init()
-        model = DescribeAnythingModel(
-            model_path=model_path,
-            conv_mode="v1",
-            prompt_mode="full+focal_crop",
-        )
+        try:
+            import torch
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            model = DescribeAnythingModel(
+                model_path=model_path,
+                conv_mode="v1",
+                prompt_mode="full+focal_crop",
+                torch_dtype=dtype,
+            )
+        except Exception:
+            model = DescribeAnythingModel(
+                model_path=model_path,
+                conv_mode="v1",
+                prompt_mode="full+focal_crop",
+            )
         model.eval()
         return cls(model)
 
