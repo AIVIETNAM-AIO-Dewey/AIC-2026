@@ -168,3 +168,31 @@ class DamCaptioner:
         if not isinstance(output, str):
             raise TypeError("DAM returned a non-string description")
         return output
+
+    def describe_region(
+        self,
+        image: Image.Image,
+        mask: np.ndarray | Image.Image,
+        bbox_xyxy_px: tuple[int, int, int, int] | None = None,
+        class_entity: str | None = None,
+        max_words: int = 50,
+        max_new_tokens: int = 48,
+    ) -> CaptionResult:
+        """Describe a specific segmented region mask with normalized <=50 word caption."""
+        if isinstance(mask, np.ndarray):
+            mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+        elif isinstance(mask, Image.Image):
+            mask_img = mask.convert("L")
+        else:
+            raise TypeError(f"Unsupported mask type: {type(mask)}")
+
+        if mask_img.size != image.size:
+            mask_img = mask_img.resize(image.size, Image.NEAREST)
+
+        # Fallback for completely empty mask
+        if mask_img.getbbox() is None:
+            mask_img = Image.new("L", image.size, 255)
+
+        raw_caption = self.describe(image, mask_img, max_new_tokens=max_new_tokens)
+        return normalize_caption(raw_caption, maximum_words=max_words)
+
