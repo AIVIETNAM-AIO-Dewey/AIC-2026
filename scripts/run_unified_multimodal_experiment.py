@@ -71,51 +71,83 @@ def render_multimodal_card(
     image_path: Path,
     output_card_path: Path,
 ) -> None:
-    """Render a comprehensive visual comparison card for a single frame."""
+    """Render a comprehensive 3-panel visual inspection card for a single frame."""
     with Image.open(image_path) as pil_img:
         orig_img = pil_img.convert("RGB")
 
-    # Draw OCR polygons overlay
+    # 1. OCR Overlay Image
     ocr_overlay = orig_img.copy()
-    draw = ImageDraw.Draw(ocr_overlay)
+    draw_ocr = ImageDraw.Draw(ocr_overlay)
     for span in record.ocr.spans:
         if len(span.polygon_xy) >= 3:
-            draw.polygon(span.polygon_xy, outline="lime", width=3)
+            draw_ocr.polygon(span.polygon_xy, outline="#00FF66", width=3)
             first_pt = span.polygon_xy[0]
-            draw.text((first_pt[0] + 2, first_pt[1] + 2), span.normalized_text[:20], fill="yellow")
+            draw_ocr.text((first_pt[0] + 2, first_pt[1] + 2), span.normalized_text[:18], fill="#FFFF00")
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), gridspec_kw={"wspace": 0.05})
+    # 2. DAM/SAM Object Boxes Overlay Image
+    obj_overlay = orig_img.copy()
+    draw_obj = ImageDraw.Draw(obj_overlay)
+    colors = ["#FF3366", "#33CCFF", "#FFCC00", "#9933FF", "#00FFCC"]
+    for idx, cap in enumerate(record.dam_descriptions):
+        box_col = colors[idx % len(colors)]
+        x1, y1, x2, y2 = cap.bbox_xyxy_px
+        draw_obj.rectangle([x1, y1, x2, y2], outline=box_col, width=3)
+        draw_obj.text((x1 + 4, max(0, y1 - 15)), f"#{idx+1} {cap.class_label}", fill=box_col)
 
-    # Left: Original + OCR
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6.5), gridspec_kw={"width_ratios": [1, 1, 1.2], "wspace": 0.08})
+
+    # Panel 1: OCR
     axes[0].imshow(ocr_overlay)
-    axes[0].set_title(
-        f"Frame #{record.keyframe_n} (idx:{record.frame_idx} @ {record.pts_time_s:.2f}s)\n"
-        f"OCR: \"{record.ocr.full_text[:45]}{'...' if len(record.ocr.full_text)>45 else ''}\"",
-        fontsize=11,
-        weight="bold",
-    )
+    ocr_title = record.ocr.full_text[:40] + ("..." if len(record.ocr.full_text) > 40 else "")
+    axes[0].set_title(f"🔍 1. OCR Text Overlays ({len(record.ocr.spans)} spans)\n\"{ocr_title or '<No text>'}\"", fontsize=10, weight="bold")
     axes[0].axis("off")
 
-    # Right: Summary & Captions Text
-    axes[1].imshow(orig_img)
-    caption_lines = []
-    if record.dam_descriptions:
-        for idx, cap in enumerate(record.dam_descriptions, start=1):
-            caption_lines.append(f"[{idx}] {cap.class_label} (IoU {cap.sam_iou:.2f}):\n    \"{cap.caption_en}\" ({cap.word_count} words)")
-    else:
-        caption_lines.append("<No objects detected or segmented>")
-
-    full_caption_text = "\n\n".join(caption_lines)
-    axes[1].set_title(
-        f"SigLIP-2: 768-dim vector (L2 norm: 1.00)\nDAM Dense Captions ({len(record.dam_descriptions)} regions)",
-        fontsize=11,
-        weight="bold",
-    )
+    # Panel 2: Segmented Objects
+    axes[1].imshow(obj_overlay)
+    axes[1].set_title(f"🎯 2. SAM / DAM Objects ({len(record.dam_descriptions)} regions)", fontsize=10, weight="bold")
     axes[1].axis("off")
 
+    # Panel 3: Multi-Modal Metadata & Captions
+    axes[2].axis("off")
+    axes[2].set_facecolor("#1E1E2E")
+    
+    caption_lines = [
+        f"📊 CANONICAL INDEXING:",
+        f"  • Frame UID:  {record.frame_uid}",
+        f"  • Keyframe #: {record.keyframe_n} (raw frame_idx: {record.frame_idx})",
+        f"  • Timestamp:  {record.pts_time_s:.3f}s (FPS: {record.fps:.1f})",
+        f"  • Shot ID:    {record.shot_id or 'N/A'}",
+        "",
+        f"🔮 SIGLIP-2 EMBEDDING:",
+        f"  • Vector: 768-dim float32 (L2 Norm: 1.000)",
+        "",
+        f"📝 OCR TRANSCRIPT:",
+        f"  • \"{record.ocr.full_text or '<No text detected>'}\"",
+        "",
+        f"🏷️ DAM-3B DENSE CAPTIONS (<= 50 words):",
+    ]
+    if record.dam_descriptions:
+        for idx, cap in enumerate(record.dam_descriptions, start=1):
+            caption_lines.append(f"  [{idx}] {cap.class_label} (IoU: {cap.sam_iou:.2f} | {cap.word_count} words):")
+            wrapped = textwrap.fill(cap.caption_en, width=46)
+            for w_line in wrapped.splitlines():
+                caption_lines.append(f"      \"{w_line}\"")
+    else:
+        caption_lines.append("  <No object regions segmented>")
+
+    full_text = "\n".join(caption_lines)
+    axes[2].text(
+        0.02, 0.98, full_text,
+        transform=axes[2].transAxes,
+        fontsize=9,
+        family="monospace",
+        verticalalignment="top",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#F8F9FA", edgecolor="#D0D7DE", alpha=0.95),
+    )
+
     plt.suptitle(
-        f"Unified Multi-Modal Extraction: {record.frame_uid}",
-        fontsize=14,
+        f"🎬 Multi-Modal Frame Pipeline Inspection: {record.frame_uid}",
+        fontsize=13,
         weight="bold",
         y=0.98,
     )
