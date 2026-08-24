@@ -265,9 +265,15 @@ class DamCaptioner:
         if mask_img.size != image_rgb.size:
             mask_img = mask_img.resize(image_rgb.size, Image.NEAREST)
 
-        # Fallback for completely empty mask
+        # Fallback for completely empty mask: render bounding box if available
         if mask_img.getbbox() is None:
-            mask_img = Image.new("L", image_rgb.size, 255)
+            if bbox_xyxy_px is not None:
+                from PIL import ImageDraw
+                draw_img = Image.new("L", image_rgb.size, 0)
+                ImageDraw.Draw(draw_img).rectangle(list(bbox_xyxy_px), fill=255)
+                mask_img = draw_img
+            else:
+                mask_img = Image.new("L", image_rgb.size, 255)
 
         raw_caption = self.describe(image_rgb, mask_img, max_new_tokens=max_new_tokens)
         return normalize_caption(raw_caption, maximum_words=max_words)
