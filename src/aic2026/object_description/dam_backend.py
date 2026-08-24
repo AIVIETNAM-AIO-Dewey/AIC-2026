@@ -168,10 +168,17 @@ class DamCaptioner:
             mask = mask.convert("L")
         if mask.size != image.size or mask.getbbox() is None:
             raise ValueError("DAM mask must be non-empty and match the image dimensions")
+        prompt = DAM_PROMPT
+        pm = getattr(self.model, "prompt_mode", "full+focal_crop")
+        if pm == "full+focal_crop" and prompt.count("<image>") < 2:
+            prompt = "<image>\n" + prompt
+        elif pm != "full+focal_crop" and prompt.count("<image>") > 1:
+            prompt = prompt.replace("<image>\n<image>", "<image>")
+
         output = self.model.get_description(
             image.convert("RGB"),
             mask,
-            DAM_PROMPT,
+            prompt,
             streaming=False,
             temperature=0,
             num_beams=1,
