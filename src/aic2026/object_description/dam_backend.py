@@ -196,8 +196,8 @@ class DamCaptioner:
                 mask,
                 DAM_PROMPT,
                 streaming=False,
-                temperature=None,
-                top_p=None,
+                temperature=0.2,
+                top_p=0.5,
                 num_beams=1,
                 max_new_tokens=max_new_tokens,
             )
