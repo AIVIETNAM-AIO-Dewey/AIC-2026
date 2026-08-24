@@ -83,34 +83,44 @@ class UnifiedVideoPipeline:
         dam_code_revision: str = "153ad3d33c29324e9197f565547c6bc8500da02d",
     ) -> UnifiedVideoPipeline:
         """Load all enabled multi-modal models onto the specified device."""
+        print(f"\n{'='*75}", flush=True)
+        print(f"🚀 INITIALIZING MULTI-MODAL MODELS ON: {device.upper()}", flush=True)
+        print(f"{'='*75}", flush=True)
+
         transnet = None
         if load_transnet:
-            print(f"[pipeline] Loading TransNetV2 on {device}...", file=sys.stderr, flush=True)
+            print("  ⏳ [1/4] Loading TransNetV2 (PyTorch Shot Boundary Detector)...", flush=True)
             transnet = load_transnetv2_model(device=device)
+            print("     ✓ TransNetV2 loaded successfully!", flush=True)
 
         siglip = None
         if load_siglip:
-            print(f"[pipeline] Loading SigLIP-2 on {device}...", file=sys.stderr, flush=True)
+            print("  ⏳ [2/4] Loading SigLIP-2 (google/siglip2-base-patch16-224)...", flush=True)
             siglip = SiglipEncoder.from_pretrained(device=device)
+            print("     ✓ SigLIP-2 (768-dim) loaded successfully!", flush=True)
 
         ocr = None
         if load_ocr:
-            print(f"[pipeline] Loading OCR Reader on {device}...", file=sys.stderr, flush=True)
+            print("  ⏳ [3/4] Loading OCR Reader (Vietnamese + English)...", flush=True)
             ocr = OcrReader.create(device=device)
+            print(f"     ✓ OCR Reader ({ocr.backend_type.upper()}) loaded successfully!", flush=True)
 
         sam = None
         dam = None
         if load_sam_dam:
-            print(f"[pipeline] Loading Meta SAM ViT-B on {device}...", file=sys.stderr, flush=True)
+            print("  ⏳ [4/4] Loading Meta SAM (ViT-B) & NVIDIA DAM-3B...", flush=True)
             sam = SamMaskGenerator.from_pretrained(device=device)
-            print(f"[pipeline] Loading DAM-3B on {device}...", file=sys.stderr, flush=True)
+            print("     ✓ Meta SAM loaded successfully!", flush=True)
             dam = DamCaptioner.from_pretrained(
                 model_id=dam_model_id,
                 revision=dam_revision,
                 code_revision=dam_code_revision,
             )
+            print("     ✓ DAM-3B loaded successfully!", flush=True)
 
-        print("✓ All requested multi-modal models initialized successfully!", file=sys.stderr, flush=True)
+        print(f"{'='*75}", flush=True)
+        print("✓ All 5 multi-modal engines initialized into GPU memory!", flush=True)
+        print(f"{'='*75}\n", flush=True)
         return cls(
             transnet_model=transnet,
             siglip_encoder=siglip,
@@ -141,12 +151,12 @@ class UnifiedVideoPipeline:
         probe = probe_video(video_path)
         fps = probe.fps
 
-        print(f"\n{'='*75}", file=sys.stderr, flush=True)
-        print(f"🎬 Processing Video: {video_id} ({probe.duration_s:.1f}s, {fps:.2f} fps, {probe.width}x{probe.height})", file=sys.stderr, flush=True)
-        print(f"{'='*75}", file=sys.stderr, flush=True)
+        print(f"🎬 Target Video: {video_id}", flush=True)
+        print(f"   • Path:     {video_path}", flush=True)
+        print(f"   • Duration: {probe.duration_s:.1f}s | FPS: {fps:.2f} | Resolution: {probe.width}x{probe.height}", flush=True)
 
         # 1. TransNetV2 Shot Detection
-        print(f"⚡ [1/5] Running TransNetV2 Shot Detection on {video_id}...", file=sys.stderr, flush=True)
+        print(f"\n⚡ [1/4] Running TransNetV2 Shot Boundary Detection...", flush=True)
         t_shot_start = time.monotonic()
         transnet_res = run_transnetv2_inference(
             video_path=video_path,
@@ -156,15 +166,15 @@ class UnifiedVideoPipeline:
             device=self.device,
         )
         shots = transnet_res.shots
-        print(f"✓ Detected {len(shots)} shots in {time.monotonic() - t_shot_start:.2f}s", file=sys.stderr, flush=True)
+        print(f"   ✓ TransNetV2 completed in {time.monotonic() - t_shot_start:.2f}s (Detected {len(shots)} distinct scene shots)", flush=True)
 
         # 2. Adaptive Keyframe Sampling
-        print("🎯 [2/5] Applying Adaptive Keyframe Sampling Policy...", file=sys.stderr, flush=True)
+        print("🎯 [2/4] Applying Adaptive Keyframe Sampling Policy...", flush=True)
         raw_samples = adaptive_samples_from_shots(shots)
         candidates = dedupe_samples(raw_samples, tolerance_s=0.5)
         if max_frames is not None and max_frames > 0:
             candidates = candidates[:max_frames]
-        print(f"✓ Selected {len(candidates)} canonical keyframes for extraction", file=sys.stderr, flush=True)
+        print(f"   ✓ Selected {len(candidates)} canonical keyframes for multi-modal processing", flush=True)
 
         # Setup directory paths
         frames_dir = output_root / "frames" / video_id
@@ -183,10 +193,10 @@ class UnifiedVideoPipeline:
             writer.writerow(["n", "pts_time", "fps", "frame_idx"])
             for c in candidates:
                 writer.writerow([c.keyframe_n, f"{c.pts_time_s:.3f}", f"{fps:.1f}", c.frame_idx])
-        print(f"✓ Generated canonical map-keyframes CSV: {map_csv_path}", file=sys.stderr, flush=True)
+        print(f"   ✓ Generated canonical map-keyframes CSV: {map_csv_path}", flush=True)
 
         # 4. Extract High-Quality JPEG Frames
-        print(f"🖼️ [3/5] Extracting {len(candidates)} JPEG keyframes via FFmpeg...", file=sys.stderr, flush=True)
+        print(f"🖼️ [3/4] Extracting {len(candidates)} high-res JPEG keyframes via FFmpeg...", flush=True)
         extracted_frames: list[tuple[Any, Path]] = []
         for c in candidates:
             img_name = f"{c.keyframe_n:03d}.jpg"
@@ -199,10 +209,10 @@ class UnifiedVideoPipeline:
                     jpeg_quality=2,
                 )
             extracted_frames.append((c, img_path))
-        print("✓ Keyframe JPEG extraction completed!", file=sys.stderr, flush=True)
+        print("   ✓ Keyframe JPEG extraction completed!", flush=True)
 
         # 5. Multi-Modal Enrichment (SigLIP-2 + OCR + SAM + DAM)
-        print("🔮 [4/5] Running Multi-Modal Enrichment (SigLIP-2, OCR, SAM, DAM-3B)...", file=sys.stderr, flush=True)
+        print(f"\n🔮 [4/4] Multi-Modal Enrichment for {len(extracted_frames)} Frames (SigLIP-2, OCR, SAM, DAM-3B)...", flush=True)
         filter_cfg = FilterConfig(
             minimum_score=score_threshold,
             minimum_area_ratio=0.005,
@@ -301,19 +311,19 @@ class UnifiedVideoPipeline:
             )
             records.append(record)
             ocr_text_preview = ocr_res.full_text[:35] + "..." if len(ocr_res.full_text) > 35 else (ocr_res.full_text or "<no text>")
+            f_elapsed = time.monotonic() - f_start
             print(
-                f"  [{idx}/{len(extracted_frames)}] Frame #{cand.keyframe_n} (idx:{cand.frame_idx}, {cand.pts_time_s:.2f}s) "
-                f"| OCR: {ocr_text_preview!r} | DAM Objects: {len(dam_captions)} | Elapsed: {time.monotonic() - f_start:.2f}s",
-                file=sys.stderr,
+                f"  ▶ [{idx:02d}/{len(extracted_frames):02d}] Keyframe #{cand.keyframe_n} (idx:{cand.frame_idx:05d} @ {cand.pts_time_s:6.2f}s) "
+                f"| OCR: {ocr_text_preview!r} | DAM: {len(dam_captions)} objects | {f_elapsed:.2f}s",
                 flush=True,
             )
 
         # 6. Save Unified JSONL
-        print(f"💾 [5/5] Writing {len(records)} unified frame records to {unified_jsonl_path}...", file=sys.stderr, flush=True)
         with open(unified_jsonl_path, "w", encoding="utf-8") as f_jsonl:
             for rec in records:
                 f_jsonl.write(json.dumps(rec.model_dump(mode="json"), ensure_ascii=False) + "\n")
 
         total_elapsed = time.monotonic() - started_at
-        print(f"✅ COMPLETED {video_id} in {total_elapsed:.2f}s (Avg {total_elapsed/max(1, len(records)):.2f}s/frame)\n", file=sys.stderr, flush=True)
+        print(f"\n💾 Saved {len(records)} records to {unified_jsonl_path}", flush=True)
+        print(f"✅ Finished {video_id} in {total_elapsed:.2f}s (Avg {total_elapsed/max(1, len(records)):.2f}s/frame)\n", flush=True)
         return map_csv_path, unified_jsonl_path, records

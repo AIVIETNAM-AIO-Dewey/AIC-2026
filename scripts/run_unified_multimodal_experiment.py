@@ -158,9 +158,14 @@ def render_multimodal_card(
 
 
 def main() -> int:
+    print("\n" + "=" * 75, flush=True)
+    print("🔬 STARTING UNIFIED MULTI-MODAL PIPELINE EXPERIMENT", flush=True)
+    print("=" * 75, flush=True)
+
     args = build_parser().parse_args()
+    print(f"🔍 Searching for video: {args.video_id}...", flush=True)
     video_path = find_video_file(args.video_id, args.video_path, args.video_root)
-    print(f"🎬 Target Video: {video_path}")
+    print(f"🎬 Found Video File:   {video_path}", flush=True)
 
     device = args.device
     pipeline = UnifiedVideoPipeline.load(
@@ -188,7 +193,7 @@ def main() -> int:
         score_threshold=args.score_threshold,
     )
 
-    print("🎨 Rendering visual inspection cards for generated frames...")
+    print(f"\n🎨 Rendering {len(records)} visual inspection cards...", flush=True)
     vis_dir = args.output_dir / "visualizations" / args.video_id
     vis_dir.mkdir(parents=True, exist_ok=True)
 
@@ -197,14 +202,14 @@ def main() -> int:
         if img_path.exists():
             card_p = vis_dir / f"{args.video_id}_f{rec.keyframe_n:04d}_multimodal.jpg"
             render_multimodal_card(rec, img_path, card_p)
-            print(f"  ✓ Saved visual card: {card_p.name}")
+            print(f"  ✓ Saved visual card: {card_p.name}", flush=True)
 
-    print("\n" + "=" * 75)
-    print(f"🎉 SUCCESS! Unified Pipeline Experiment for {args.video_id} is complete!")
-    print(f"  • Map-Keyframes CSV: {map_csv_path}")
-    print(f"  • Unified JSONL:     {unified_jsonl_path}")
-    print(f"  • Visual Cards:      {vis_dir}")
-    print("=" * 75)
+    print("\n" + "=" * 75, flush=True)
+    print(f"🎉 SUCCESS! Unified Pipeline Experiment for {args.video_id} is complete!", flush=True)
+    print(f"  • Map-Keyframes CSV: {map_csv_path}", flush=True)
+    print(f"  • Unified JSONL:     {unified_jsonl_path}", flush=True)
+    print(f"  • Visual Cards:      {vis_dir}", flush=True)
+    print("=" * 75 + "\n", flush=True)
     return 0
 
 
