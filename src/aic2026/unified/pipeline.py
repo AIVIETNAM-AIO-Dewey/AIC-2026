@@ -391,7 +391,13 @@ class UnifiedVideoPipeline:
                     "--code-revision", self.dam_code_revision,
                 ]
 
-                sub_res = subprocess.run(cmd, capture_output=False, text=True)
+                sub_env = os.environ.copy()
+                sub_env["CUDA_VISIBLE_DEVICES"] = "0"
+                sub_env["USE_TF"] = "0"
+                sub_env["USE_FLAX"] = "0"
+                sub_env["USE_TORCH"] = "1"
+
+                sub_res = subprocess.run(cmd, capture_output=False, text=True, env=sub_env)
                 if sub_res.returncode != 0:
                     raise RuntimeError(f"Isolated DAM worker failed with exit code {sub_res.returncode}")
 

@@ -9,6 +9,12 @@ import sys
 import textwrap
 from pathlib import Path
 
+# Enforce strictly 1 GPU execution across all stages (never multi-GPU / 2x T4 sharding)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["USE_TF"] = "0"
+os.environ["USE_FLAX"] = "0"
+os.environ["USE_TORCH"] = "1"
+
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
