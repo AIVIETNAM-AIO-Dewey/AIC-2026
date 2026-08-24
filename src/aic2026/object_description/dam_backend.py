@@ -138,16 +138,26 @@ class DamCaptioner:
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
         disable_torch_init()
-        try:
-            import torch
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            model = DescribeAnythingModel(
-                model_path=model_path,
-                conv_mode="v1",
-                prompt_mode="full+focal_crop",
-                torch_dtype=dtype,
-            )
-        except Exception:
+        import torch
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+        # Try the current kwarg name first (`dtype`), fall back to deprecated (`torch_dtype`)
+        model = None
+        for kwarg_name in ("dtype", "torch_dtype"):
+            if model is not None:
+                break
+            try:
+                model = DescribeAnythingModel(
+                    model_path=model_path,
+                    conv_mode="v1",
+                    prompt_mode="full+focal_crop",
+                    **{kwarg_name: dtype},
+                )
+            except TypeError:
+                continue
+            except Exception:
+                continue
+        if model is None:
             model = DescribeAnythingModel(
                 model_path=model_path,
                 conv_mode="v1",
@@ -155,36 +165,47 @@ class DamCaptioner:
             )
 
         # ── Force ALL submodules to float16 on CUDA (Tesla T4 has zero bfloat16 support) ──
-        try:
-            import torch
-            if torch.cuda.is_available():
-                # The real nn.Module is model.model (LlavaLlamaModel).
-                # DescribeAnythingModel wraps it as self.model.
-                inner = getattr(model, "model", None)
-                if inner is not None and isinstance(inner, torch.nn.Module):
-                    inner.to(device="cuda", dtype=torch.float16)
+        if torch.cuda.is_available():
+            # The real nn.Module is model.model (LlavaLlamaModel).
+            inner = getattr(model, "model", None)
 
-                # Also cast the DescribeAnythingModel itself if it's an nn.Module
-                if isinstance(model, torch.nn.Module):
-                    model.to(device="cuda", dtype=torch.float16)
+            # Cast the inner LlavaLlamaModel
+            if inner is not None and isinstance(inner, torch.nn.Module):
+                inner.to(device="cuda", dtype=torch.float16)
 
-                # Hard verification: forcibly cast any remaining bfloat16 parameters
-                target = inner if inner is not None else model
-                if isinstance(target, torch.nn.Module):
-                    for name, param in target.named_parameters():
-                        if param.is_floating_point() and param.dtype == torch.bfloat16:
-                            param.data = param.data.to(torch.float16)
-                    for name, buf in target.named_buffers():
-                        if buf.is_floating_point() and buf.dtype == torch.bfloat16:
-                            buf.data = buf.data.to(torch.float16)
+            # Also cast the DescribeAnythingModel wrapper
+            if isinstance(model, torch.nn.Module):
+                model.to(device="cuda", dtype=torch.float16)
 
-                # Override config.model_dtype so the forward pass uses float16
-                if inner is not None and hasattr(inner, "config"):
-                    inner.config.model_dtype = "torch.float16"
-                    if hasattr(inner.config, "torch_dtype"):
-                        inner.config.torch_dtype = torch.float16
-        except Exception:
-            pass
+            # Hard verification: forcibly cast any remaining bfloat16 parameters
+            target = inner if inner is not None else model
+            if isinstance(target, torch.nn.Module):
+                bf16_count = 0
+                for name, param in target.named_parameters():
+                    if param.is_floating_point() and param.dtype == torch.bfloat16:
+                        param.data = param.data.to(torch.float16)
+                        bf16_count += 1
+                for name, buf in target.named_buffers():
+                    if buf.is_floating_point() and buf.dtype == torch.bfloat16:
+                        buf.data = buf.data.to(torch.float16)
+                        bf16_count += 1
+                if bf16_count > 0:
+                    print(f"     ⚠️  Force-cast {bf16_count} remaining bfloat16 params/buffers → float16")
+
+            # Override config.model_dtype so the forward pass uses float16
+            if inner is not None and hasattr(inner, "config"):
+                inner.config.model_dtype = "torch.float16"
+                if hasattr(inner.config, "torch_dtype"):
+                    inner.config.torch_dtype = torch.float16
+
+            # Diagnostic: verify vision tower dtype
+            if inner is not None:
+                vt = getattr(inner, "vision_tower", None)
+                if vt is not None and isinstance(vt, torch.nn.Module):
+                    first_param = next(vt.parameters(), None)
+                    if first_param is not None:
+                        print(f"     ✓ Vision tower dtype after cast: {first_param.dtype}")
+
         model.eval()
         return cls(model)
 
