@@ -160,6 +160,32 @@ class DamCaptioner:
                 conv_mode="v1",
                 prompt_mode="full+focal_crop",
             )
+        # Ensure SiglipVisionEmbeddings forward safely casts position_ids to CUDA device
+        try:
+            import dam.model.multimodal_encoder.siglip.modeling_siglip as _siglip_mod
+
+            def _safe_siglip_emb_forward(self: Any, pixel_values: torch.FloatTensor) -> torch.Tensor:
+                target_dtype = self.patch_embedding.weight.dtype
+                target_device = self.patch_embedding.weight.device
+                patch_embeds = self.patch_embedding(pixel_values.to(device=target_device, dtype=target_dtype))
+                embeddings = patch_embeds.flatten(2).transpose(1, 2)
+                pos_ids = getattr(self, "position_ids", None)
+                num_weights = self.position_embedding.weight.shape[0]
+                if pos_ids is None or not isinstance(pos_ids, torch.Tensor) or pos_ids.device != target_device:
+                    pos_ids = torch.arange(num_weights, dtype=torch.long, device=target_device).unsqueeze(0)
+                    self.position_ids = pos_ids
+                elif pos_ids.shape[-1] != num_weights:
+                    pos_ids = torch.arange(num_weights, dtype=torch.long, device=target_device).unsqueeze(0)
+                    self.position_ids = pos_ids
+                else:
+                    pos_ids = pos_ids.to(device=target_device, dtype=torch.long)
+                embeddings = embeddings + self.position_embedding(pos_ids)
+                return embeddings
+
+            _siglip_mod.SiglipVisionEmbeddings.forward = _safe_siglip_emb_forward
+        except Exception:
+            pass
+
         model.eval()
         # Ensure context provider treats all inputs as cimage so 0-batch cross-attention never occurs
         if hasattr(model, "model") and hasattr(model.model, "get_context_provider"):

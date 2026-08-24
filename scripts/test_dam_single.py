@@ -66,8 +66,13 @@ def main() -> int:
         with Image.open(args.image_path) as im:
             test_image = im.convert("RGB")
     else:
-        # Check for extracted keyframes in output directory
-        cand_keyframes = list(Path("/kaggle/working/multimodal_results").glob("**/*.jpg"))
+        # Check for extracted keyframes in output directory (exclude visualization panels)
+        cand_keyframes = [
+            p for p in Path("/kaggle/working/multimodal_results").glob("**/*.jpg")
+            if "visualizations" not in str(p) and "multimodal" not in p.name
+        ]
+        if not cand_keyframes:
+            cand_keyframes = list(Path("/kaggle/working/AIC-2026/data").glob("**/*.jpg"))
         if cand_keyframes:
             test_path = cand_keyframes[0]
             print(f"\n🖼️ [2/2] Testing with discovered keyframe: {test_path}")
