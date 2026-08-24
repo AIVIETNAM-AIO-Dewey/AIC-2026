@@ -262,16 +262,42 @@ class UnifiedVideoPipeline:
                     max_area_ratio=0.85,
                 )
 
-                # Explicitly flush temporary SAM tensors before DAM dense captioning
-                try:
-                    import gc
-                    import torch
+                # ── Critical: Offload SAM from GPU before DAM runs ──
+                # SAM's automatic mask generation can trigger CUDA assertion errors
+                # (vectorized_gather_kernel index out of bounds) that permanently
+                # corrupt the CUDA context. We must:
+                # 1. Move SAM to CPU to free VRAM and prevent further CUDA corruption
+                # 2. Synchronize CUDA to surface any pending assertion errors
+                # 3. Only then run DAM on the clean GPU
+                import gc
+                import torch
 
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                _sam_model = None
+                if self.sam_generator.backend_type == "meta":
+                    _sam_model = getattr(self.sam_generator.predictor, "model", None)
+                    if _sam_model is None:
+                        _sam_model = getattr(self.sam_generator, "model", None)
+                    if _sam_model is not None and isinstance(_sam_model, torch.nn.Module):
+                        _sam_model.cpu()
+                    # Also move the auto_mask_generator's internal model ref
+                    _amg = getattr(self.sam_generator, "auto_mask_generator", None)
+                    if _amg is not None:
+                        _amg_model = getattr(_amg, "model", None)
+                        if _amg_model is not None and isinstance(_amg_model, torch.nn.Module):
+                            _amg_model.cpu()
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    # Synchronize to surface any pending CUDA assertion errors
+                    try:
+                        torch.cuda.synchronize()
+                    except RuntimeError as cuda_err:
+                        print(f"     ⚠️  CUDA error after SAM (will skip DAM for this frame): {cuda_err}", flush=True)
+                        # Restore SAM to GPU for next frame
+                        if _sam_model is not None:
+                            _sam_model.to(self.device)
+                        auto_masks = []  # Skip DAM for this frame
 
                 for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(auto_masks, start=1):
                     caption_result = self.dam_captioner.describe_region(
@@ -293,16 +319,13 @@ class UnifiedVideoPipeline:
                             )
                         )
 
-                # Light defragmentation after frame captioning completes
-                try:
-                    import gc
-                    import torch
+                # Restore SAM back to GPU for next frame's mask generation
+                if _sam_model is not None:
+                    _sam_model.to(self.device)
 
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # Build Canonical Unified Frame Record
             frame_relpath = f"frames/{video_id}/{cand.keyframe_n:03d}.jpg"
