@@ -153,44 +153,36 @@ class DamCaptioner:
                 conv_mode="v1",
                 prompt_mode="full+focal_crop",
             )
+
+        # ── Force ALL submodules to float16 on CUDA (Tesla T4 has zero bfloat16 support) ──
         try:
             import torch
             if torch.cuda.is_available():
-                visited = set()
+                # The real nn.Module is model.model (LlavaLlamaModel).
+                # DescribeAnythingModel wraps it as self.model.
+                inner = getattr(model, "model", None)
+                if inner is not None and isinstance(inner, torch.nn.Module):
+                    inner.to(device="cuda", dtype=torch.float16)
 
-                def _cast_recursive(obj: Any) -> None:
-                    if obj is None or id(obj) in visited:
-                        return
-                    visited.add(id(obj))
-                    if isinstance(obj, torch.nn.Module):
-                        try:
-                            obj.to(device="cuda", dtype=torch.float16)
-                        except Exception:
-                            pass
-                        for p in obj.parameters(recurse=False):
-                            if p.is_floating_point() and p.dtype != torch.float16:
-                                p.data = p.data.to(torch.float16)
-                        for b in obj.buffers(recurse=False):
-                            if b.is_floating_point() and b.dtype != torch.float16:
-                                b.data = b.data.to(torch.float16)
-                    if hasattr(obj, "dtype") and obj.dtype != torch.float16:
-                        try:
-                            obj.dtype = torch.float16
-                        except Exception:
-                            pass
-                    if hasattr(obj, "config") and hasattr(obj.config, "torch_dtype"):
-                        obj.config.torch_dtype = torch.float16
-                    if isinstance(obj, dict):
-                        for v in obj.values():
-                            _cast_recursive(v)
-                    elif isinstance(obj, (list, tuple)):
-                        for item in obj:
-                            _cast_recursive(item)
-                    elif hasattr(obj, "__dict__"):
-                        for val in list(obj.__dict__.values()):
-                            _cast_recursive(val)
+                # Also cast the DescribeAnythingModel itself if it's an nn.Module
+                if isinstance(model, torch.nn.Module):
+                    model.to(device="cuda", dtype=torch.float16)
 
-                _cast_recursive(model)
+                # Hard verification: forcibly cast any remaining bfloat16 parameters
+                target = inner if inner is not None else model
+                if isinstance(target, torch.nn.Module):
+                    for name, param in target.named_parameters():
+                        if param.is_floating_point() and param.dtype == torch.bfloat16:
+                            param.data = param.data.to(torch.float16)
+                    for name, buf in target.named_buffers():
+                        if buf.is_floating_point() and buf.dtype == torch.bfloat16:
+                            buf.data = buf.data.to(torch.float16)
+
+                # Override config.model_dtype so the forward pass uses float16
+                if inner is not None and hasattr(inner, "config"):
+                    inner.config.model_dtype = "torch.float16"
+                    if hasattr(inner.config, "torch_dtype"):
+                        inner.config.torch_dtype = torch.float16
         except Exception:
             pass
         model.eval()
