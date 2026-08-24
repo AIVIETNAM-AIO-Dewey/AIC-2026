@@ -138,21 +138,22 @@ class DamCaptioner:
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
         disable_torch_init()
+        model = DescribeAnythingModel(
+            model_path=model_path,
+            conv_mode="v1",
+            prompt_mode="full+focal_crop",
+        )
         try:
             import torch
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            model = DescribeAnythingModel(
-                model_path=model_path,
-                conv_mode="v1",
-                prompt_mode="full+focal_crop",
-                torch_dtype=dtype,
-            )
+            if torch.cuda.is_available():
+                if hasattr(model, "model") and model.model is not None:
+                    model.model.to(dtype=torch.float16)
+                    if hasattr(model.model, "get_vision_tower"):
+                        vt = model.model.get_vision_tower()
+                        if vt is not None:
+                            vt.to(device=model.device, dtype=torch.float16)
         except Exception:
-            model = DescribeAnythingModel(
-                model_path=model_path,
-                conv_mode="v1",
-                prompt_mode="full+focal_crop",
-            )
+            pass
         model.eval()
         return cls(model)
 
@@ -197,13 +198,15 @@ class DamCaptioner:
         else:
             raise TypeError(f"Unsupported mask type: {type(mask)}")
 
-        if mask_img.size != image.size:
-            mask_img = mask_img.resize(image.size, Image.NEAREST)
+        image_rgb = image.convert("RGB")
+        if mask_img.size != image_rgb.size:
+            mask_img = mask_img.resize(image_rgb.size, Image.NEAREST)
 
         # Fallback for completely empty mask
         if mask_img.getbbox() is None:
-            mask_img = Image.new("L", image.size, 255)
+            mask_img = Image.new("L", image_rgb.size, 255)
 
-        raw_caption = self.describe(image, mask_img, max_new_tokens=max_new_tokens)
+        raw_caption = self.describe(image_rgb, mask_img, max_new_tokens=max_new_tokens)
         return normalize_caption(raw_caption, maximum_words=max_words)
+
 
