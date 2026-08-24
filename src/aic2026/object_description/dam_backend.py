@@ -138,11 +138,21 @@ class DamCaptioner:
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
         disable_torch_init()
-        model = DescribeAnythingModel(
-            model_path=model_path,
-            conv_mode="v1",
-            prompt_mode="full+focal_crop",
-        )
+        try:
+            import torch
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            model = DescribeAnythingModel(
+                model_path=model_path,
+                conv_mode="v1",
+                prompt_mode="full+focal_crop",
+                torch_dtype=dtype,
+            )
+        except Exception:
+            model = DescribeAnythingModel(
+                model_path=model_path,
+                conv_mode="v1",
+                prompt_mode="full+focal_crop",
+            )
         try:
             import torch
             if torch.cuda.is_available():
@@ -154,7 +164,7 @@ class DamCaptioner:
                     visited.add(id(obj))
                     if isinstance(obj, torch.nn.Module):
                         try:
-                            obj.to(dtype=torch.float16)
+                            obj.to(device="cuda", dtype=torch.float16)
                         except Exception:
                             pass
                         for p in obj.parameters(recurse=False):
@@ -163,7 +173,7 @@ class DamCaptioner:
                         for b in obj.buffers(recurse=False):
                             if b.is_floating_point() and b.dtype != torch.float16:
                                 b.data = b.data.to(torch.float16)
-                    if hasattr(obj, "dtype") and obj.dtype == torch.bfloat16:
+                    if hasattr(obj, "dtype") and obj.dtype != torch.float16:
                         try:
                             obj.dtype = torch.float16
                         except Exception:
