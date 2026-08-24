@@ -11,7 +11,9 @@ Describe only the masked region in detail in English (at most 50 words). State t
 
 
 def normalize_caption(text: str, maximum_words: int = 50) -> CaptionResult:
-    normalized = re.sub(r"\s+", " ", text).strip()
+    cleaned = text.replace("▁", " ").replace(" ", " ")
+    cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
+    normalized = re.sub(r"\s+", " ", cleaned).strip()
     if not normalized:
         raise ValueError("DAM returned an empty caption")
     words = normalized.split(" ")

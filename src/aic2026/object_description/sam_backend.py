@@ -72,7 +72,7 @@ class SamMaskGenerator:
         try:
             from segment_anything import SamAutomaticMaskGenerator, SamPredictor, sam_model_registry
 
-            target_dir = Path(cache_dir or "/kaggle/working/aic2026-model-cache/sam")
+            target_dir = Path(cache_dir or os.environ.get("AIC_MODEL_CACHE", "aic2026-model-cache/sam"))
             target_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_file = target_dir / SAM_CHECKPOINT_FILENAME
             if not checkpoint_file.exists() or checkpoint_file.stat().st_size < 100_000_000:
