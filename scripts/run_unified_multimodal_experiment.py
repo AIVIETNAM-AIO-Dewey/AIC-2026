@@ -130,12 +130,12 @@ def render_multimodal_card(
     # Panel 1: OCR
     axes[0].imshow(ocr_overlay)
     ocr_title = record.ocr.full_text[:40] + ("..." if len(record.ocr.full_text) > 40 else "")
-    axes[0].set_title(f"🔍 1. OCR Text Overlays ({len(record.ocr.spans)} spans)\n\"{ocr_title or '<No text>'}\"", fontsize=10, weight="bold")
+    axes[0].set_title(f"1. OCR Text Overlays ({len(record.ocr.spans)} spans)\n\"{ocr_title or '<No text>'}\"", fontsize=10, weight="bold")
     axes[0].axis("off")
 
     # Panel 2: Segmented Objects
     axes[1].imshow(obj_overlay)
-    axes[1].set_title(f"🎯 2. SAM / DAM Objects ({len(record.dam_descriptions)} regions)", fontsize=10, weight="bold")
+    axes[1].set_title(f"2. SAM / DAM Objects ({len(record.dam_descriptions)} regions)", fontsize=10, weight="bold")
     axes[1].axis("off")
 
     # Panel 3: Multi-Modal Metadata & Captions
@@ -143,19 +143,19 @@ def render_multimodal_card(
     axes[2].set_facecolor("#1E1E2E")
     
     caption_lines = [
-        f"📊 CANONICAL INDEXING:",
+        "CANONICAL INDEXING:",
         f"  • Frame UID:  {record.frame_uid}",
         f"  • Keyframe #: {record.keyframe_n} (raw frame_idx: {record.frame_idx})",
         f"  • Timestamp:  {record.pts_time_s:.3f}s (FPS: {record.fps:.1f})",
         f"  • Shot ID:    {record.shot_id or 'N/A'}",
         "",
-        f"🔮 SIGLIP-2 EMBEDDING:",
-        f"  • Vector: 768-dim float32 (L2 Norm: 1.000)",
+        "SIGLIP-2 EMBEDDING:",
+        "  • Vector: 768-dim float32 (L2 Norm: 1.000)",
         "",
-        f"📝 OCR TRANSCRIPT:",
+        "OCR TRANSCRIPT:",
         f"  • \"{record.ocr.full_text or '<No text detected>'}\"",
         "",
-        f"🏷️ DAM-3B DENSE CAPTIONS (<= 50 words):",
+        "DAM-3B DENSE CAPTIONS (<= 50 words):",
     ]
     if record.dam_descriptions:
         for idx, cap in enumerate(record.dam_descriptions, start=1):
@@ -177,7 +177,7 @@ def render_multimodal_card(
     )
 
     plt.suptitle(
-        f"🎬 Multi-Modal Frame Pipeline Inspection: {record.frame_uid}",
+        f"Multi-Modal Frame Pipeline Inspection: {record.frame_uid}",
         fontsize=13,
         weight="bold",
         y=0.98,
@@ -201,6 +201,9 @@ def find_objects_dir(video_id: str, objects_root: Path | None) -> Path | None:
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects"),
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects"),
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video/objects"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects_L21_a"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects_L21"),
+        Path("/kaggle/input/aic-26-video/Objects/Objects"),
         Path("/kaggle/input/aic-26-video/Objects"),
         Path("/kaggle/input/aic2026-objects"),
         REPO_ROOT / "data" / "objects",
@@ -223,6 +226,21 @@ def find_objects_dir(video_id: str, objects_root: Path | None) -> Path | None:
         for cand in r.glob(f"Objects_{batch}*/objects/{video_id}"):
             if cand.is_dir():
                 return cand
+        for cand in r.glob(f"**/{video_id}"):
+            if cand.is_dir():
+                return cand
+
+    # Shallow scan over top-level datasets under /kaggle/input
+    if Path("/kaggle/input").exists():
+        for dataset_dir in Path("/kaggle/input").iterdir():
+            if not dataset_dir.is_dir():
+                continue
+            for cand in dataset_dir.glob(f"**/Objects_{batch}*/{video_id}"):
+                if cand.is_dir():
+                    return cand
+            for cand in dataset_dir.glob(f"**/Objects_{batch}*/objects/{video_id}"):
+                if cand.is_dir():
+                    return cand
     return None
 
 
