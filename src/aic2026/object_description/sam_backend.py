@@ -248,10 +248,12 @@ class SamMaskGenerator:
             if selected_hf:
                 return selected_hf
 
-        # Fallback: Full frame description if no salient sub-objects passed threshold
-        full_box = (0, 0, width, height)
-        full_mask = np.ones((height, width), dtype=bool)
-        return [(full_mask, full_box, 1.0)]
+        # Fallback: Focal scene region description if no salient sub-objects passed threshold
+        full_box = (int(0.05 * width), int(0.05 * height), int(0.95 * width), int(0.95 * height))
+        from .rle import rectangle_mask
+
+        fallback_mask = rectangle_mask(height, width, full_box)
+        return [(fallback_mask, full_box, 1.0)]
 
     def generate(
         self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]

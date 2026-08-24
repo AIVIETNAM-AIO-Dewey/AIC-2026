@@ -89,9 +89,7 @@ def main() -> int:
                 from aic2026.object_description.rle import decode_mask
 
                 mask_array = decode_mask(reg["mask_rle"])
-                mask_img = Image.fromarray(np.asarray(mask_array, dtype=np.uint8) * 255)
-                if mask_img.mode != "L":
-                    mask_img = mask_img.convert("L")
+                mask_img = Image.fromarray((mask_array * 255).astype(np.uint8), mode="L")
                 if mask_img.size != (w, h):
                     mask_img = mask_img.resize((w, h), Image.NEAREST)
             elif bbox:
@@ -103,7 +101,13 @@ def main() -> int:
                 mask_img = Image.new("L", (w, h), 0)
                 ImageDraw.Draw(mask_img).rectangle([x1, y1, x2, y2], fill=255)
             else:
-                mask_img = Image.new("L", (w, h), 255)
+                # Default scene focal region
+                mask_img = Image.new("L", (w, h), 0)
+                ImageDraw.Draw(mask_img).rectangle([int(0.05 * w), int(0.05 * h), int(0.95 * w), int(0.95 * h)], fill=255)
+
+            if mask_img.getbbox() is None:
+                mask_img = Image.new("L", (w, h), 0)
+                ImageDraw.Draw(mask_img).rectangle([int(0.05 * w), int(0.05 * h), int(0.95 * w), int(0.95 * h)], fill=255)
 
             try:
                 import torch

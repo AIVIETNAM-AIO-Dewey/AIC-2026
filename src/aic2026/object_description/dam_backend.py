@@ -161,6 +161,21 @@ class DamCaptioner:
                 prompt_mode="full+focal_crop",
             )
         model.eval()
+        # Ensure context provider treats all inputs as cimage so 0-batch cross-attention never occurs
+        if hasattr(model, "model") and hasattr(model.model, "get_context_provider"):
+            try:
+                cp = model.model.get_context_provider()
+                if cp is not None:
+                    cp.treat_image_as_cimage = True
+            except Exception:
+                pass
+        elif hasattr(model, "get_context_provider"):
+            try:
+                cp = model.get_context_provider()
+                if cp is not None:
+                    cp.treat_image_as_cimage = True
+            except Exception:
+                pass
         return cls(model)
 
     def describe(
@@ -176,9 +191,6 @@ class DamCaptioner:
             raise ValueError("DAM mask must be non-empty and match the image dimensions")
 
         image_rgb = image.convert("RGB")
-        if hasattr(self.model, "max_new_tokens"):
-            self.model.max_new_tokens = max_new_tokens
-
         import torch
 
         with torch.inference_mode():
@@ -187,6 +199,9 @@ class DamCaptioner:
                 mask,
                 DAM_PROMPT,
                 streaming=False,
+                temperature=0,
+                num_beams=1,
+                max_new_tokens=max_new_tokens,
             )
 
         if not isinstance(output, str):
