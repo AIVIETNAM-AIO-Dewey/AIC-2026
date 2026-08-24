@@ -95,8 +95,6 @@ class SamMaskGenerator:
             pass
 
         # 2. Fallback to Hugging Face transformers
-        import os
-
         os.environ["USE_TF"] = "0"
         os.environ["USE_FLAX"] = "0"
         os.environ["USE_TORCH"] = "1"
