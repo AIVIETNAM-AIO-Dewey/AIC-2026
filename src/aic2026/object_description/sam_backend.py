@@ -85,10 +85,23 @@ class SamMaskGenerator:
             sam = sam_model_registry["vit_b"](checkpoint=str(checkpoint_file)).to(device)
             sam.eval()
             predictor = SamPredictor(sam)
+            try:
+                auto_gen = SamAutomaticMaskGenerator(
+                    model=sam,
+                    points_per_side=16,
+                    pred_iou_thresh=0.86,
+                    stability_score_thresh=0.92,
+                    crop_n_layers=0,
+                    min_mask_region_area=100,
+                )
+            except Exception:
+                auto_gen = None
+
             return cls(
                 backend_type="meta",
                 predictor_or_processor=predictor,
                 model=sam,
+                auto_mask_generator=auto_gen,
                 device=device,
             )
         except ImportError:
@@ -151,21 +164,16 @@ class SamMaskGenerator:
         min_area_ratio: float = 0.005,
         max_area_ratio: float = 0.85,
     ) -> list[tuple[np.ndarray, tuple[int, int, int, int], float]]:
-        """Discover salient objects via SamPredictor with candidate anchor boxes (100% CUDA safe)."""
+        """Discover salient objects via SAM Automatic Mask Generation directly from raw images."""
         width, height = image.size
         img_area = float(width * height)
 
-        # Generate salient anchor boxes covering center, left, right, and top focal regions
+        # Candidate anchor boxes for fallback
         anchor_boxes: list[tuple[int, int, int, int]] = [
-            # 1. Center focal region (prominent subject)
             (int(0.12 * width), int(0.12 * height), int(0.88 * width), int(0.88 * height)),
-            # 2. Left half subject
             (int(0.05 * width), int(0.15 * height), int(0.55 * width), int(0.85 * height)),
-            # 3. Right half subject
             (int(0.45 * width), int(0.15 * height), int(0.95 * width), int(0.85 * height)),
-            # 4. Upper center (faces, signage, upper body)
             (int(0.20 * width), int(0.05 * height), int(0.80 * width), int(0.60 * height)),
-            # 5. Lower center (ground objects, vehicles, items)
             (int(0.15 * width), int(0.40 * height), int(0.85 * width), int(0.95 * height)),
         ]
 
@@ -175,60 +183,86 @@ class SamMaskGenerator:
                 import torch
 
                 with torch.inference_mode():
-                    self.predictor.set_image(rgb_np)
                     candidates: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
-                    for box in anchor_boxes:
+
+                    # 1. Primary: dense automatic mask generation across the entire image
+                    if self.auto_mask_generator is not None:
                         try:
-                            masks, scores, _ = self.predictor.predict(
-                                box=np.array(box),
-                                multimask_output=False,
-                            )
-                            seg = np.asarray(masks[0], dtype=bool)
-                            score = float(scores[0])
-                            if not seg.any() or not math.isfinite(score):
-                                continue
-
-                            area = float(seg.sum())
-                            ratio = area / img_area
-                            if ratio < min_area_ratio or ratio > max_area_ratio:
-                                continue
-
-                            # Derive tight bounding box from the actual SAM silhouette
-                            ys, xs = np.where(seg)
-                            x1, y1 = int(xs.min()), int(ys.min())
-                            x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
-                            if x2 <= x1 or y2 <= y1:
-                                continue
-
-                            candidates.append((seg, (x1, y1, x2, y2), score, area))
+                            raw_masks = self.auto_mask_generator.generate(rgb_np)
+                            for m in raw_masks:
+                                seg = np.asarray(m["segmentation"], dtype=bool)
+                                if not seg.any():
+                                    continue
+                                score = float(m.get("predicted_iou", 0.90)) * float(m.get("stability_score", 1.0))
+                                area = float(m.get("area", seg.sum()))
+                                ratio = area / img_area
+                                if ratio < min_area_ratio or ratio > max_area_ratio:
+                                    continue
+                                x, y, w_box, h_box = m["bbox"]
+                                x1, y1 = int(round(x)), int(round(y))
+                                x2, y2 = int(round(x + w_box)), int(round(y + h_box))
+                                if x2 <= x1 or y2 <= y1:
+                                    continue
+                                candidates.append((seg, (x1, y1, x2, y2), score, area))
                         except Exception:
-                            continue
+                            candidates = []
 
-                # Sort by quality score descending
-                candidates.sort(key=lambda item: item[2], reverse=True)
-                selected: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
-                for seg, box, score, area in candidates:
-                    overlap = False
-                    for _, s_box, _, _ in selected:
-                        ix1 = max(box[0], s_box[0])
-                        iy1 = max(box[1], s_box[1])
-                        ix2 = min(box[2], s_box[2])
-                        iy2 = min(box[3], s_box[3])
-                        if ix2 > ix1 and iy2 > iy1:
-                            inter = (ix2 - ix1) * (iy2 - iy1)
-                            b1_a = (box[2] - box[0]) * (box[3] - box[1])
-                            b2_a = (s_box[2] - s_box[0]) * (s_box[3] - s_box[1])
-                            iou = inter / float(b1_a + b2_a - inter)
-                            if iou > 0.50:
-                                overlap = True
+                    # 2. Fallback: prompt-based focal discovery if auto_generator had no candidates
+                    if not candidates and self.predictor is not None:
+                        self.predictor.set_image(rgb_np)
+                        for box in anchor_boxes:
+                            try:
+                                masks, scores, _ = self.predictor.predict(
+                                    box=np.array(box),
+                                    multimask_output=False,
+                                )
+                                seg = np.asarray(masks[0], dtype=bool)
+                                score = float(scores[0])
+                                if not seg.any() or not math.isfinite(score):
+                                    continue
+
+                                area = float(seg.sum())
+                                ratio = area / img_area
+                                if ratio < min_area_ratio or ratio > max_area_ratio:
+                                    continue
+
+                                # Derive tight bounding box from the actual SAM silhouette
+                                ys, xs = np.where(seg)
+                                x1, y1 = int(xs.min()), int(ys.min())
+                                x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
+                                if x2 <= x1 or y2 <= y1:
+                                    continue
+
+                                candidates.append((seg, (x1, y1, x2, y2), score, area))
+                            except Exception:
+                                continue
+
+                    if candidates:
+                        # Sort by quality score descending
+                        candidates.sort(key=lambda item: item[2], reverse=True)
+                        selected: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
+                        for seg, box, score, area in candidates:
+                            overlap = False
+                            for _, s_box, _, _ in selected:
+                                ix1 = max(box[0], s_box[0])
+                                iy1 = max(box[1], s_box[1])
+                                ix2 = min(box[2], s_box[2])
+                                iy2 = min(box[3], s_box[3])
+                                if ix2 > ix1 and iy2 > iy1:
+                                    inter = (ix2 - ix1) * (iy2 - iy1)
+                                    b1_a = (box[2] - box[0]) * (box[3] - box[1])
+                                    b2_a = (s_box[2] - s_box[0]) * (s_box[3] - s_box[1])
+                                    iou = inter / float(b1_a + b2_a - inter)
+                                    if iou > 0.45:
+                                        overlap = True
+                                        break
+                            if not overlap:
+                                selected.append((seg, box, score, area))
+                            if len(selected) >= max_regions:
                                 break
-                    if not overlap:
-                        selected.append((seg, box, score, area))
-                    if len(selected) >= max_regions:
-                        break
 
-                if selected:
-                    return [(seg, box, score) for seg, box, score, _ in selected]
+                        if selected:
+                            return [(seg, box, score) for seg, box, score, _ in selected]
             except Exception:
                 pass
 
