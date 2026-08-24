@@ -247,33 +247,40 @@ class DamCaptioner:
     def describe_region(
         self,
         image: Image.Image,
-        mask: np.ndarray | Image.Image,
+        mask: np.ndarray | Image.Image | None = None,
         bbox_xyxy_px: tuple[int, int, int, int] | None = None,
         class_entity: str | None = None,
         max_words: int = 50,
         max_new_tokens: int = 48,
     ) -> CaptionResult:
-        """Describe a specific segmented region mask with normalized <=50 word caption."""
-        if isinstance(mask, np.ndarray):
+        """Describe a specific segmented region directly via its bounding box mask with normalized <=50 word caption."""
+        image_rgb = image.convert("RGB")
+        w, h = image_rgb.size
+
+        # Directly generate the clean bounding-box rectangular mask
+        if bbox_xyxy_px is not None:
+            x1, y1, x2, y2 = bbox_xyxy_px
+            x1 = max(0, min(w - 1, int(round(x1))))
+            y1 = max(0, min(h - 1, int(round(y1))))
+            x2 = max(x1 + 1, min(w, int(round(x2))))
+            y2 = max(y1 + 1, min(h, int(round(y2))))
+            from PIL import ImageDraw
+
+            mask_img = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(mask_img).rectangle([x1, y1, x2, y2], fill=255)
+        elif isinstance(mask, np.ndarray):
             mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+            if mask_img.size != (w, h):
+                mask_img = mask_img.resize((w, h), Image.NEAREST)
         elif isinstance(mask, Image.Image):
             mask_img = mask.convert("L")
+            if mask_img.size != (w, h):
+                mask_img = mask_img.resize((w, h), Image.NEAREST)
         else:
-            raise TypeError(f"Unsupported mask type: {type(mask)}")
+            mask_img = Image.new("L", (w, h), 255)
 
-        image_rgb = image.convert("RGB")
-        if mask_img.size != image_rgb.size:
-            mask_img = mask_img.resize(image_rgb.size, Image.NEAREST)
-
-        # Fallback for completely empty mask: render bounding box if available
         if mask_img.getbbox() is None:
-            if bbox_xyxy_px is not None:
-                from PIL import ImageDraw
-                draw_img = Image.new("L", image_rgb.size, 0)
-                ImageDraw.Draw(draw_img).rectangle(list(bbox_xyxy_px), fill=255)
-                mask_img = draw_img
-            else:
-                mask_img = Image.new("L", image_rgb.size, 255)
+            mask_img = Image.new("L", (w, h), 255)
 
         raw_caption = self.describe(image_rgb, mask_img, max_new_tokens=max_new_tokens)
         return normalize_caption(raw_caption, maximum_words=max_words)
