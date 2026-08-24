@@ -91,9 +91,12 @@ def main() -> int:
                 mask_img = Image.new("L", (w, h), 255)
 
             try:
-                raw_caption = captioner.describe(
-                    image_rgb, mask_img, max_new_tokens=args.max_new_tokens
-                )
+                import torch
+
+                with torch.inference_mode():
+                    raw_caption = captioner.describe(
+                        image_rgb, mask_img, max_new_tokens=args.max_new_tokens
+                    )
                 cap_res = normalize_caption(raw_caption, maximum_words=args.max_words)
                 frame_captions.append(
                     {
