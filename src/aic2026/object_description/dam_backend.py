@@ -166,17 +166,15 @@ class DamCaptioner:
 
         image_rgb = image.convert("RGB")
         output = self.model.get_description(
-            [image_rgb],
-            [mask],
+            image_rgb,
+            mask,
             DAM_PROMPT,
             streaming=False,
             temperature=0,
             num_beams=1,
             max_new_tokens=max_new_tokens,
         )
-        if isinstance(output, list | tuple):
-            output = output[0] if len(output) > 0 else ""
-        elif not isinstance(output, str):
+        if not isinstance(output, str):
             try:
                 output = next(iter(output))
             except Exception:

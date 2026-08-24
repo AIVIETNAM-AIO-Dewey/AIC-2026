@@ -354,16 +354,20 @@ class UnifiedVideoPipeline:
                 tasks_file = temp_dir / f"{video_id}_tasks.json"
                 out_desc_file = temp_dir / f"{video_id}_descriptions.json"
 
+                from aic2026.object_description.rle import encode_mask
+
                 tasks_payload = []
                 for c, img_path in extracted_frames:
                     frame_masks = all_masks.get(c.keyframe_n, [])
                     regions_payload = []
                     for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                        rle_data = encode_mask(mask_bool).model_dump(mode="json") if mask_bool is not None else None
                         regions_payload.append({
                             "region_id": f"reg_{r_idx:03d}",
                             "bbox_xyxy": list(bbox_xyxy) if bbox_xyxy else None,
                             "sam_iou": float(iou_score) if iou_score is not None else 0.90,
                             "class_label": "object",
+                            "mask_rle": rle_data,
                         })
                     tasks_payload.append({
                         "keyframe_n": c.keyframe_n,

@@ -78,8 +78,15 @@ def main() -> int:
             class_label = reg.get("class_label", "object")
             iou = reg.get("sam_iou", 0.90)
 
-            # Create bounding box mask
-            if bbox:
+            # Decode the exact SAM segmented mask if present, otherwise fallback to bbox rectangle
+            if reg.get("mask_rle"):
+                from aic2026.object_description.rle import decode_mask
+
+                mask_array = decode_mask(reg["mask_rle"])
+                mask_img = Image.fromarray((np.asarray(mask_array, dtype=np.uint8) * 255), mode="L")
+                if mask_img.size != (w, h):
+                    mask_img = mask_img.resize((w, h), Image.NEAREST)
+            elif bbox:
                 x1, y1, x2, y2 = bbox
                 x1 = max(0, min(w - 1, int(round(x1))))
                 y1 = max(0, min(h - 1, int(round(y1))))
