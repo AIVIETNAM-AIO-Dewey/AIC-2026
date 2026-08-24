@@ -51,7 +51,13 @@ from .contracts import (
 
 
 class UnifiedVideoPipeline:
-    """End-to-end multi-modal video extractor and enricher."""
+    """End-to-end multi-modal video extractor and enricher.
+
+    Supports both:
+    1. Staged mode (default): Loads models on-demand one by one and frees GPU memory between stages.
+       This ensures maximum VRAM headroom (~15GB available for each model) and prevents CUDA context corruption.
+    2. Preloaded mode: Uses explicitly provided in-memory model instances (useful for testing and fast single-frame pipelines).
+    """
 
     def __init__(
         self,
@@ -61,6 +67,14 @@ class UnifiedVideoPipeline:
         sam_generator: SamMaskGenerator | None = None,
         dam_captioner: DamCaptioner | None = None,
         device: str = "cuda",
+        staged: bool = True,
+        load_transnet: bool = True,
+        load_siglip: bool = True,
+        load_ocr: bool = True,
+        load_sam_dam: bool = True,
+        dam_model_id: str = "nvidia/DAM-3B",
+        dam_revision: str = "0797bedd98d645cd021379a4661ee233da279bba",
+        dam_code_revision: str = "153ad3d33c29324e9197f565547c6bc8500da02d",
     ) -> None:
         self.device = device
         self.transnet_model = transnet_model
@@ -68,6 +82,14 @@ class UnifiedVideoPipeline:
         self.ocr_reader = ocr_reader
         self.sam_generator = sam_generator
         self.dam_captioner = dam_captioner
+        self.staged = staged
+        self.load_transnet = load_transnet
+        self.load_siglip = load_siglip
+        self.load_ocr = load_ocr
+        self.load_sam_dam = load_sam_dam
+        self.dam_model_id = dam_model_id
+        self.dam_revision = dam_revision
+        self.dam_code_revision = dam_code_revision
 
     @classmethod
     def load(
@@ -80,53 +102,32 @@ class UnifiedVideoPipeline:
         dam_model_id: str = "nvidia/DAM-3B",
         dam_revision: str = "0797bedd98d645cd021379a4661ee233da279bba",
         dam_code_revision: str = "153ad3d33c29324e9197f565547c6bc8500da02d",
+        staged: bool = True,
     ) -> UnifiedVideoPipeline:
-        """Load all enabled multi-modal models onto the specified device."""
+        """Create the pipeline in staged execution mode (models loaded on-demand one-by-one)."""
         print(f"\n{'='*75}", flush=True)
-        print(f"🚀 INITIALIZING MULTI-MODAL MODELS ON: {device.upper()}", flush=True)
+        print(f"🚀 INITIALIZING UNIFIED MULTI-MODAL PIPELINE (MODE: {'STAGED / SEQUENTIAL' if staged else 'PRELOADED'}) ON: {device.upper()}", flush=True)
         print(f"{'='*75}", flush=True)
-
-        transnet = None
-        if load_transnet:
-            print("  ⏳ [1/4] Loading TransNetV2 (PyTorch Shot Boundary Detector)...", flush=True)
-            transnet = load_transnetv2_model(device=device)
-            print("     ✓ TransNetV2 loaded successfully!", flush=True)
-
-        siglip = None
+        print("  ✓ Stage 1: TransNetV2 Shot Detection (On-Demand)", flush=True)
         if load_siglip:
-            print("  ⏳ [2/4] Loading SigLIP-2 (google/siglip2-base-patch16-224)...", flush=True)
-            siglip = SiglipEncoder.from_pretrained(device=device)
-            print("     ✓ SigLIP-2 (768-dim) loaded successfully!", flush=True)
-
-        ocr = None
+            print("  ✓ Stage 2: SigLIP-2 Visual Embedding (On-Demand)", flush=True)
         if load_ocr:
-            print("  ⏳ [3/4] Loading OCR Reader (Vietnamese + English)...", flush=True)
-            ocr = OcrReader.create(device=device)
-            print(f"     ✓ OCR Reader ({ocr.backend_type.upper()}) loaded successfully!", flush=True)
-
-        sam = None
-        dam = None
+            print("  ✓ Stage 3: OCR Text Extraction & Normalization (On-Demand)", flush=True)
         if load_sam_dam:
-            print("  ⏳ [4/4] Loading Meta SAM (ViT-B) & NVIDIA DAM-3B...", flush=True)
-            sam = SamMaskGenerator.from_pretrained(device=device)
-            print("     ✓ Meta SAM loaded successfully!", flush=True)
-            dam = DamCaptioner.from_pretrained(
-                model_id=dam_model_id,
-                revision=dam_revision,
-                code_revision=dam_code_revision,
-            )
-            print("     ✓ DAM-3B loaded successfully!", flush=True)
-
-        print(f"{'='*75}", flush=True)
-        print("✓ All 5 multi-modal engines initialized into GPU memory!", flush=True)
+            print("  ✓ Stage 4: Meta SAM Object Segmentation (On-Demand)", flush=True)
+            print("  ✓ Stage 5: NVIDIA DAM-3B Dense Descriptions (On-Demand)", flush=True)
         print(f"{'='*75}\n", flush=True)
+
         return cls(
-            transnet_model=transnet,
-            siglip_encoder=siglip,
-            ocr_reader=ocr,
-            sam_generator=sam,
-            dam_captioner=dam,
             device=device,
+            staged=staged,
+            load_transnet=load_transnet,
+            load_siglip=load_siglip,
+            load_ocr=load_ocr,
+            load_sam_dam=load_sam_dam,
+            dam_model_id=dam_model_id,
+            dam_revision=dam_revision,
+            dam_code_revision=dam_code_revision,
         )
 
     def process_video(
@@ -145,6 +146,14 @@ class UnifiedVideoPipeline:
         Returns:
             (map_csv_path, unified_jsonl_path, records)
         """
+        import gc
+        import torch
+
+        def _cleanup_gpu() -> None:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         started_at = time.monotonic()
         video_path = video_path.resolve()
         probe = probe_video(video_path)
@@ -154,21 +163,34 @@ class UnifiedVideoPipeline:
         print(f"   • Path:     {video_path}", flush=True)
         print(f"   • Duration: {probe.duration_s:.1f}s | FPS: {fps:.2f} | Resolution: {probe.width}x{probe.height}", flush=True)
 
-        # 1. TransNetV2 Shot Detection
-        print(f"\n⚡ [1/4] Running TransNetV2 Shot Boundary Detection...", flush=True)
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 1: TransNetV2 Shot Detection
+        # ─────────────────────────────────────────────────────────────
+        print(f"\n⚡ [1/6] Running TransNetV2 Shot Boundary Detection...", flush=True)
         t_shot_start = time.monotonic()
+        transnet = self.transnet_model
+        if transnet is None and self.load_transnet:
+            print("   ⏳ Loading TransNetV2 into GPU memory...", flush=True)
+            transnet = load_transnetv2_model(device=self.device)
+
         transnet_res = run_transnetv2_inference(
             video_path=video_path,
             video_id=video_id,
             fps=fps,
-            model=self.transnet_model,
+            model=transnet,
             device=self.device,
         )
         shots = transnet_res.shots
         print(f"   ✓ TransNetV2 completed in {time.monotonic() - t_shot_start:.2f}s (Detected {len(shots)} distinct scene shots)", flush=True)
 
-        # 2. Adaptive Keyframe Sampling
-        print("🎯 [2/4] Applying Adaptive Keyframe Sampling Policy...", flush=True)
+        if self.staged and self.transnet_model is None:
+            del transnet
+            _cleanup_gpu()
+
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 2: Adaptive Keyframe Sampling & FFmpeg Extraction
+        # ─────────────────────────────────────────────────────────────
+        print("🎯 [2/6] Applying Adaptive Keyframe Sampling Policy...", flush=True)
         raw_samples = adaptive_samples_from_shots(shots)
         candidates = dedupe_samples(raw_samples, tolerance_s=0.5)
         if max_frames is not None and max_frames > 0:
@@ -186,7 +208,7 @@ class UnifiedVideoPipeline:
         map_csv_path = map_csv_dir / f"{video_id}.csv"
         unified_jsonl_path = unified_dir / f"{video_id}.jsonl"
 
-        # 3. Write Canonical map-keyframes CSV
+        # Write Canonical map-keyframes CSV
         with open(map_csv_path, "w", newline="", encoding="utf-8") as f_csv:
             writer = csv.writer(f_csv)
             writer.writerow(["n", "pts_time", "fps", "frame_idx"])
@@ -194,8 +216,8 @@ class UnifiedVideoPipeline:
                 writer.writerow([c.keyframe_n, f"{c.pts_time_s:.3f}", f"{fps:.1f}", c.frame_idx])
         print(f"   ✓ Generated canonical map-keyframes CSV: {map_csv_path}", flush=True)
 
-        # 4. Extract High-Quality JPEG Frames
-        print(f"🖼️ [3/4] Extracting {len(candidates)} high-res JPEG keyframes via FFmpeg...", flush=True)
+        # Extract High-Quality JPEG Frames via FFmpeg
+        print(f"🖼️ [3/6] Extracting {len(candidates)} high-res JPEG keyframes via FFmpeg...", flush=True)
         extracted_frames: list[tuple[Any, Path]] = []
         for c in candidates:
             img_name = f"{c.keyframe_n:03d}.jpg"
@@ -210,35 +232,44 @@ class UnifiedVideoPipeline:
             extracted_frames.append((c, img_path))
         print("   ✓ Keyframe JPEG extraction completed!", flush=True)
 
-        # 5. Multi-Modal Enrichment (SigLIP-2 + OCR + SAM + DAM)
-        print(f"\n🔮 [4/4] Multi-Modal Enrichment for {len(extracted_frames)} Frames (SigLIP-2, OCR, SAM, DAM-3B)...", flush=True)
-        filter_cfg = FilterConfig(
-            minimum_score=score_threshold,
-            minimum_area_ratio=0.005,
-            maximum_area_ratio=0.85,
-            same_class_iou=0.45,
-            cross_label_duplicate_iou=0.60,
-            maximum_regions=max_regions_per_frame,
-        )
+        # Load extracted images into memory for multi-modal stages
+        frame_images: dict[int, Image.Image] = {}
+        for c, img_path in extracted_frames:
+            with Image.open(img_path) as im:
+                frame_images[c.keyframe_n] = im.convert("RGB")
 
-        records: list[UnifiedFrameRecord] = []
-        for idx, (cand, img_path) in enumerate(extracted_frames, start=1):
-            f_start = time.monotonic()
-            with Image.open(img_path) as pil_img:
-                image_rgb = pil_img.convert("RGB")
-                img_w, img_h = image_rgb.size
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 3: SigLIP-2 Scene Embeddings & OCR Text Extraction
+        # ─────────────────────────────────────────────────────────────
+        siglip_embeddings: dict[int, list[float] | None] = {}
+        ocr_results: dict[int, UnifiedOcrResult] = {}
 
-            # A. SigLIP-2 Embedding
-            siglip_vec: list[float] | None = None
-            if self.siglip_encoder is not None:
-                vec_np = self.siglip_encoder.encode_images([image_rgb])
-                if len(vec_np) > 0:
-                    siglip_vec = vec_np[0].tolist()
+        if self.load_siglip:
+            print(f"\n🔮 [4/6] Running SigLIP-2 Embeddings & OCR Text Extraction...", flush=True)
+            siglip = self.siglip_encoder
+            if siglip is None:
+                print("   ⏳ Loading SigLIP-2 into GPU memory...", flush=True)
+                siglip = SiglipEncoder.from_pretrained(device=self.device)
 
-            # B. OCR Extraction
-            ocr_res = UnifiedOcrResult(full_text="")
-            if self.ocr_reader is not None:
-                raw_ocr = self.ocr_reader.extract(image_rgb, image_path=img_path)
+            print(f"   ▶ Encoding {len(extracted_frames)} keyframes with SigLIP-2...", flush=True)
+            for c, img_path in extracted_frames:
+                vecs = siglip.encode_images([frame_images[c.keyframe_n]])
+                siglip_embeddings[c.keyframe_n] = vecs[0].tolist() if len(vecs) > 0 else None
+            print("   ✓ SigLIP-2 embeddings generated!", flush=True)
+
+            if self.staged and self.siglip_encoder is None:
+                del siglip
+                _cleanup_gpu()
+
+        if self.load_ocr:
+            ocr = self.ocr_reader
+            if ocr is None:
+                print("   ⏳ Loading OCR Reader into GPU memory...", flush=True)
+                ocr = OcrReader.create(device=self.device)
+
+            print(f"   ▶ Extracting OCR text from {len(extracted_frames)} keyframes...", flush=True)
+            for c, img_path in extracted_frames:
+                raw_ocr = ocr.extract(frame_images[c.keyframe_n], image_path=img_path)
                 ocr_spans = [
                     UnifiedOcrSpan(
                         line_id=s.line_id,
@@ -250,28 +281,66 @@ class UnifiedVideoPipeline:
                     )
                     for s in raw_ocr.spans
                 ]
-                ocr_res = UnifiedOcrResult(full_text=raw_ocr.full_text, spans=ocr_spans)
+                ocr_results[c.keyframe_n] = UnifiedOcrResult(full_text=raw_ocr.full_text, spans=ocr_spans)
+            print("   ✓ OCR text extraction completed!", flush=True)
 
-            # C. SAM Object Segmentation & DAM-3B Dense Descriptions
-            dam_captions: list[DamRegionCaption] = []
-            if self.dam_captioner is not None and self.sam_generator is not None:
-                auto_masks = self.sam_generator.generate_automatic_masks(
-                    image=image_rgb,
+            if self.staged and self.ocr_reader is None:
+                del ocr
+                _cleanup_gpu()
+
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 4: Meta SAM Object Segmentation
+        # ─────────────────────────────────────────────────────────────
+        all_masks: dict[int, list[tuple[np.ndarray, tuple[int, int, int, int], float]]] = {}
+        if self.load_sam_dam:
+            print(f"\n✂️ [5/6] Running Meta SAM ViT-B Object Segmentation...", flush=True)
+            sam = self.sam_generator
+            if sam is None:
+                print("   ⏳ Loading Meta SAM ViT-B into GPU memory...", flush=True)
+                sam = SamMaskGenerator.from_pretrained(device=self.device)
+
+            for c, img_path in extracted_frames:
+                masks = sam.generate_automatic_masks(
+                    image=frame_images[c.keyframe_n],
                     max_regions=max_regions_per_frame,
                     min_area_ratio=0.005,
                     max_area_ratio=0.85,
                 )
+                all_masks[c.keyframe_n] = masks
+            print(f"   ✓ SAM segmentation completed for {len(extracted_frames)} keyframes!", flush=True)
 
-                for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(auto_masks, start=1):
-                    caption_result = self.dam_captioner.describe_region(
-                        image=image_rgb,
+            if self.staged and self.sam_generator is None:
+                del sam
+                _cleanup_gpu()
+
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 5: NVIDIA DAM-3B Dense Captioning
+        # ─────────────────────────────────────────────────────────────
+        all_dam_captions: dict[int, list[DamRegionCaption]] = {}
+        if self.load_sam_dam:
+            print(f"\n🏷️ [6/6] Running NVIDIA DAM-3B Dense Descriptions (Pristine GPU Context)...", flush=True)
+            dam = self.dam_captioner
+            if dam is None:
+                print("   ⏳ Loading DAM-3B into GPU memory...", flush=True)
+                dam = DamCaptioner.from_pretrained(
+                    model_id=self.dam_model_id,
+                    revision=self.dam_revision,
+                    code_revision=self.dam_code_revision,
+                )
+
+            for c, img_path in extracted_frames:
+                frame_caps: list[DamRegionCaption] = []
+                frame_masks = all_masks.get(c.keyframe_n, [])
+                for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                    caption_result = dam.describe_region(
+                        image=frame_images[c.keyframe_n],
                         mask=mask_bool,
                         bbox_xyxy_px=bbox_xyxy,
                         class_entity="object",
                         max_words=maximum_words,
                     )
                     if caption_result.status == "ok" and caption_result.description_en:
-                        dam_captions.append(
+                        frame_caps.append(
                             DamRegionCaption(
                                 region_id=f"reg_{r_idx:03d}",
                                 class_label="object",
@@ -281,9 +350,24 @@ class UnifiedVideoPipeline:
                                 word_count=caption_result.word_count,
                             )
                         )
+                all_dam_captions[c.keyframe_n] = frame_caps
 
-            # Build Canonical Unified Frame Record
+            print(f"   ✓ DAM-3B descriptions generated for all {len(extracted_frames)} keyframes!", flush=True)
+
+            if self.staged and self.dam_captioner is None:
+                del dam
+                _cleanup_gpu()
+
+        # ─────────────────────────────────────────────────────────────
+        # STAGE 6: Assemble Records & Serialize Output
+        # ─────────────────────────────────────────────────────────────
+        records: list[UnifiedFrameRecord] = []
+        for cand, img_path in extracted_frames:
             frame_relpath = f"frames/{video_id}/{cand.keyframe_n:03d}.jpg"
+            ocr_res = ocr_results.get(cand.keyframe_n, UnifiedOcrResult(full_text=""))
+            dam_caps = all_dam_captions.get(cand.keyframe_n, [])
+            sig_vec = siglip_embeddings.get(cand.keyframe_n, None)
+
             record = UnifiedFrameRecord(
                 video_id=video_id,
                 frame_uid=f"{video_id}:{cand.frame_idx}",
@@ -293,20 +377,20 @@ class UnifiedVideoPipeline:
                 fps=fps,
                 shot_id=cand.shot_id,
                 image_relpath=frame_relpath,
-                siglip_embedding=siglip_vec,
+                siglip_embedding=sig_vec,
                 ocr=ocr_res,
-                dam_descriptions=dam_captions,
+                dam_descriptions=dam_caps,
             )
             records.append(record)
-            ocr_text_preview = ocr_res.full_text[:35] + "..." if len(ocr_res.full_text) > 35 else (ocr_res.full_text or "<no text>")
-            f_elapsed = time.monotonic() - f_start
+
+            ocr_preview = ocr_res.full_text[:35] + "..." if len(ocr_res.full_text) > 35 else (ocr_res.full_text or "<no text>")
             print(
-                f"  ▶ [{idx:02d}/{len(extracted_frames):02d}] Keyframe #{cand.keyframe_n} (idx:{cand.frame_idx:05d} @ {cand.pts_time_s:6.2f}s) "
-                f"| OCR: {ocr_text_preview!r} | DAM: {len(dam_captions)} objects | {f_elapsed:.2f}s",
+                f"  ▶ Keyframe #{cand.keyframe_n:03d} (idx:{cand.frame_idx:05d} @ {cand.pts_time_s:6.2f}s) "
+                f"| OCR: {ocr_preview!r} | DAM: {len(dam_caps)} objects",
                 flush=True,
             )
 
-        # 6. Save Unified JSONL
+        # Save Unified JSONL
         with open(unified_jsonl_path, "w", encoding="utf-8") as f_jsonl:
             for rec in records:
                 f_jsonl.write(json.dumps(rec.model_dump(mode="json"), ensure_ascii=False) + "\n")
