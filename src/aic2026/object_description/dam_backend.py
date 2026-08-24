@@ -148,10 +148,16 @@ class DamCaptioner:
             if torch.cuda.is_available():
                 if hasattr(model, "model") and model.model is not None:
                     model.model.to(dtype=torch.float16)
+                    if hasattr(model.model, "config"):
+                        model.model.config.torch_dtype = torch.float16
                     if hasattr(model.model, "get_vision_tower"):
                         vt = model.model.get_vision_tower()
                         if vt is not None:
+                            if hasattr(vt, "vision_tower") and vt.vision_tower is not None:
+                                vt.vision_tower.to(device=model.device, dtype=torch.float16)
                             vt.to(device=model.device, dtype=torch.float16)
+                    for m in model.model.modules():
+                        m.to(dtype=torch.float16)
         except Exception:
             pass
         model.eval()
@@ -175,15 +181,18 @@ class DamCaptioner:
         elif pm != "full+focal_crop" and prompt.count("<image>") > 1:
             prompt = prompt.replace("<image>\n<image>", "<image>")
 
-        output = self.model.get_description(
-            image.convert("RGB"),
-            mask,
-            prompt,
-            streaming=False,
-            temperature=0,
-            num_beams=1,
-            max_new_tokens=max_new_tokens,
-        )
+        import torch
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+                output = self.model.get_description(
+                    image.convert("RGB"),
+                    mask,
+                    prompt,
+                    streaming=False,
+                    temperature=0,
+                    num_beams=1,
+                    max_new_tokens=max_new_tokens,
+                )
         if not isinstance(output, str):
             raise TypeError("DAM returned a non-string description")
         return output
