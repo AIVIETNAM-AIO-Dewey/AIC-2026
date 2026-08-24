@@ -72,9 +72,36 @@ class DamCaptioner:
             _t_import.is_sklearn_available = lambda: False
             _t_import._tf_available = False
             _t_import.is_tf_available = lambda: False
-            import transformers.utils as _t_utils
-            _t_utils._scipy_available = False
-            _t_utils.is_scipy_available = lambda: False
+        except Exception:
+            pass
+
+        # Ensure transformers.modeling_utils compatibility for older LLaVA/DAM architectures
+        try:
+            import contextlib
+            import transformers.modeling_utils as _t_mu
+
+            if not hasattr(_t_mu, "no_init_weights"):
+                @contextlib.contextmanager
+                def _dummy_no_init_weights(*args: Any, **kwargs: Any) -> Any:
+                    yield
+                _t_mu.no_init_weights = _dummy_no_init_weights
+
+            if not hasattr(_t_mu, "ContextManagers"):
+                class _DummyContextManagers:
+                    def __init__(self, context_managers: Any) -> None:
+                        self.context_managers = list(context_managers) if context_managers else []
+
+                    def __enter__(self) -> None:
+                        for cm in self.context_managers:
+                            if hasattr(cm, "__enter__"):
+                                cm.__enter__()
+
+                    def __exit__(self, *args: Any) -> None:
+                        for cm in reversed(self.context_managers):
+                            if hasattr(cm, "__exit__"):
+                                cm.__exit__(*args)
+
+                _t_mu.ContextManagers = _DummyContextManagers
         except Exception:
             pass
 
