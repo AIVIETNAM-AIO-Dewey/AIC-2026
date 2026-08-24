@@ -163,17 +163,27 @@ class DamCaptioner:
             mask = mask.convert("L")
         if mask.size != image.size or mask.getbbox() is None:
             raise ValueError("DAM mask must be non-empty and match the image dimensions")
+
+        image_rgb = image.convert("RGB")
         output = self.model.get_description(
-            image.convert("RGB"),
-            mask,
+            [image_rgb],
+            [mask],
             DAM_PROMPT,
             streaming=False,
             temperature=0,
             num_beams=1,
             max_new_tokens=max_new_tokens,
         )
+        if isinstance(output, list | tuple):
+            output = output[0] if len(output) > 0 else ""
+        elif not isinstance(output, str):
+            try:
+                output = next(iter(output))
+            except Exception:
+                output = str(output)
+
         if not isinstance(output, str):
-            raise TypeError("DAM returned a non-string description")
+            raise TypeError(f"DAM returned a non-string description: {type(output)}")
         return output
 
     def describe_region(

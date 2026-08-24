@@ -110,7 +110,10 @@ def main() -> int:
                     }
                 )
             except Exception as e:
+                import traceback
+
                 print(f"   ⚠️ [DAM-Isolated-Process] Region {reg_id} error: {e}", flush=True)
+                traceback.print_exc()
                 frame_captions.append(
                     {
                         "region_id": reg_id,
