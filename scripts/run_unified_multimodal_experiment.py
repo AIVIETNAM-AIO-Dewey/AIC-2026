@@ -41,29 +41,61 @@ def find_video_file(video_id: str, direct_path: Path | None, video_root: Path | 
     if direct_path and direct_path.is_file():
         return direct_path
 
-    roots_to_check = [
+    batch = video_id.split("_")[0]  # e.g. L21
+    filename = f"{video_id}.mp4"
+
+    # Targeted candidate locations across known Kaggle dataset structures
+    base_dirs: list[Path | None] = [
         video_root,
-        Path("/kaggle/input"),
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Videos"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/videos"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video"),
+        Path("/kaggle/input/aic-26-video/Videos"),
+        Path("/kaggle/input/aic-26-video/videos"),
+        Path("/kaggle/input/aic-26-video"),
+        Path("/kaggle/input/aic2026-video/Videos"),
+        Path("/kaggle/input/aic2026-video"),
         REPO_ROOT / "data" / "videos",
     ]
-    for root in roots_to_check:
-        if root is None or not root.exists():
+    candidates: list[Path] = []
+    for b in base_dirs:
+        if b is None or not b.exists():
             continue
-        candidates = [
-            root / f"{video_id}.mp4",
-            root / video_id.split("_")[0] / f"{video_id}.mp4",
-            root / f"Videos_{video_id.split('_')[0]}" / f"{video_id}.mp4",
-            root / "Videos" / f"Videos_{video_id.split('_')[0]}" / f"{video_id}.mp4",
-        ]
-        for cand in candidates:
-            if cand.is_file():
-                return cand
-        for match in root.rglob(f"{video_id}.mp4"):
-            if match.is_file():
-                return match
+        candidates.extend([
+            b / filename,
+            b / batch / filename,
+            b / f"Videos_{batch}" / filename,
+            b / f"Videos_{batch}" / "video" / filename,
+            b / f"Videos_{batch}" / "videos" / filename,
+            b / "Videos" / f"Videos_{batch}" / "video" / filename,
+            b / "Videos" / f"Videos_{batch}" / filename,
+            b / "videos" / f"Videos_{batch}" / "video" / filename,
+            b / "videos" / f"Videos_{batch}" / filename,
+        ])
 
-    raise FileNotFoundError(f"Video file for {video_id} not found. Please provide --video-path")
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+
+    # Shallow scan over top-level datasets under /kaggle/input (avoiding unconstrained rglob)
+    if Path("/kaggle/input").exists():
+        for dataset_dir in Path("/kaggle/input").iterdir():
+            if not dataset_dir.is_dir():
+                continue
+            for sub in [
+                dataset_dir / filename,
+                dataset_dir / batch / filename,
+                dataset_dir / f"Videos_{batch}" / filename,
+                dataset_dir / f"Videos_{batch}" / "video" / filename,
+                dataset_dir / "Videos" / f"Videos_{batch}" / "video" / filename,
+                dataset_dir / "Videos" / f"Videos_{batch}" / filename,
+            ]:
+                if sub.is_file():
+                    return sub
+
+    raise FileNotFoundError(
+        f"Video file {filename} not found. Please pass direct path with --video-path /path/to/{filename}"
+    )
 
 
 def render_multimodal_card(
