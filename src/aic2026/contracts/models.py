@@ -56,6 +56,27 @@ class FrameRef(StrictModel):
         return self
 
 
+class ShotRecord(StrictModel):
+    schema_version: Literal["aic26.shot.v1"] = "aic26.shot.v1"
+    video_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    shot_id: str = Field(min_length=1)
+    shot_start_idx: int = Field(ge=0)
+    shot_end_idx: int = Field(ge=0)
+    start_time_s: float = Field(ge=0)
+    end_time_s: float = Field(ge=0)
+    fps: PositiveFloat
+    source_video: str = Field(min_length=1)
+    source: Literal["transnetv2"] = "transnetv2"
+
+    @model_validator(mode="after")
+    def validate_shot_bounds(self) -> ShotRecord:
+        if self.shot_end_idx < self.shot_start_idx:
+            raise ValueError("shot_end_idx must be >= shot_start_idx")
+        if self.end_time_s < self.start_time_s:
+            raise ValueError("end_time_s must be >= start_time_s")
+        return self
+
+
 class DetectorMetadata(StrictModel):
     source: Literal["organizer_frcnn"] = "organizer_frcnn"
     class_name: str = Field(min_length=1)

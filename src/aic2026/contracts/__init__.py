@@ -10,6 +10,7 @@ from .models import (
     ObjectRegion,
     RunManifest,
     SegmentationResult,
+    ShotRecord,
 )
 from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperator
 
@@ -28,6 +29,7 @@ __all__ = [
     "QuerySpec",
     "RunManifest",
     "SegmentationResult",
+    "ShotRecord",
     "TaskType",
     "TemporalOperator",
 ]
