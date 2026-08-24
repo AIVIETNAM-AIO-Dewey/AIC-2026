@@ -47,51 +47,50 @@ def find_video_file(video_id: str, direct_path: Path | None, video_root: Path | 
     # Targeted candidate locations across known Kaggle dataset structures
     base_dirs: list[Path | None] = [
         video_root,
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Video/Video"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Video"),
+        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Videos/Videos"),
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Videos"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/videos"),
         Path("/kaggle/input/datasets/lyduchoang/aic-26-video"),
+        Path("/kaggle/input/aic-26-video/Video/Video"),
         Path("/kaggle/input/aic-26-video/Videos"),
-        Path("/kaggle/input/aic-26-video/videos"),
-        Path("/kaggle/input/aic-26-video"),
-        Path("/kaggle/input/aic2026-video/Videos"),
-        Path("/kaggle/input/aic2026-video"),
+        Path("/kaggle/input/aic2026-video/Video/Video"),
         REPO_ROOT / "data" / "videos",
     ]
-    candidates: list[Path] = []
+
     for b in base_dirs:
         if b is None or not b.exists():
             continue
-        candidates.extend([
-            b / filename,
-            b / batch / filename,
-            b / f"Videos_{batch}" / filename,
-            b / f"Videos_{batch}" / "video" / filename,
-            b / f"Videos_{batch}" / "videos" / filename,
-            b / "Videos" / f"Videos_{batch}" / "video" / filename,
-            b / "Videos" / f"Videos_{batch}" / filename,
-            b / "videos" / f"Videos_{batch}" / "video" / filename,
-            b / "videos" / f"Videos_{batch}" / filename,
-        ])
+        # Direct check for sub-batch suffixes (_a, _b, _c, _d, _e, _f, _g, _h, or none)
+        for suffix in ["_a", "_b", "_c", "_d", "_e", "_f", "_g", "_h", ""]:
+            for cand in [
+                b / f"Videos_{batch}{suffix}" / "video" / filename,
+                b / f"Videos_{batch}{suffix}" / filename,
+                b / f"{batch}{suffix}" / filename,
+                b / filename,
+            ]:
+                if cand.is_file():
+                    return cand
 
-    for cand in candidates:
-        if cand.is_file():
-            return cand
+        # Fast direct batch pattern glob
+        for cand in b.glob(f"Videos_{batch}*/video/{filename}"):
+            if cand.is_file():
+                return cand
+        for cand in b.glob(f"Videos_{batch}*/{filename}"):
+            if cand.is_file():
+                return cand
 
-    # Shallow scan over top-level datasets under /kaggle/input (avoiding unconstrained rglob)
+    # Shallow scan over top-level datasets under /kaggle/input
     if Path("/kaggle/input").exists():
         for dataset_dir in Path("/kaggle/input").iterdir():
             if not dataset_dir.is_dir():
                 continue
-            for sub in [
-                dataset_dir / filename,
-                dataset_dir / batch / filename,
-                dataset_dir / f"Videos_{batch}" / filename,
-                dataset_dir / f"Videos_{batch}" / "video" / filename,
-                dataset_dir / "Videos" / f"Videos_{batch}" / "video" / filename,
-                dataset_dir / "Videos" / f"Videos_{batch}" / filename,
-            ]:
-                if sub.is_file():
-                    return sub
+            for cand in dataset_dir.glob(f"**/Videos_{batch}*/video/{filename}"):
+                if cand.is_file():
+                    return cand
+            for cand in dataset_dir.glob(f"**/Videos_{batch}*/{filename}"):
+                if cand.is_file():
+                    return cand
 
     raise FileNotFoundError(
         f"Video file {filename} not found. Please pass direct path with --video-path /path/to/{filename}"
