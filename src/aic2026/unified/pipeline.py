@@ -262,6 +262,17 @@ class UnifiedVideoPipeline:
                     max_area_ratio=0.85,
                 )
 
+                # Explicitly flush temporary SAM tensors before DAM dense captioning
+                try:
+                    import gc
+                    import torch
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
                 for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(auto_masks, start=1):
                     caption_result = self.dam_captioner.describe_region(
                         image=image_rgb,
@@ -281,6 +292,17 @@ class UnifiedVideoPipeline:
                                 word_count=caption_result.word_count,
                             )
                         )
+
+                # Light defragmentation after frame captioning completes
+                try:
+                    import gc
+                    import torch
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
             # Build Canonical Unified Frame Record
             frame_relpath = f"frames/{video_id}/{cand.keyframe_n:03d}.jpg"

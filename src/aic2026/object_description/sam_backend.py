@@ -168,7 +168,12 @@ class SamMaskGenerator:
         if self.backend_type == "meta" and self.auto_mask_generator is not None:
             rgb_np = np.array(image.convert("RGB"))
             try:
-                raw_masks = self.auto_mask_generator.generate(rgb_np)
+                import gc
+                import torch
+
+                with torch.inference_mode():
+                    raw_masks = self.auto_mask_generator.generate(rgb_np)
+
                 candidates: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
                 for m in raw_masks:
                     seg = np.asarray(m["segmentation"], dtype=bool)
@@ -213,6 +218,16 @@ class SamMaskGenerator:
                     return [(seg, box, score) for seg, box, score, _ in selected]
             except Exception:
                 pass
+            finally:
+                try:
+                    import gc
+                    import torch
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
         # Fallback: Full frame description if no salient sub-objects passed threshold
         full_box = (0, 0, width, height)
