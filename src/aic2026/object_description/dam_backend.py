@@ -102,6 +102,26 @@ class DamCaptioner:
                                 cm.__exit__(*args)
 
                 _t_mu.ContextManagers = _DummyContextManagers
+
+            # Ensure PreTrainedModel handles older custom projectors missing all_tied_weights_keys
+            if hasattr(_t_mu, "PreTrainedModel"):
+                if not hasattr(_t_mu.PreTrainedModel, "all_tied_weights_keys"):
+                    _t_mu.PreTrainedModel.all_tied_weights_keys = property(
+                        lambda self: getattr(self, "_tied_weights_keys", {})
+                        if isinstance(getattr(self, "_tied_weights_keys", None), dict)
+                        else {}
+                    )
+
+                _orig_mark_tied = getattr(_t_mu.PreTrainedModel, "mark_tied_weights_as_initialized", None)
+                if _orig_mark_tied is not None:
+                    def _safe_mark_tied(self: Any, *args: Any, **kwargs: Any) -> Any:
+                        if not hasattr(self, "all_tied_weights_keys"):
+                            return None
+                        try:
+                            return _orig_mark_tied(self, *args, **kwargs)
+                        except AttributeError:
+                            return None
+                    _t_mu.PreTrainedModel.mark_tied_weights_as_initialized = _safe_mark_tied
         except Exception:
             pass
 
