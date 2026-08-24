@@ -143,58 +143,12 @@ class DamCaptioner:
             cache_dir=str(cache_dir) if cache_dir else None,
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
-        import torch
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-        model = None
-        for kwarg_name in ("dtype", "torch_dtype"):
-            if model is not None:
-                break
-            try:
-                model = DescribeAnythingModel(
-                    model_path=model_path,
-                    conv_mode="v1",
-                    prompt_mode="full+focal_crop",
-                    **{kwarg_name: dtype},
-                )
-            except TypeError:
-                continue
-            except Exception:
-                continue
-        if model is None:
-            model = DescribeAnythingModel(
-                model_path=model_path,
-                conv_mode="v1",
-                prompt_mode="full+focal_crop",
-            )
-
-        # ── Force ALL submodules to float16 on CUDA (Tesla T4 has zero bfloat16 support) ──
-        if torch.cuda.is_available():
-            inner = getattr(model, "model", None)
-            if inner is not None and isinstance(inner, torch.nn.Module):
-                inner.to(device="cuda", dtype=torch.float16)
-            if isinstance(model, torch.nn.Module):
-                model.to(device="cuda", dtype=torch.float16)
-
-            target = inner if inner is not None else model
-            if isinstance(target, torch.nn.Module):
-                bf16_count = 0
-                for name, param in target.named_parameters():
-                    if param.is_floating_point() and param.dtype == torch.bfloat16:
-                        param.data = param.data.to(torch.float16)
-                        bf16_count += 1
-                for name, buf in target.named_buffers():
-                    if buf.is_floating_point() and buf.dtype == torch.bfloat16:
-                        buf.data = buf.data.to(torch.float16)
-                        bf16_count += 1
-                if bf16_count > 0:
-                    print(f"     ⚠️  Force-cast {bf16_count} remaining bfloat16 params/buffers → float16")
-
-            if inner is not None and hasattr(inner, "config"):
-                inner.config.model_dtype = "torch.float16"
-                if hasattr(inner.config, "torch_dtype"):
-                    inner.config.torch_dtype = torch.float16
-
+        disable_torch_init()
+        model = DescribeAnythingModel(
+            model_path=model_path,
+            conv_mode="v1",
+            prompt_mode="full+focal_crop",
+        )
         model.eval()
         return cls(model)
 
@@ -211,39 +165,28 @@ class DamCaptioner:
             raise ValueError("DAM mask must be non-empty and match the image dimensions")
 
         image_rgb = image.convert("RGB")
-        prompt = DAM_PROMPT
-        pm = getattr(self.model, "prompt_mode", "full+focal_crop")
-        if pm == "full+focal_crop" and prompt.count("<image>") < 2:
-            prompt = "<image>\n" + prompt
-        elif pm != "full+focal_crop" and prompt.count("<image>") > 1:
-            prompt = prompt.replace("<image>\n<image>", "<image>")
+        if hasattr(self.model, "max_new_tokens"):
+            self.model.max_new_tokens = max_new_tokens
 
         import torch
 
         with torch.inference_mode():
+            output = self.model.get_description(
+                image_rgb,
+                mask,
+                DAM_PROMPT,
+                streaming=False,
+            )
+
+        if not isinstance(output, str):
             try:
-                output = self.model.get_description(
-                    image_rgb,
-                    mask,
-                    prompt,
-                    streaming=False,
-                    temperature=0,
-                    num_beams=1,
-                    max_new_tokens=max_new_tokens,
-                )
-            except ValueError as err:
-                if "no <image> tag found" in str(err):
-                    output = self.model.get_description(
-                        image_rgb,
-                        mask,
-                        f"<image>\n{prompt}",
-                        streaming=False,
-                        temperature=0,
-                        num_beams=1,
-                        max_new_tokens=max_new_tokens,
-                    )
-                else:
-                    raise
+                output = next(iter(output))
+            except Exception:
+                output = str(output)
+
+        if not isinstance(output, str):
+            raise TypeError(f"DAM returned a non-string description: {type(output)}")
+        return output
 
         if not isinstance(output, str):
             try:
