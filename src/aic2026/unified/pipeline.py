@@ -314,49 +314,111 @@ class UnifiedVideoPipeline:
                 _cleanup_gpu()
 
         # ─────────────────────────────────────────────────────────────
-        # STAGE 5: NVIDIA DAM-3B Dense Captioning
+        # STAGE 5: NVIDIA DAM-3B Dense Captioning (Isolated Subprocess)
         # ─────────────────────────────────────────────────────────────
         all_dam_captions: dict[int, list[DamRegionCaption]] = {}
         if self.load_sam_dam:
-            print(f"\n🏷️ [6/6] Running NVIDIA DAM-3B Dense Descriptions (Pristine GPU Context)...", flush=True)
-            dam = self.dam_captioner
-            if dam is None:
-                print("   ⏳ Loading DAM-3B into GPU memory...", flush=True)
-                dam = DamCaptioner.from_pretrained(
-                    model_id=self.dam_model_id,
-                    revision=self.dam_revision,
-                    code_revision=self.dam_code_revision,
-                )
+            print(f"\n🏷️ [6/6] Running NVIDIA DAM-3B Dense Descriptions (Isolated Process)...", flush=True)
 
-            for c, img_path in extracted_frames:
-                frame_caps: list[DamRegionCaption] = []
-                frame_masks = all_masks.get(c.keyframe_n, [])
-                for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
-                    caption_result = dam.describe_region(
-                        image=frame_images[c.keyframe_n],
-                        mask=mask_bool,
-                        bbox_xyxy_px=bbox_xyxy,
-                        class_entity="object",
-                        max_words=maximum_words,
-                    )
-                    if caption_result.status == "ok" and caption_result.description_en:
-                        frame_caps.append(
-                            DamRegionCaption(
-                                region_id=f"reg_{r_idx:03d}",
-                                class_label="object",
-                                bbox_xyxy_px=bbox_xyxy,
-                                sam_iou=float(iou_score) if iou_score is not None else 0.90,
-                                caption_en=caption_result.description_en,
-                                word_count=caption_result.word_count,
-                            )
+            if self.dam_captioner is not None:
+                # In-memory execution (for mock tests or preloaded instances)
+                for c, img_path in extracted_frames:
+                    frame_caps: list[DamRegionCaption] = []
+                    frame_masks = all_masks.get(c.keyframe_n, [])
+                    for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                        caption_result = self.dam_captioner.describe_region(
+                            image=frame_images[c.keyframe_n],
+                            mask=mask_bool,
+                            bbox_xyxy_px=bbox_xyxy,
+                            class_entity="object",
+                            max_words=maximum_words,
                         )
-                all_dam_captions[c.keyframe_n] = frame_caps
+                        if caption_result.status == "ok" and caption_result.description_en:
+                            frame_caps.append(
+                                DamRegionCaption(
+                                    region_id=f"reg_{r_idx:03d}",
+                                    class_label="object",
+                                    bbox_xyxy_px=bbox_xyxy,
+                                    sam_iou=float(iou_score) if iou_score is not None else 0.90,
+                                    caption_en=caption_result.description_en,
+                                    word_count=caption_result.word_count,
+                                )
+                            )
+                    all_dam_captions[c.keyframe_n] = frame_caps
+            else:
+                # Execute in an isolated Python process to guarantee 100% fresh CUDA context
+                import subprocess
+
+                temp_dir = output_root / "_temp_dam"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                tasks_file = temp_dir / f"{video_id}_tasks.json"
+                out_desc_file = temp_dir / f"{video_id}_descriptions.json"
+
+                tasks_payload = []
+                for c, img_path in extracted_frames:
+                    frame_masks = all_masks.get(c.keyframe_n, [])
+                    regions_payload = []
+                    for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                        regions_payload.append({
+                            "region_id": f"reg_{r_idx:03d}",
+                            "bbox_xyxy": list(bbox_xyxy) if bbox_xyxy else None,
+                            "sam_iou": float(iou_score) if iou_score is not None else 0.90,
+                            "class_label": "object",
+                        })
+                    tasks_payload.append({
+                        "keyframe_n": c.keyframe_n,
+                        "image_path": str(img_path.resolve()),
+                        "regions": regions_payload,
+                    })
+
+                with open(tasks_file, "w", encoding="utf-8") as f_tasks:
+                    json.dump(tasks_payload, f_tasks, ensure_ascii=False)
+
+                repo_root = Path(__file__).resolve().parents[3]
+                cmd = [
+                    sys.executable,
+                    str(repo_root / "scripts/run_dam_isolated.py"),
+                    "--input-json", str(tasks_file),
+                    "--output-json", str(out_desc_file),
+                    "--device", self.device,
+                    "--max-words", str(maximum_words),
+                    "--model-id", self.dam_model_id,
+                    "--revision", self.dam_revision,
+                    "--code-revision", self.dam_code_revision,
+                ]
+
+                sub_res = subprocess.run(cmd, capture_output=False, text=True)
+                if sub_res.returncode != 0:
+                    raise RuntimeError(f"Isolated DAM worker failed with exit code {sub_res.returncode}")
+
+                if out_desc_file.exists():
+                    with open(out_desc_file, "r", encoding="utf-8") as f_out:
+                        raw_descs = json.load(f_out)
+                    for key_str, caps_list in raw_descs.items():
+                        kn = int(key_str)
+                        all_dam_captions[kn] = [
+                            DamRegionCaption(
+                                region_id=cap["region_id"],
+                                class_label=cap["class_label"],
+                                bbox_xyxy_px=tuple(cap["bbox_xyxy_px"]) if cap.get("bbox_xyxy_px") else None,
+                                sam_iou=cap.get("sam_iou", 0.90),
+                                caption_en=cap["caption_en"],
+                                word_count=cap.get("word_count", len(cap["caption_en"].split())),
+                            )
+                            for cap in caps_list
+                            if cap.get("status") == "ok" and cap.get("caption_en")
+                        ]
+
+                # Cleanup temp files
+                try:
+                    if tasks_file.exists():
+                        tasks_file.unlink()
+                    if out_desc_file.exists():
+                        out_desc_file.unlink()
+                except Exception:
+                    pass
 
             print(f"   ✓ DAM-3B descriptions generated for all {len(extracted_frames)} keyframes!", flush=True)
-
-            if self.staged and self.dam_captioner is None:
-                del dam
-                _cleanup_gpu()
 
         # ─────────────────────────────────────────────────────────────
         # STAGE 6: Assemble Records & Serialize Output
