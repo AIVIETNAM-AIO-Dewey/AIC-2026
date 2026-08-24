@@ -205,8 +205,20 @@ def main() -> int:
     print(f"🎬 Found Video File:   {video_path}", flush=True)
 
     device = args.device
-    pipeline = UnifiedVideoPipeline.load(
-        device=device,
+    # Auto-discover organizer objects dataset if not explicitly passed
+    objects_root = args.objects_root
+    if objects_root is None:
+        obj_cands = [
+            Path("/kaggle/input/datasets/khoalequangminh/aic-test-dataset/data/objects"),
+            Path("/kaggle/input/aic-test-dataset/data/objects"),
+            Path("/kaggle/input/datasets/khoalequangminh/aic-test-dataset/objects"),
+            Path("/kaggle/input/aic-26-objects/objects"),
+            REPO_ROOT / "data" / "objects",
+        ]
+        objects_root = next((p for p in obj_cands if p.exists() and p.is_dir()), None)
+
+    pipeline = UnifiedVideoPipeline(
+        device=args.device,
         load_transnet=True,
         load_siglip=not args.no_siglip,
         load_ocr=not args.no_ocr,
@@ -221,6 +233,7 @@ def main() -> int:
         max_regions_per_frame=args.max_regions,
         maximum_words=args.max_words,
         score_threshold=args.score_threshold,
+        objects_root=objects_root,
     )
 
     print(f"\n🎨 Rendering {len(records)} visual inspection cards...", flush=True)

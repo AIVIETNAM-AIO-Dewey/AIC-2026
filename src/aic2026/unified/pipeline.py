@@ -135,11 +135,11 @@ class UnifiedVideoPipeline:
         video_path: Path,
         video_id: str,
         output_root: Path,
-        objects_dir: Path | None = None,
         max_frames: int | None = None,
         max_regions_per_frame: int = 3,
         maximum_words: int = 50,
         score_threshold: float = 0.30,
+        objects_root: Path | None = None,
     ) -> tuple[Path, Path, list[UnifiedFrameRecord]]:
         """Run complete extraction and multi-modal enrichment for one video.
 
@@ -265,7 +265,8 @@ class UnifiedVideoPipeline:
             ocr = self.ocr_reader
             if ocr is None:
                 print("   ⏳ Loading OCR Reader into GPU memory...", flush=True)
-                ocr = OcrReader.create(device=self.device)
+                from aic2026.ocr import EasyOcrReader
+                ocr = EasyOcrReader.from_languages(["vi", "en"], device=self.device)
 
             print(f"   ▶ Extracting OCR text from {len(extracted_frames)} keyframes...", flush=True)
             for c, img_path in extracted_frames:
@@ -291,7 +292,7 @@ class UnifiedVideoPipeline:
         # ─────────────────────────────────────────────────────────────
         # STAGE 4: Meta SAM Object Segmentation
         # ─────────────────────────────────────────────────────────────
-        all_masks: dict[int, list[tuple[np.ndarray, tuple[int, int, int, int], float]]] = {}
+        all_masks: dict[int, list[tuple[np.ndarray, tuple[int, int, int, int], float, str]]] = {}
         if self.load_sam_dam:
             print(f"\n✂️ [5/6] Running Meta SAM ViT-B Object Segmentation...", flush=True)
             sam = self.sam_generator
@@ -299,14 +300,66 @@ class UnifiedVideoPipeline:
                 print("   ⏳ Loading Meta SAM ViT-B into GPU memory...", flush=True)
                 sam = SamMaskGenerator.from_pretrained(device=self.device)
 
+            # Check if organizer object detections are available
+            objects_dir: Path | None = None
+            if objects_root is not None:
+                if (objects_root / video_id).is_dir():
+                    objects_dir = objects_root / video_id
+                elif objects_root.is_dir():
+                    objects_dir = objects_root
+
+            from aic2026.object_description import (
+                FilterConfig,
+                filter_detections,
+                load_organizer_detections,
+                normalized_to_pixels,
+            )
+
+            filter_cfg = FilterConfig(
+                minimum_score=score_threshold,
+                minimum_area_ratio=0.005,
+                maximum_area_ratio=0.85,
+                same_class_iou=0.45,
+                cross_label_duplicate_iou=0.60,
+                maximum_regions=max_regions_per_frame,
+            )
+
             for c, img_path in extracted_frames:
-                masks = sam.generate_automatic_masks(
-                    image=frame_images[c.keyframe_n],
-                    max_regions=max_regions_per_frame,
-                    min_area_ratio=0.005,
-                    max_area_ratio=0.85,
-                )
-                all_masks[c.keyframe_n] = masks
+                frame_masks: list[tuple[np.ndarray, tuple[int, int, int, int], float, str]] = []
+
+                if objects_dir is not None:
+                    json_cands = [
+                        objects_dir / f"{c.frame_idx:03d}.json",
+                        objects_dir / f"{c.frame_idx:04d}.json",
+                        objects_dir / f"{c.frame_idx}.json",
+                        objects_dir / f"{c.keyframe_n:03d}.json",
+                        objects_dir / f"{c.keyframe_n}.json",
+                    ]
+                    json_file = next((p for p in json_cands if p.exists()), None)
+                    if json_file is not None:
+                        try:
+                            raw_dets = load_organizer_detections(json_file)
+                            filtered = filter_detections(raw_dets, filter_cfg)
+                            if filtered:
+                                w, h = frame_images[c.keyframe_n].size
+                                boxes = [normalized_to_pixels(d.bbox_yxyx_norm, w, h) for d in filtered]
+                                preds = sam.generate(frame_images[c.keyframe_n], boxes)
+                                for d, p, b in zip(filtered, preds, boxes):
+                                    frame_masks.append((p.mask, b, p.iou_score or 0.90, d.class_entity))
+                        except Exception:
+                            pass
+
+                if not frame_masks:
+                    auto_masks = sam.generate_automatic_masks(
+                        image=frame_images[c.keyframe_n],
+                        max_regions=max_regions_per_frame,
+                        min_area_ratio=0.005,
+                        max_area_ratio=0.85,
+                    )
+                    for seg, box, score in auto_masks:
+                        frame_masks.append((seg, box, score, "object"))
+
+                all_masks[c.keyframe_n] = frame_masks
             print(f"   ✓ SAM segmentation completed for {len(extracted_frames)} keyframes!", flush=True)
 
             if self.staged and self.sam_generator is None:
@@ -325,19 +378,18 @@ class UnifiedVideoPipeline:
                 for c, img_path in extracted_frames:
                     frame_caps: list[DamRegionCaption] = []
                     frame_masks = all_masks.get(c.keyframe_n, [])
-                    for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                    for r_idx, (mask_bool, bbox_xyxy, iou_score, class_label) in enumerate(frame_masks, start=1):
                         caption_result = self.dam_captioner.describe_region(
                             image=frame_images[c.keyframe_n],
-                            mask=mask_bool,
-                            bbox_xyxy_px=bbox_xyxy,
-                            class_entity="object",
+                            mask_rle=None,
+                            focal_box=bbox_xyxy,
                             max_words=maximum_words,
                         )
                         if caption_result.status == "ok" and caption_result.description_en:
                             frame_caps.append(
                                 DamRegionCaption(
                                     region_id=f"reg_{r_idx:03d}",
-                                    class_label="object",
+                                    class_label=class_label,
                                     bbox_xyxy_px=bbox_xyxy,
                                     sam_iou=float(iou_score) if iou_score is not None else 0.90,
                                     caption_en=caption_result.description_en,
@@ -360,7 +412,7 @@ class UnifiedVideoPipeline:
                 for c, img_path in extracted_frames:
                     frame_masks = all_masks.get(c.keyframe_n, [])
                     regions_payload = []
-                    for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
+                    for r_idx, (mask_bool, bbox_xyxy, iou_score, class_label) in enumerate(frame_masks, start=1):
                         rle_data = encode_mask(mask_bool) if (mask_bool is not None and mask_bool.any()) else None
                         regions_payload.append({
                             "region_id": f"reg_{r_idx:03d}",
