@@ -252,65 +252,31 @@ class UnifiedVideoPipeline:
                 ]
                 ocr_res = UnifiedOcrResult(full_text=raw_ocr.full_text, spans=ocr_spans)
 
-            # C. SAM & DAM-3B Dense Descriptions
+            # C. SAM Automatic Object Segmentation & DAM-3B Dense Descriptions (No bounding boxes needed)
             dam_captions: list[DamRegionCaption] = []
             if self.dam_captioner is not None and self.sam_generator is not None:
-                # Check for organizer detection JSON matching keyframe_n
-                matched_dets = []
-                if objects_dir and objects_dir.exists():
-                    det_json = objects_dir / f"{cand.keyframe_n:06d}.json"
-                    if not det_json.exists():
-                        det_json = objects_dir / f"{cand.keyframe_n}.json"
-                    if det_json.exists():
-                        raw_dets = load_organizer_detections(det_json)
-                        matched_dets = filter_detections(raw_dets, filter_cfg)
+                auto_masks = self.sam_generator.generate_automatic_masks(
+                    image=image_rgb,
+                    max_regions=max_regions_per_frame,
+                    min_area_ratio=0.005,
+                    max_area_ratio=0.85,
+                )
 
-                if matched_dets:
-                    for r_idx, det in enumerate(matched_dets, start=1):
-                        # SAM segmentation
-                        boxes = [list(det.bbox_xyxy_px)]
-                        mask_preds = self.sam_generator.generate_masks(image_rgb, boxes)
-                        if not mask_preds:
-                            continue
-                        pred = mask_preds[0]
-
-                        # DAM caption
-                        caption_result = self.dam_captioner.describe_region(
-                            image=image_rgb,
-                            mask=pred.mask_bool,
-                            bbox_xyxy_px=det.bbox_xyxy_px,
-                            class_entity=det.class_entity,
-                            max_words=maximum_words,
-                        )
-                        if caption_result.status == "ok" and caption_result.description_en:
-                            dam_captions.append(
-                                DamRegionCaption(
-                                    region_id=f"reg_{r_idx:03d}",
-                                    class_label=det.class_entity,
-                                    bbox_xyxy_px=det.bbox_xyxy_px,
-                                    sam_iou=float(pred.iou_score) if pred.iou_score is not None else None,
-                                    caption_en=caption_result.description_en,
-                                    word_count=caption_result.word_count,
-                                )
-                            )
-                else:
-                    # Fallback: Describe the entire frame as a global scene
-                    full_box = (0, 0, img_w, img_h)
-                    full_mask = np.ones((img_h, img_w), dtype=bool)
+                for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(auto_masks, start=1):
                     caption_result = self.dam_captioner.describe_region(
                         image=image_rgb,
-                        mask=full_mask,
-                        bbox_xyxy_px=full_box,
-                        class_entity="scene",
+                        mask=mask_bool,
+                        bbox_xyxy_px=bbox_xyxy,
+                        class_entity="object",
                         max_words=maximum_words,
                     )
                     if caption_result.status == "ok" and caption_result.description_en:
                         dam_captions.append(
                             DamRegionCaption(
-                                region_id="reg_full_scene",
-                                class_label="scene",
-                                bbox_xyxy_px=full_box,
-                                sam_iou=1.0,
+                                region_id=f"reg_{r_idx:03d}",
+                                class_label="object",
+                                bbox_xyxy_px=bbox_xyxy,
+                                sam_iou=float(iou_score) if iou_score is not None else 0.90,
                                 caption_en=caption_result.description_en,
                                 word_count=caption_result.word_count,
                             )

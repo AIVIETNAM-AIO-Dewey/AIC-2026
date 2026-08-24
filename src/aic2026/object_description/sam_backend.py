@@ -45,10 +45,18 @@ SAM_CHECKPOINT_FILENAME = "sam_vit_b_01ec64.pth"
 
 
 class SamMaskGenerator:
-    def __init__(self, backend_type: str, predictor_or_processor: Any, model: Any = None, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        backend_type: str,
+        predictor_or_processor: Any,
+        model: Any = None,
+        auto_mask_generator: Any = None,
+        device: str = "cuda",
+    ) -> None:
         self.backend_type = backend_type
         self.predictor = predictor_or_processor  # For segment_anything: SamPredictor; for HF: processor
         self.model = model
+        self.auto_mask_generator = auto_mask_generator
         self.device = device
 
     @classmethod
@@ -62,31 +70,48 @@ class SamMaskGenerator:
     ) -> SamMaskGenerator:
         # 1. Try Meta's official segment_anything library (Fastest, zero transformers/TF recursion)
         try:
-            from segment_anything import sam_model_registry, SamPredictor
+            from segment_anything import SamAutomaticMaskGenerator, SamPredictor, sam_model_registry
+
             target_dir = Path(cache_dir or "/kaggle/working/aic2026-model-cache/sam")
             target_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_file = target_dir / SAM_CHECKPOINT_FILENAME
             if not checkpoint_file.exists() or checkpoint_file.stat().st_size < 100_000_000:
-                print(f"📥 Downloading Meta SAM ViT-B checkpoint to {checkpoint_file} ...")
+                print(f"📥 Downloading Meta SAM ViT-B checkpoint to {checkpoint_file} ...", flush=True)
                 import urllib.request
+
                 urllib.request.urlretrieve(SAM_CHECKPOINT_URL, checkpoint_file)
-                print("✓ SAM checkpoint downloaded successfully!")
-            
+                print("✓ SAM checkpoint downloaded successfully!", flush=True)
+
             sam = sam_model_registry["vit_b"](checkpoint=str(checkpoint_file)).to(device)
             sam.eval()
             predictor = SamPredictor(sam)
-            return cls(backend_type="meta", predictor_or_processor=predictor, device=device)
+            auto_gen = SamAutomaticMaskGenerator(
+                model=sam,
+                points_per_side=16,
+                pred_iou_thresh=0.82,
+                stability_score_thresh=0.88,
+                crop_n_layers=0,
+                min_mask_region_area=100,
+            )
+            return cls(
+                backend_type="meta",
+                predictor_or_processor=predictor,
+                auto_mask_generator=auto_gen,
+                device=device,
+            )
         except ImportError:
             pass
 
         # 2. Fallback to Hugging Face transformers
         import os
+
         os.environ["USE_TF"] = "0"
         os.environ["USE_FLAX"] = "0"
         os.environ["USE_TORCH"] = "1"
 
         try:
             import transformers.utils.import_utils as _t_import
+
             _t_import._scipy_available = False
             _t_import.is_scipy_available = lambda: False
             _t_import._tf_available = False
@@ -128,6 +153,71 @@ class SamMaskGenerator:
         ).to(device)
         model.eval()
         return cls(backend_type="hf", predictor_or_processor=processor, model=model, device=device)
+
+    def generate_automatic_masks(
+        self,
+        image: Image.Image,
+        max_regions: int = 3,
+        min_area_ratio: float = 0.005,
+        max_area_ratio: float = 0.85,
+    ) -> list[tuple[np.ndarray, tuple[int, int, int, int], float]]:
+        """Run SAM automatic mask generator to discover salient objects directly without bounding boxes."""
+        width, height = image.size
+        img_area = float(width * height)
+
+        if self.backend_type == "meta" and self.auto_mask_generator is not None:
+            rgb_np = np.array(image.convert("RGB"))
+            try:
+                raw_masks = self.auto_mask_generator.generate(rgb_np)
+                candidates: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
+                for m in raw_masks:
+                    seg = np.asarray(m["segmentation"], dtype=bool)
+                    area = float(m.get("area", seg.sum()))
+                    ratio = area / img_area
+                    if ratio < min_area_ratio or ratio > max_area_ratio:
+                        continue
+                    x, y, w, h = m["bbox"]
+                    x1 = max(0, int(round(x)))
+                    y1 = max(0, int(round(y)))
+                    x2 = min(width, int(round(x + w)))
+                    y2 = min(height, int(round(y + h)))
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    score = float(m.get("predicted_iou", 0.90)) * float(m.get("stability_score", 0.90))
+                    candidates.append((seg, (x1, y1, x2, y2), score, area))
+
+                # Sort by quality score descending
+                candidates.sort(key=lambda item: item[2], reverse=True)
+                selected: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
+                for seg, box, score, area in candidates:
+                    overlap = False
+                    for _, s_box, _, _ in selected:
+                        ix1 = max(box[0], s_box[0])
+                        iy1 = max(box[1], s_box[1])
+                        ix2 = min(box[2], s_box[2])
+                        iy2 = min(box[3], s_box[3])
+                        if ix2 > ix1 and iy2 > iy1:
+                            inter = (ix2 - ix1) * (iy2 - iy1)
+                            b1_a = (box[2] - box[0]) * (box[3] - box[1])
+                            b2_a = (s_box[2] - s_box[0]) * (s_box[3] - s_box[1])
+                            iou = inter / float(b1_a + b2_a - inter)
+                            if iou > 0.45:
+                                overlap = True
+                                break
+                    if not overlap:
+                        selected.append((seg, box, score, area))
+                    if len(selected) >= max_regions:
+                        break
+
+                if selected:
+                    return [(seg, box, score) for seg, box, score, _ in selected]
+            except Exception:
+                pass
+
+        # Fallback: Full frame description if no salient sub-objects passed threshold
+        full_box = (0, 0, width, height)
+        full_mask = np.ones((height, width), dtype=bool)
+        return [(full_mask, full_box, 1.0)]
 
     def generate(
         self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]
