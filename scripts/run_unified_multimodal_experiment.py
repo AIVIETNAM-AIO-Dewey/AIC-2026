@@ -188,62 +188,6 @@ def render_multimodal_card(
     plt.close(fig)
 
 
-def find_objects_dir(video_id: str, objects_root: Path | None) -> Path | None:
-    if objects_root:
-        cand = objects_root / video_id
-        if cand.is_dir():
-            return cand
-
-    batch = video_id.split("_")[0]  # e.g. L21
-    candidate_roots = [
-        objects_root,
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects/Objects"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/objects"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects_L21_a"),
-        Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Objects/Objects_L21"),
-        Path("/kaggle/input/aic-26-video/Objects/Objects"),
-        Path("/kaggle/input/aic-26-video/Objects"),
-        Path("/kaggle/input/aic2026-objects"),
-        REPO_ROOT / "data" / "objects",
-    ]
-    for r in candidate_roots:
-        if r is None or not r.exists():
-            continue
-        for suffix in ["_a", "_b", "_c", "_d", "_e", "_f", "_g", "_h", ""]:
-            for cand in [
-                r / f"Objects_{batch}{suffix}" / video_id,
-                r / f"Objects_{batch}{suffix}" / "objects" / video_id,
-                r / f"{batch}{suffix}" / video_id,
-                r / video_id,
-            ]:
-                if cand.is_dir():
-                    return cand
-        for cand in r.glob(f"Objects_{batch}*/{video_id}"):
-            if cand.is_dir():
-                return cand
-        for cand in r.glob(f"Objects_{batch}*/objects/{video_id}"):
-            if cand.is_dir():
-                return cand
-        for cand in r.glob(f"**/{video_id}"):
-            if cand.is_dir():
-                return cand
-
-    # Shallow scan over top-level datasets under /kaggle/input
-    if Path("/kaggle/input").exists():
-        for dataset_dir in Path("/kaggle/input").iterdir():
-            if not dataset_dir.is_dir():
-                continue
-            for cand in dataset_dir.glob(f"**/Objects_{batch}*/{video_id}"):
-                if cand.is_dir():
-                    return cand
-            for cand in dataset_dir.glob(f"**/Objects_{batch}*/objects/{video_id}"):
-                if cand.is_dir():
-                    return cand
-    return None
-
-
 def main() -> int:
     print("\n" + "=" * 75, flush=True)
     print("🔬 STARTING UNIFIED MULTI-MODAL PIPELINE EXPERIMENT", flush=True)
@@ -253,12 +197,6 @@ def main() -> int:
     print(f"🔍 Searching for video: {args.video_id}...", flush=True)
     video_path = find_video_file(args.video_id, args.video_path, args.video_root)
     print(f"🎬 Found Video File:   {video_path}", flush=True)
-
-    objects_dir = find_objects_dir(args.video_id, args.objects_root)
-    if objects_dir:
-        print(f"🎯 Found Objects Detections: {objects_dir}", flush=True)
-    else:
-        print("ℹ️ No organizer object detections directory found (running full-frame / OCR / SigLIP)", flush=True)
 
     device = args.device
     pipeline = UnifiedVideoPipeline.load(
@@ -273,7 +211,6 @@ def main() -> int:
         video_path=video_path,
         video_id=args.video_id,
         output_root=args.output_dir,
-        objects_dir=objects_dir,
         max_frames=args.max_frames,
         max_regions_per_frame=args.max_regions,
         maximum_words=args.max_words,
