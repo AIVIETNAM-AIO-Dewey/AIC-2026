@@ -82,26 +82,93 @@ class PathResolver:
         self.keyframes_root = keyframes_root
         self.objects_root = objects_root
         self.map_keyframes_root = map_keyframes_root
+        self._frame_dir_cache: dict[str, Path] = {}
+        self._objects_dir_cache: dict[str, Path] = {}
 
     def resolve_frames_dir(self, video_id: str) -> Path:
+        if video_id in self._frame_dir_cache:
+            return self._frame_dir_cache[video_id]
+
+        batch = video_id.split("_")[0]  # e.g. L21
         candidates = [
+            self.keyframes_root / f"Keyframes_{batch}" / "keyframes" / video_id,
+            self.keyframes_root / f"Keyframes_{batch}" / video_id,
+            self.keyframes_root / "Keyframes" / f"Keyframes_{batch}" / "keyframes" / video_id,
+            self.keyframes_root / "Keyframes" / "Keyframes" / f"Keyframes_{batch}" / "keyframes" / video_id,
+            self.keyframes_root / "Keyframes" / f"Keyframes_{batch}" / video_id,
+            self.keyframes_root / batch / video_id,
+            self.keyframes_root / "keyframes" / video_id,
             self.keyframes_root / video_id,
-            self.keyframes_root / video_id.split("_")[0] / video_id,
+            self.keyframes_root.parent / f"Keyframes_{batch}" / "keyframes" / video_id,
+            self.keyframes_root.parent / f"Keyframes_{batch}" / video_id,
+            self.keyframes_root.parent / "Keyframes" / f"Keyframes_{batch}" / "keyframes" / video_id,
         ]
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.is_dir():
+                self._frame_dir_cache[video_id] = candidate
                 return candidate
+
+        # Recursive search fallback
+        if self.keyframes_root.exists():
+            for match in self.keyframes_root.rglob(video_id):
+                if match.is_dir():
+                    self._frame_dir_cache[video_id] = match
+                    return match
+        if self.keyframes_root.parent.exists():
+            for match in self.keyframes_root.parent.rglob(video_id):
+                if match.is_dir():
+                    self._frame_dir_cache[video_id] = match
+                    return match
+
         return self.keyframes_root / video_id
 
     def resolve_objects_dir(self, video_id: str) -> Path:
+        if video_id in self._objects_dir_cache:
+            return self._objects_dir_cache[video_id]
+
+        batch = video_id.split("_")[0]
         candidates = [
             self.objects_root / video_id,
-            self.objects_root / video_id.split("_")[0] / video_id,
+            self.objects_root / "objects" / video_id,
+            self.objects_root / "data" / "objects" / video_id,
+            self.objects_root / batch / video_id,
         ]
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.is_dir():
+                self._objects_dir_cache[video_id] = candidate
                 return candidate
+
+        if self.objects_root.exists():
+            for match in self.objects_root.rglob(video_id):
+                if match.is_dir():
+                    self._objects_dir_cache[video_id] = match
+                    return match
+
         return self.objects_root / video_id
+
+
+def find_keyframe_image(frames_dir: Path, keyframe_n: int) -> Path | None:
+    """Find keyframe image supporting various zero-padded and extension schemes."""
+    if not frames_dir.exists():
+        return None
+    patterns = [
+        f"{keyframe_n:03d}.jpg",
+        f"{keyframe_n:04d}.jpg",
+        f"{keyframe_n:05d}.jpg",
+        f"{keyframe_n:06d}.jpg",
+        f"{keyframe_n}.jpg",
+        f"{keyframe_n:03d}.png",
+        f"{keyframe_n:04d}.png",
+        f"{keyframe_n}.png",
+    ]
+    for p in patterns:
+        cand = frames_dir / p
+        if cand.is_file():
+            return cand
+    for file_path in frames_dir.iterdir():
+        if file_path.is_file() and file_path.stem.isdigit() and int(file_path.stem) == keyframe_n:
+            return file_path
+    return None
 
 
 def load_sam_predictor(checkpoint_dir: Path, device: str = "cuda") -> Any:
@@ -337,8 +404,23 @@ def run_sam_dam_experiment(
     frames_dir = resolver.resolve_frames_dir(video_id)
     objects_dir = resolver.resolve_objects_dir(video_id)
 
+    print(f"📁 Keyframes Dir: {frames_dir}")
+    print(f"📁 Objects Dir:   {objects_dir}")
+
+    if not frames_dir.exists():
+        print(f"❌ Frames directory not found: {frames_dir}")
+        print(f"   Available paths under {keyframes_root}:")
+        if keyframes_root.exists():
+            for child in sorted(keyframes_root.iterdir())[:10]:
+                print(f"     • {child.name}")
+        return
+
     if not objects_dir.exists():
         print(f"❌ Objects directory not found: {objects_dir}")
+        print(f"   Available paths under {objects_root}:")
+        if objects_root.exists():
+            for child in sorted(objects_root.iterdir())[:10]:
+                print(f"     • {child.name}")
         return
 
     json_files = sorted(
@@ -357,12 +439,7 @@ def run_sam_dam_experiment(
         if target_frame_indices is not None and keyframe_n not in target_frame_indices:
             continue
 
-        img_candidates = [
-            frames_dir / f"{keyframe_n:03d}.jpg",
-            frames_dir / f"{keyframe_n:04d}.jpg",
-            frames_dir / f"{keyframe_n}.jpg",
-        ]
-        img_path = next((p for p in img_candidates if p.exists()), None)
+        img_path = find_keyframe_image(frames_dir, keyframe_n)
         if img_path is None:
             print(f"⚠️ Keyframe image #{keyframe_n} not found in {frames_dir}")
             continue
