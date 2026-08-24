@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
 import numpy as np
+from PIL import Image, ImageDraw
 
 from .caption import DAM_PROMPT, normalize_caption
+from aic2026.contracts import CaptionResult
 
 DAM_MODEL_ID = "nvidia/DAM-3B"
 DAM_REVISION = "0797bedd98d645cd021379a4661ee233da279bba"
@@ -61,12 +62,12 @@ class DamCaptioner:
         cache_dir: Path | None = None,
     ) -> DamCaptioner:
         # Cleanly disable scipy/TF/Flax in transformers to prevent Python 3.12 wildcard recursion
-        import os
         os.environ["USE_TF"] = "0"
         os.environ["USE_FLAX"] = "0"
         os.environ["USE_TORCH"] = "1"
         try:
             import transformers.utils.import_utils as _t_import
+
             _t_import._scipy_available = False
             _t_import.is_scipy_available = lambda: False
             _t_import._sklearn_available = False
@@ -82,12 +83,15 @@ class DamCaptioner:
             import transformers.modeling_utils as _t_mu
 
             if not hasattr(_t_mu, "no_init_weights"):
+
                 @contextlib.contextmanager
                 def _dummy_no_init_weights(*args: Any, **kwargs: Any) -> Any:
                     yield
+
                 _t_mu.no_init_weights = _dummy_no_init_weights
 
             if not hasattr(_t_mu, "ContextManagers"):
+
                 class _DummyContextManagers:
                     def __init__(self, context_managers: Any) -> None:
                         self.context_managers = list(context_managers) if context_managers else []
@@ -106,8 +110,11 @@ class DamCaptioner:
 
             # Ensure PreTrainedModel handles older custom projectors missing all_tied_weights_keys
             if hasattr(_t_mu, "PreTrainedModel"):
-                _orig_mark_tied = getattr(_t_mu.PreTrainedModel, "mark_tied_weights_as_initialized", None)
+                _orig_mark_tied = getattr(
+                    _t_mu.PreTrainedModel, "mark_tied_weights_as_initialized", None
+                )
                 if _orig_mark_tied is not None:
+
                     def _safe_mark_tied(self: Any, *args: Any, **kwargs: Any) -> Any:
                         if not hasattr(self, "all_tied_weights_keys"):
                             self.all_tied_weights_keys = {}
@@ -115,6 +122,7 @@ class DamCaptioner:
                             return _orig_mark_tied(self, *args, **kwargs)
                         except Exception:
                             return None
+
                     _t_mu.PreTrainedModel.mark_tied_weights_as_initialized = _safe_mark_tied
         except Exception:
             pass
@@ -125,8 +133,6 @@ class DamCaptioner:
             raise RuntimeError(
                 "Pinned NVlabs/describe-anything is not installed. Follow docs/cloud-runbook.md."
             ) from error
-        # DAM accepts a Hugging Face model id but has no explicit revision argument.
-        # Resolve the pinned snapshot first and pass its immutable local path.
         try:
             from huggingface_hub import snapshot_download
         except ImportError as error:
@@ -138,74 +144,11 @@ class DamCaptioner:
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
         disable_torch_init()
-        import torch
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-        # Try the current kwarg name first (`dtype`), fall back to deprecated (`torch_dtype`)
-        model = None
-        for kwarg_name in ("dtype", "torch_dtype"):
-            if model is not None:
-                break
-            try:
-                model = DescribeAnythingModel(
-                    model_path=model_path,
-                    conv_mode="v1",
-                    prompt_mode="full+focal_crop",
-                    **{kwarg_name: dtype},
-                )
-            except TypeError:
-                continue
-            except Exception:
-                continue
-        if model is None:
-            model = DescribeAnythingModel(
-                model_path=model_path,
-                conv_mode="v1",
-                prompt_mode="full+focal_crop",
-            )
-
-        # ── Force ALL submodules to float16 on CUDA (Tesla T4 has zero bfloat16 support) ──
-        if torch.cuda.is_available():
-            # The real nn.Module is model.model (LlavaLlamaModel).
-            inner = getattr(model, "model", None)
-
-            # Cast the inner LlavaLlamaModel
-            if inner is not None and isinstance(inner, torch.nn.Module):
-                inner.to(device="cuda", dtype=torch.float16)
-
-            # Also cast the DescribeAnythingModel wrapper
-            if isinstance(model, torch.nn.Module):
-                model.to(device="cuda", dtype=torch.float16)
-
-            # Hard verification: forcibly cast any remaining bfloat16 parameters
-            target = inner if inner is not None else model
-            if isinstance(target, torch.nn.Module):
-                bf16_count = 0
-                for name, param in target.named_parameters():
-                    if param.is_floating_point() and param.dtype == torch.bfloat16:
-                        param.data = param.data.to(torch.float16)
-                        bf16_count += 1
-                for name, buf in target.named_buffers():
-                    if buf.is_floating_point() and buf.dtype == torch.bfloat16:
-                        buf.data = buf.data.to(torch.float16)
-                        bf16_count += 1
-                if bf16_count > 0:
-                    print(f"     ⚠️  Force-cast {bf16_count} remaining bfloat16 params/buffers → float16")
-
-            # Override config.model_dtype so the forward pass uses float16
-            if inner is not None and hasattr(inner, "config"):
-                inner.config.model_dtype = "torch.float16"
-                if hasattr(inner.config, "torch_dtype"):
-                    inner.config.torch_dtype = torch.float16
-
-            # Diagnostic: verify vision tower dtype
-            if inner is not None:
-                vt = getattr(inner, "vision_tower", None)
-                if vt is not None and isinstance(vt, torch.nn.Module):
-                    first_param = next(vt.parameters(), None)
-                    if first_param is not None:
-                        print(f"     ✓ Vision tower dtype after cast: {first_param.dtype}")
-
+        model = DescribeAnythingModel(
+            model_path=model_path,
+            conv_mode="v1",
+            prompt_mode="full+focal_crop",
+        )
         model.eval()
         return cls(model)
 
@@ -220,38 +163,15 @@ class DamCaptioner:
             mask = mask.convert("L")
         if mask.size != image.size or mask.getbbox() is None:
             raise ValueError("DAM mask must be non-empty and match the image dimensions")
-        prompt = DAM_PROMPT
-        pm = getattr(self.model, "prompt_mode", "full+focal_crop")
-        if pm == "full+focal_crop" and prompt.count("<image>") < 2:
-            prompt = "<image>\n" + prompt
-        elif pm != "full+focal_crop" and prompt.count("<image>") > 1:
-            prompt = prompt.replace("<image>\n<image>", "<image>")
-
-        import torch
-        with torch.inference_mode():
-            try:
-                output = self.model.get_description(
-                    image.convert("RGB"),
-                    mask,
-                    prompt,
-                    streaming=False,
-                    temperature=0,
-                    num_beams=1,
-                    max_new_tokens=max_new_tokens,
-                )
-            except ValueError as err:
-                if "no <image> tag found" in str(err):
-                    output = self.model.get_description(
-                        image.convert("RGB"),
-                        mask,
-                        f"<image>\n{prompt}",
-                        streaming=False,
-                        temperature=0,
-                        num_beams=1,
-                        max_new_tokens=max_new_tokens,
-                    )
-                else:
-                    raise
+        output = self.model.get_description(
+            image.convert("RGB"),
+            mask,
+            DAM_PROMPT,
+            streaming=False,
+            temperature=0,
+            num_beams=1,
+            max_new_tokens=max_new_tokens,
+        )
         if not isinstance(output, str):
             raise TypeError("DAM returned a non-string description")
         return output
@@ -265,7 +185,7 @@ class DamCaptioner:
         max_words: int = 50,
         max_new_tokens: int = 48,
     ) -> CaptionResult:
-        """Describe a specific segmented region directly via its bounding box mask with normalized <=50 word caption."""
+        """Describe a specific segmented region directly via its bounding box/mask with normalized <=50 word caption."""
         image_rgb = image.convert("RGB")
         w, h = image_rgb.size
 
@@ -276,8 +196,6 @@ class DamCaptioner:
             y1 = max(0, min(h - 1, int(round(y1))))
             x2 = max(x1 + 1, min(w, int(round(x2))))
             y2 = max(y1 + 1, min(h, int(round(y2))))
-            from PIL import ImageDraw
-
             mask_img = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask_img).rectangle([x1, y1, x2, y2], fill=255)
         elif isinstance(mask, np.ndarray):
@@ -296,5 +214,3 @@ class DamCaptioner:
 
         raw_caption = self.describe(image_rgb, mask_img, max_new_tokens=max_new_tokens)
         return normalize_caption(raw_caption, maximum_words=max_words)
-
-
