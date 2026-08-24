@@ -74,7 +74,22 @@ class SiglipEncoder:
     def _to_unit_rows(features: Any) -> np.ndarray:
         import torch
 
-        values = features.detach().to("cpu", dtype=torch.float32).numpy()
+        if hasattr(features, "pooler_output") and features.pooler_output is not None:
+            tensor_val = features.pooler_output
+        elif hasattr(features, "image_embeds") and features.image_embeds is not None:
+            tensor_val = features.image_embeds
+        elif hasattr(features, "text_embeds") and features.text_embeds is not None:
+            tensor_val = features.text_embeds
+        elif hasattr(features, "last_hidden_state") and features.last_hidden_state is not None:
+            tensor_val = features.last_hidden_state[:, 0]
+        elif isinstance(features, (tuple, list)):
+            tensor_val = features[0]
+        elif isinstance(features, torch.Tensor):
+            tensor_val = features
+        else:
+            tensor_val = getattr(features, "data", features)
+
+        values = tensor_val.detach().to("cpu", dtype=torch.float32).numpy()
         norms = np.linalg.norm(values, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1.0, norms)
         return values / norms
