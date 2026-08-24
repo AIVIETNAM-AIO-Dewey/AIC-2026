@@ -25,7 +25,6 @@ import numpy as np
 from PIL import Image
 
 from aic2026.frame_extraction import (
-    TransNetV2,
     adaptive_samples_from_shots,
     dedupe_samples,
     extract_frame,
@@ -56,7 +55,7 @@ class UnifiedVideoPipeline:
 
     def __init__(
         self,
-        transnet_model: TransNetV2 | None = None,
+        transnet_model: Any | None = None,
         siglip_encoder: SiglipEncoder | None = None,
         ocr_reader: OcrReader | None = None,
         sam_generator: SamMaskGenerator | None = None,
