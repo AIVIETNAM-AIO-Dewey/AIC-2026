@@ -160,14 +160,27 @@ class DamCaptioner:
                 conv_mode="v1",
                 prompt_mode="full+focal_crop",
             )
-        # Ensure SiglipVisionEmbeddings forward safely casts position_ids to CUDA device
+        # Ensure SiglipVisionEmbeddings forward safely casts position_ids to CUDA device and handles 4-channel mask inputs
         try:
+            from typing import Optional
             import dam.model.multimodal_encoder.siglip.modeling_siglip as _siglip_mod
 
-            def _safe_siglip_emb_forward(self: Any, pixel_values: torch.FloatTensor) -> torch.Tensor:
+            def _safe_siglip_emb_forward(
+                self: Any,
+                pixel_values: torch.FloatTensor,
+                additional_position_embedding: Optional[torch.Tensor] = None,
+                additional_embedding_mode: Optional[str] = None,
+            ) -> torch.Tensor:
                 target_dtype = self.patch_embedding.weight.dtype
                 target_device = self.patch_embedding.weight.device
-                patch_embeds = self.patch_embedding(pixel_values.to(device=target_device, dtype=target_dtype))
+
+                if getattr(self, "mask_patch_embedding", None) is None:
+                    patch_embeds = self.patch_embedding(pixel_values.to(device=target_device, dtype=target_dtype))
+                else:
+                    patch_embeds = self.patch_embedding(pixel_values[:, :3, ...].to(device=target_device, dtype=target_dtype))
+                    if pixel_values.size(1) == 4:
+                        patch_embeds = patch_embeds + self.mask_patch_embedding(pixel_values[:, 3:4, ...].to(device=target_device, dtype=target_dtype))
+
                 embeddings = patch_embeds.flatten(2).transpose(1, 2)
                 pos_ids = getattr(self, "position_ids", None)
                 num_weights = self.position_embedding.weight.shape[0]
@@ -179,7 +192,19 @@ class DamCaptioner:
                     self.position_ids = pos_ids
                 else:
                     pos_ids = pos_ids.to(device=target_device, dtype=torch.long)
-                embeddings = embeddings + self.position_embedding(pos_ids)
+
+                if additional_position_embedding is not None:
+                    if additional_embedding_mode == "add":
+                        embeddings = embeddings + self.position_embedding(pos_ids)
+                        embeddings = embeddings + additional_position_embedding
+                    elif additional_embedding_mode == "replace":
+                        embeddings = embeddings + self.position_embedding(pos_ids) * 0.0
+                        embeddings = embeddings + additional_position_embedding
+                    else:
+                        raise ValueError(f"additional_embedding_mode should be either 'add' or 'replace', got {additional_embedding_mode}")
+                else:
+                    embeddings = embeddings + self.position_embedding(pos_ids)
+
                 return embeddings
 
             _siglip_mod.SiglipVisionEmbeddings.forward = _safe_siglip_emb_forward
