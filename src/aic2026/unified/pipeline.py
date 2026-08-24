@@ -265,8 +265,8 @@ class UnifiedVideoPipeline:
             ocr = self.ocr_reader
             if ocr is None:
                 print("   ⏳ Loading OCR Reader into GPU memory...", flush=True)
-                from aic2026.ocr import EasyOcrReader
-                ocr = EasyOcrReader.from_languages(["vi", "en"], device=self.device)
+                from aic2026.ocr import OcrReader
+                ocr = OcrReader.create(device=self.device)
 
             print(f"   ▶ Extracting OCR text from {len(extracted_frames)} keyframes...", flush=True)
             for c, img_path in extracted_frames:
