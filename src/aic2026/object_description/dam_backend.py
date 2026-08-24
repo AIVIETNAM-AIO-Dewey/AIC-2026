@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
+import numpy as np
 
-from .caption import DAM_PROMPT
+from .caption import DAM_PROMPT, normalize_caption
 
 DAM_MODEL_ID = "nvidia/DAM-3B"
 DAM_REVISION = "0797bedd98d645cd021379a4661ee233da279bba"
