@@ -148,6 +148,31 @@ class DamCaptioner:
             prompt_mode="full+focal_crop",
         )
         model.eval()
+
+        # Fix: Ensure vision tower position_ids is explicitly on the exact target CUDA device
+        try:
+            import torch
+            vt = getattr(model, "model", model)
+            if hasattr(vt, "get_vision_tower"):
+                vt_mod = vt.get_vision_tower()
+            elif hasattr(vt, "vision_tower"):
+                vt_mod = vt.vision_tower
+            else:
+                vt_mod = None
+
+            if vt_mod is not None:
+                vm = getattr(vt_mod, "vision_tower", vt_mod)
+                vm_inner = getattr(vm, "vision_model", vm)
+                emb = getattr(vm_inner, "embeddings", None)
+                if emb is not None and hasattr(emb, "position_embedding") and hasattr(emb.position_embedding, "weight"):
+                    target_device = emb.position_embedding.weight.device
+                    num_pos = emb.position_embedding.weight.shape[0]
+                    correct_pos_ids = torch.arange(num_pos, dtype=torch.long, device=target_device).unsqueeze(0)
+                    emb.position_ids = correct_pos_ids
+                    emb.register_buffer("position_ids", correct_pos_ids, persistent=False)
+        except Exception:
+            pass
+
         return cls(model)
 
     def describe(
