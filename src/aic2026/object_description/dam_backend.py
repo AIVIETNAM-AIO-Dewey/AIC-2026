@@ -143,6 +143,8 @@ class DamCaptioner:
             cache_dir=str(cache_dir) if cache_dir else None,
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "0") == "1",
         )
+        import torch
+
         disable_torch_init()
         target_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         try:
