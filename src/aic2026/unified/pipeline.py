@@ -361,7 +361,7 @@ class UnifiedVideoPipeline:
                     frame_masks = all_masks.get(c.keyframe_n, [])
                     regions_payload = []
                     for r_idx, (mask_bool, bbox_xyxy, iou_score) in enumerate(frame_masks, start=1):
-                        rle_data = encode_mask(mask_bool).model_dump(mode="json") if mask_bool is not None else None
+                        rle_data = encode_mask(mask_bool) if (mask_bool is not None and mask_bool.any()) else None
                         regions_payload.append({
                             "region_id": f"reg_{r_idx:03d}",
                             "bbox_xyxy": list(bbox_xyxy) if bbox_xyxy else None,
