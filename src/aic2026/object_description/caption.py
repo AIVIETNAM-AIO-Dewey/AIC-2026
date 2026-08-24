@@ -6,7 +6,7 @@ import re
 
 from aic2026.contracts import CaptionResult
 
-DAM_PROMPT = """<image>
+DAM_PROMPT = """<image>\n<image>
 Describe only the masked region in detail in English (at most 50 words)."""
 
 
