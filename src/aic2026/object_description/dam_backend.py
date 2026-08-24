@@ -229,30 +229,29 @@ class DamCaptioner:
 
         import torch
         with torch.inference_mode():
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
-                try:
+            try:
+                output = self.model.get_description(
+                    image.convert("RGB"),
+                    mask,
+                    prompt,
+                    streaming=False,
+                    temperature=0,
+                    num_beams=1,
+                    max_new_tokens=max_new_tokens,
+                )
+            except ValueError as err:
+                if "no <image> tag found" in str(err):
                     output = self.model.get_description(
                         image.convert("RGB"),
                         mask,
-                        prompt,
+                        f"<image>\n{prompt}",
                         streaming=False,
                         temperature=0,
                         num_beams=1,
                         max_new_tokens=max_new_tokens,
                     )
-                except ValueError as err:
-                    if "no <image> tag found" in str(err):
-                        output = self.model.get_description(
-                            image.convert("RGB"),
-                            mask,
-                            f"<image>\n{prompt}",
-                            streaming=False,
-                            temperature=0,
-                            num_beams=1,
-                            max_new_tokens=max_new_tokens,
-                        )
-                    else:
-                        raise
+                else:
+                    raise
         if not isinstance(output, str):
             raise TypeError("DAM returned a non-string description")
         return output

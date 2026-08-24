@@ -85,18 +85,10 @@ class SamMaskGenerator:
             sam = sam_model_registry["vit_b"](checkpoint=str(checkpoint_file)).to(device)
             sam.eval()
             predictor = SamPredictor(sam)
-            auto_gen = SamAutomaticMaskGenerator(
-                model=sam,
-                points_per_side=16,
-                pred_iou_thresh=0.82,
-                stability_score_thresh=0.88,
-                crop_n_layers=0,
-                min_mask_region_area=100,
-            )
             return cls(
                 backend_type="meta",
                 predictor_or_processor=predictor,
-                auto_mask_generator=auto_gen,
+                model=sam,
                 device=device,
             )
         except ImportError:
@@ -161,35 +153,58 @@ class SamMaskGenerator:
         min_area_ratio: float = 0.005,
         max_area_ratio: float = 0.85,
     ) -> list[tuple[np.ndarray, tuple[int, int, int, int], float]]:
-        """Run SAM automatic mask generator to discover salient objects directly without bounding boxes."""
+        """Discover salient objects via SamPredictor with candidate anchor boxes (100% CUDA safe)."""
         width, height = image.size
         img_area = float(width * height)
 
-        if self.backend_type == "meta" and self.auto_mask_generator is not None:
+        # Generate salient anchor boxes covering center, left, right, and top focal regions
+        anchor_boxes: list[tuple[int, int, int, int]] = [
+            # 1. Center focal region (prominent subject)
+            (int(0.12 * width), int(0.12 * height), int(0.88 * width), int(0.88 * height)),
+            # 2. Left half subject
+            (int(0.05 * width), int(0.15 * height), int(0.55 * width), int(0.85 * height)),
+            # 3. Right half subject
+            (int(0.45 * width), int(0.15 * height), int(0.95 * width), int(0.85 * height)),
+            # 4. Upper center (faces, signage, upper body)
+            (int(0.20 * width), int(0.05 * height), int(0.80 * width), int(0.60 * height)),
+            # 5. Lower center (ground objects, vehicles, items)
+            (int(0.15 * width), int(0.40 * height), int(0.85 * width), int(0.95 * height)),
+        ]
+
+        if self.backend_type == "meta":
             rgb_np = np.array(image.convert("RGB"))
             try:
-                import gc
                 import torch
 
                 with torch.inference_mode():
-                    raw_masks = self.auto_mask_generator.generate(rgb_np)
+                    self.predictor.set_image(rgb_np)
+                    candidates: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
+                    for box in anchor_boxes:
+                        try:
+                            masks, scores, _ = self.predictor.predict(
+                                box=np.array(box),
+                                multimask_output=False,
+                            )
+                            seg = np.asarray(masks[0], dtype=bool)
+                            score = float(scores[0])
+                            if not seg.any() or not math.isfinite(score):
+                                continue
 
-                candidates: list[tuple[np.ndarray, tuple[int, int, int, int], float, float]] = []
-                for m in raw_masks:
-                    seg = np.asarray(m["segmentation"], dtype=bool)
-                    area = float(m.get("area", seg.sum()))
-                    ratio = area / img_area
-                    if ratio < min_area_ratio or ratio > max_area_ratio:
-                        continue
-                    x, y, w, h = m["bbox"]
-                    x1 = max(0, int(round(x)))
-                    y1 = max(0, int(round(y)))
-                    x2 = min(width, int(round(x + w)))
-                    y2 = min(height, int(round(y + h)))
-                    if x2 <= x1 or y2 <= y1:
-                        continue
-                    score = float(m.get("predicted_iou", 0.90)) * float(m.get("stability_score", 0.90))
-                    candidates.append((seg, (x1, y1, x2, y2), score, area))
+                            area = float(seg.sum())
+                            ratio = area / img_area
+                            if ratio < min_area_ratio or ratio > max_area_ratio:
+                                continue
+
+                            # Derive tight bounding box from the actual SAM silhouette
+                            ys, xs = np.where(seg)
+                            x1, y1 = int(xs.min()), int(ys.min())
+                            x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
+                            if x2 <= x1 or y2 <= y1:
+                                continue
+
+                            candidates.append((seg, (x1, y1, x2, y2), score, area))
+                        except Exception:
+                            continue
 
                 # Sort by quality score descending
                 candidates.sort(key=lambda item: item[2], reverse=True)
@@ -206,7 +221,7 @@ class SamMaskGenerator:
                             b1_a = (box[2] - box[0]) * (box[3] - box[1])
                             b2_a = (s_box[2] - s_box[0]) * (s_box[3] - s_box[1])
                             iou = inter / float(b1_a + b2_a - inter)
-                            if iou > 0.45:
+                            if iou > 0.50:
                                 overlap = True
                                 break
                     if not overlap:
@@ -218,16 +233,20 @@ class SamMaskGenerator:
                     return [(seg, box, score) for seg, box, score, _ in selected]
             except Exception:
                 pass
-            finally:
-                try:
-                    import gc
-                    import torch
 
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
+        elif self.backend_type == "hf":
+            preds = self.generate(image, anchor_boxes)
+            selected_hf = []
+            for pred, box in zip(preds, anchor_boxes):
+                if pred.source == "sam" and pred.mask.any():
+                    ys, xs = np.where(pred.mask)
+                    x1, y1 = int(xs.min()), int(ys.min())
+                    x2, y2 = int(xs.max()) + 1, int(ys.max()) + 1
+                    selected_hf.append((pred.mask, (x1, y1, x2, y2), pred.iou_score or 0.90))
+                    if len(selected_hf) >= max_regions:
+                        break
+            if selected_hf:
+                return selected_hf
 
         # Fallback: Full frame description if no salient sub-objects passed threshold
         full_box = (0, 0, width, height)
