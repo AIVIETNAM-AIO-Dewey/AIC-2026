@@ -88,8 +88,7 @@ def main() -> int:
             if reg.get("mask_rle"):
                 from aic2026.object_description.rle import decode_mask
 
-                mask_array = decode_mask(reg["mask_rle"])
-                mask_img = Image.fromarray((mask_array * 255).astype(np.uint8), mode="L")
+                mask_img = Image.fromarray((mask_array.astype(bool) * 255).astype(np.uint8))
                 if mask_img.size != (w, h):
                     mask_img = mask_img.resize((w, h), Image.NEAREST)
             elif bbox:

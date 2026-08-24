@@ -517,7 +517,7 @@ def run_sam_dam_experiment(
             )
             dam_captions = []
             for reg_idx, (det, pred) in enumerate(zip(filtered_dets, sam_preds), start=1):
-                mask_pil = Image.fromarray(np.asarray(pred.mask, dtype=np.uint8) * 255, mode="L")
+                mask_pil = Image.fromarray((np.asarray(pred.mask, dtype=bool) * 255).astype(np.uint8))
                 raw_text = dam_captioner.describe(image, mask_pil, max_new_tokens=75)
                 caption = normalize_caption(raw_text, maximum_words=maximum_words)
                 dam_captions.append(caption)

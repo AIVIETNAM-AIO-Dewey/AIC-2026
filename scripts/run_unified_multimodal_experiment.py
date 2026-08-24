@@ -177,7 +177,7 @@ def render_multimodal_card(
         0.02, 0.98, full_text,
         transform=axes[2].transAxes,
         fontsize=9,
-        family="monospace",
+        fontfamily="sans-serif",
         verticalalignment="top",
         bbox=dict(boxstyle="round,pad=0.5", facecolor="#F8F9FA", edgecolor="#D0D7DE", alpha=0.95),
     )
@@ -188,7 +188,7 @@ def render_multimodal_card(
         weight="bold",
         y=0.98,
     )
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.92, bottom=0.04, wspace=0.08)
     output_card_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_card_path, bbox_inches="tight", dpi=150)
     plt.close(fig)

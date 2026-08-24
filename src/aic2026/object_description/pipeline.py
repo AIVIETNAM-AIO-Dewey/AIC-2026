@@ -410,7 +410,7 @@ def run_descriptions(
         described_regions: list[ObjectRegion] = []
         for region in record.regions:
             mask_array = decode_mask(region.segmentation.mask_rle.model_dump(mode="json"))
-            mask = Image.fromarray(np.asarray(mask_array, dtype=np.uint8) * 255, mode="L")
+            mask = Image.fromarray((np.asarray(mask_array, dtype=bool) * 255).astype(np.uint8))
             try:
                 retry_after_oom = False
                 try:

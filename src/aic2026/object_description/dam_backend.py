@@ -196,7 +196,8 @@ class DamCaptioner:
                 mask,
                 DAM_PROMPT,
                 streaming=False,
-                temperature=0,
+                temperature=None,
+                top_p=None,
                 num_beams=1,
                 max_new_tokens=max_new_tokens,
             )
@@ -238,6 +239,6 @@ class DamCaptioner:
                 x2, y2 = int(0.95 * w), int(0.95 * h)
                 mask_array = rectangle_mask(h, w, (x1, y1, x2, y2))
 
-        mask_pil = Image.fromarray((mask_array.astype(bool) * 255).astype("uint8"), mode="L")
+        mask_pil = Image.fromarray((mask_array.astype(bool) * 255).astype(np.uint8))
         raw_text = self.describe(image, mask_pil, max_new_tokens=max_new_tokens)
         return normalize_caption(raw_text, maximum_words=max_words)
