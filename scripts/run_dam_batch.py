@@ -129,6 +129,8 @@ class PathResolver:
         if self.videos_root and self.videos_root.exists():
             scan_roots.append(self.videos_root)
         for fallback in (
+            Path("/kaggle/input/datasets/lyduchoang/aic-26-video/Video"),
+            Path("/kaggle/input/aic-26-video/Video"),
             Path("/kaggle/input"),
             REPO_ROOT / "data" / "videos",
             REPO_ROOT / "data",
@@ -138,12 +140,16 @@ class PathResolver:
 
         for scan_root in scan_roots:
             logger.info("Fast-indexing video files under %s ...", scan_root)
-            for root, _, files in os.walk(scan_root):
+            for root, dirs, files in os.walk(scan_root):
+                # Skip heavy keyframe/image/object folders to prevent slow scans
+                dirs[:] = [d for d in dirs if not d.lower().startswith(("keyframe", "frame", "object", "mask", "desc", "ocr", "map-key"))]
                 for f in files:
                     if f.endswith(".mp4") and f.startswith("L"):
                         p = Path(root) / f
                         if p.stem not in index:
                             index[p.stem] = p
+                if len(index) >= 873:
+                    break
             if len(index) >= 873:
                 break
 
