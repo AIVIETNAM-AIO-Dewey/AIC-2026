@@ -108,6 +108,11 @@ class PathResolver:
     def resolve_video_path(self, video_id: str) -> Path:
         if self.videos_root is None:
             raise FileNotFoundError("videos_root is not configured")
+        
+        index = self._build_video_index()
+        if video_id in index and index[video_id].is_file():
+            return index[video_id]
+
         batch = video_id.split("_")[0]  # e.g. L21
         candidates = [
             self.videos_root / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
@@ -120,10 +125,6 @@ class PathResolver:
         for candidate in candidates:
             if candidate.is_file():
                 return candidate
-
-        index = self._build_video_index()
-        if video_id in index and index[video_id].is_file():
-            return index[video_id]
 
         raise FileNotFoundError(f"Video file {video_id}.mp4 not found under {self.videos_root}")
 
