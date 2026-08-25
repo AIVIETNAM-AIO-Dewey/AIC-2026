@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         same_class_iou=float(config.get("class_nms_iou", 0.70)),
         cross_label_duplicate_iou=float(config.get("cross_label_iou", 0.95)),
         maximum_regions=int(config.get("max_regions", 20)),
+        fallback_scene=bool(config.get("fallback_scene", True)),
     )
     sam_id = str(config.get("sam_model_id", "facebook/sam-vit-base"))
     sam_revision = str(config.get("sam_revision", "70c1a07f894ebb5b307fd9eaaee97b9dfc16068f"))
@@ -108,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             "same_class_iou": filter_config.same_class_iou,
             "cross_label_duplicate_iou": filter_config.cross_label_duplicate_iou,
             "maximum_regions": filter_config.maximum_regions,
+            "fallback_scene": filter_config.fallback_scene,
         },
         "sam_model_id": sam_id,
         "sam_revision": sam_revision,

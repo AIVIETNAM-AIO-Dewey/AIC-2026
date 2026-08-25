@@ -11,6 +11,30 @@ from PIL import Image
 from .geometry import Detection
 
 
+DEFAULT_OPEN_VOCABULARY = [
+    # People & Attire
+    "person", "man", "woman", "child", "crowd",
+    # Vehicles & Transportation
+    "car", "vehicle", "automobile", "motorcycle", "motorbike", "bicycle", "bike",
+    "bus", "truck", "van", "boat", "ship", "airplane", "train",
+    # Infrastructure, Buildings & Architecture
+    "building", "house", "roof", "bridge", "road", "street", "highway", "sidewalk",
+    "traffic light", "street sign", "billboard", "banner", "fence", "wall", "gate",
+    "door", "window", "pole", "power line",
+    # Nature, Landforms & Hazards
+    "tree", "plant", "flower", "grass", "water", "river", "canal", "lake", "sea",
+    "mountain", "hill", "landslide", "road collapse", "flood", "mud", "sky",
+    "fire", "smoke",
+    # Indoor & Everyday Objects
+    "chair", "table", "desk", "sofa", "bed", "television", "tv screen", "monitor",
+    "laptop", "computer", "phone", "cell phone", "camera", "clock",
+    "bottle", "cup", "glass", "plate", "bowl", "food", "fruit",
+    "backpack", "bag", "handbag", "suitcase", "umbrella", "hat", "helmet", "glasses", "sunglasses",
+    # Salient / Catch-all
+    "sign", "logo", "poster", "document", "text", "animal", "dog", "cat", "bird", "object",
+]
+
+
 class YoloWorldDetector:
     """YOLO-World open-vocabulary detector generating normalized Detections."""
 
@@ -19,8 +43,8 @@ class YoloWorldDetector:
         model_id_or_path: str | Path = "yolov8x-worldv2.pt",
         *,
         device: str = "auto",
-        conf: float = 0.20,
-        custom_classes: list[str] | None = None,
+        conf: float = 0.15,
+        custom_classes: list[str] | str | None = None,
     ) -> None:
         try:
             from ultralytics import YOLOWorld
@@ -37,8 +61,10 @@ class YoloWorldDetector:
         # Initialize YOLO-World model
         self.model = YOLOWorld(self.model_path)
         
-        # Set custom open-vocabulary classes if specified
-        if custom_classes:
+        # Set open-vocabulary classes
+        if custom_classes is None:
+            self.model.set_classes(DEFAULT_OPEN_VOCABULARY)
+        elif isinstance(custom_classes, list) and custom_classes:
             self.model.set_classes(custom_classes)
 
     def detect(self, image: Image.Image) -> list[Detection]:

@@ -29,6 +29,7 @@ class FilterConfig:
     same_class_iou: float = 0.70
     cross_label_duplicate_iou: float = 0.95
     maximum_regions: int = 20
+    fallback_scene: bool = True
 
     def __post_init__(self) -> None:
         for name in (

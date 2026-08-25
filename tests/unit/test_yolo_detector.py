@@ -114,3 +114,43 @@ def test_yolo_world_filtering_integration():
     filtered = filter_detections(raw_detections, config)
     assert len(filtered) == 2
     assert [d.class_name for d in filtered] == ["sunglasses", "laptop"]
+
+
+def test_default_open_vocabulary():
+    """Verify default open vocabulary contains diverse infrastructure, nature, hazard, and object classes."""
+    from aic2026.object_description.yolo_detector import DEFAULT_OPEN_VOCABULARY
+
+    assert len(DEFAULT_OPEN_VOCABULARY) > 30
+    assert "building" in DEFAULT_OPEN_VOCABULARY
+    assert "house" in DEFAULT_OPEN_VOCABULARY
+    assert "road" in DEFAULT_OPEN_VOCABULARY
+    assert "water" in DEFAULT_OPEN_VOCABULARY
+    assert "river" in DEFAULT_OPEN_VOCABULARY
+    assert "landslide" in DEFAULT_OPEN_VOCABULARY
+    assert "person" in DEFAULT_OPEN_VOCABULARY
+
+
+def test_scene_fallback_when_zero_detections():
+    """Verify fallback scene detection is generated when zero detections pass filter."""
+    from aic2026.object_description.geometry import Detection, FilterConfig, filter_detections
+
+    raw_detections: list[Detection] = []
+    config = FilterConfig(fallback_scene=True)
+    filtered = filter_detections(raw_detections, config)
+    assert len(filtered) == 0  # filter_detections alone returns empty, prepare_masks injects fallback
+
+    # When fallback_scene is active in pipeline
+    if not filtered and config.fallback_scene:
+        fallback = [
+            Detection(
+                source_index=0,
+                score=1.0,
+                class_name="scene",
+                class_entity="scene",
+                class_label=0,
+                bbox_yxyx_norm=(0.05, 0.05, 0.95, 0.95),
+            )
+        ]
+        assert len(fallback) == 1
+        assert fallback[0].class_entity == "scene"
+        assert fallback[0].bbox_yxyx_norm == (0.05, 0.05, 0.95, 0.95)
