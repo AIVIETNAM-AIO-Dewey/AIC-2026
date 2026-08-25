@@ -122,43 +122,55 @@ class PathResolver:
         self._map_csv_index: dict[str, Path] | None = None
 
     def _build_video_index(self) -> dict[str, Path]:
-        if self.videos_root is None:
-            return {}
         if self._video_index is not None:
             return self._video_index
-        logger.info("Fast-indexing video files under %s ...", self.videos_root)
         index: dict[str, Path] = {}
-        for root, _, files in os.walk(self.videos_root):
-            for f in files:
-                if f.endswith(".mp4") and f.startswith("L"):
-                    p = Path(root) / f
-                    index[p.stem] = p
+        scan_roots: list[Path] = []
+        if self.videos_root and self.videos_root.exists():
+            scan_roots.append(self.videos_root)
+        for fallback in (
+            Path("/kaggle/input"),
+            REPO_ROOT / "data" / "videos",
+            REPO_ROOT / "data",
+        ):
+            if fallback.exists() and fallback not in scan_roots:
+                scan_roots.append(fallback)
+
+        for scan_root in scan_roots:
+            logger.info("Fast-indexing video files under %s ...", scan_root)
+            for root, _, files in os.walk(scan_root):
+                for f in files:
+                    if f.endswith(".mp4") and f.startswith("L"):
+                        p = Path(root) / f
+                        if p.stem not in index:
+                            index[p.stem] = p
+            if len(index) >= 873:
+                break
+
         logger.info("Indexed %d video MP4 files.", len(index))
         self._video_index = index
         return index
 
     def resolve_video_path(self, video_id: str) -> Path:
-        if self.videos_root is None:
-            raise FileNotFoundError("videos_root is not configured")
-        
         index = self._build_video_index()
         if video_id in index and index[video_id].is_file():
             return index[video_id]
 
-        batch = video_id.split("_")[0]  # e.g. L21
-        candidates = [
-            self.videos_root / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
-            self.videos_root / f"Videos_{batch}" / f"{video_id}.mp4",
-            self.videos_root / "Videos" / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
-            self.videos_root / "Videos" / f"{video_id}.mp4",
-            self.videos_root / "video" / f"{video_id}.mp4",
-            self.videos_root / f"{video_id}.mp4",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+        if self.videos_root:
+            batch = video_id.split("_")[0]  # e.g. L21
+            candidates = [
+                self.videos_root / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
+                self.videos_root / f"Videos_{batch}" / f"{video_id}.mp4",
+                self.videos_root / "Videos" / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
+                self.videos_root / "Videos" / f"{video_id}.mp4",
+                self.videos_root / "video" / f"{video_id}.mp4",
+                self.videos_root / f"{video_id}.mp4",
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    return candidate
 
-        raise FileNotFoundError(f"Video file {video_id}.mp4 not found under {self.videos_root}")
+        raise FileNotFoundError(f"Video file {video_id}.mp4 not found in index or under {self.videos_root}")
 
     def _build_keyframe_index(self) -> dict[str, Path]:
         if self.keyframes_root is None:
