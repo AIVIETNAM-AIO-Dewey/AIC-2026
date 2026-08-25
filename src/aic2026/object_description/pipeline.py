@@ -25,7 +25,7 @@ from aic2026.contracts import (
 from aic2026.contracts.models import CaptionError
 
 from .caption import normalize_caption
-from .geometry import FilterConfig, filter_detections, normalized_to_pixels
+from .geometry import Detection, FilterConfig, filter_detections, normalized_to_pixels
 from .organizer import index_object_files, load_organizer_detections
 from .rle import decode_mask, encode_mask
 from .sam_backend import MaskPrediction
