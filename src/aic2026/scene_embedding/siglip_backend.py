@@ -38,16 +38,16 @@ class SiglipEncoder:
             raise ValueError(f"Unsupported compute dtype: {compute_dtype!r}")
         try:
             import torch
-            from transformers import AutoModel, AutoProcessor
+            from transformers import AutoImageProcessor, AutoModel
         except ImportError as error:
             raise RuntimeError(
-                "transformers (>=4.49) and PyTorch are required for SigLIP-2"
+                "transformers and PyTorch are required for SigLIP"
             ) from error
 
         local_files_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
         target_device = device if torch.cuda.is_available() and device.startswith("cuda") else "cpu"
 
-        processor = AutoProcessor.from_pretrained(
+        processor = AutoImageProcessor.from_pretrained(
             model_id,
             revision=revision,
             cache_dir=str(cache_dir) if cache_dir else None,
@@ -113,8 +113,14 @@ class SiglipEncoder:
         if not texts:
             return np.zeros((0, self.embedding_dim), dtype=np.float32)
         import torch
+        from transformers import AutoTokenizer
 
-        inputs = self.processor(
+        tokenizer = AutoTokenizer.from_pretrained(
+            SIGLIP_MODEL_ID,
+            revision=SIGLIP_REVISION,
+            trust_remote_code=False,
+        )
+        inputs = tokenizer(
             text=texts,
             padding=TEXT_PADDING,
             truncation=True,
