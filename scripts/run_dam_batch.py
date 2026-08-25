@@ -574,9 +574,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_resume and is_done:
             logger.info("  [SKIP - ALREADY COMPLETED IN GDRIVE/LOCAL] %s", video_id)
             skipped_count += 1
-            if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
-                rclone_sync_file(description_artifact, args.rclone_dest)
-                rclone_sync_file(description_manifest, args.rclone_dest)
             continue
 
         objects_dir = resolver.resolve_objects_dir(video_id)
