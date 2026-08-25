@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-extractor", choices=["transnetv2", "organizer"], default="transnetv2", help="Keyframe extraction method")
     parser.add_argument("--detector", choices=["yolo-world", "organizer"], default="yolo-world", help="Object detector backend")
     parser.add_argument("--detector-model", type=str, default="yolov8x-worldv2.pt", help="YOLO-World checkpoint or path")
+    parser.add_argument("--enable-ocr", action="store_true", default=True, help="Enable Stage 3 OCR extraction (default: True)")
+    parser.add_argument("--no-ocr", action="store_false", dest="enable_ocr", help="Disable Stage 3 OCR extraction")
+    parser.add_argument("--ocr-backend", default="auto", choices=["auto", "easyocr", "paddleocr"], help="OCR engine backend")
+    parser.add_argument("--ocr-threshold", type=float, default=0.30, help="Confidence threshold for OCR")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
     parser.add_argument("--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache"))
     parser.add_argument("--device", default="cuda", help="Execution device (cuda or auto)")
@@ -639,13 +643,53 @@ def main(argv: list[str] | None = None) -> int:
             step_name="run_dam_descriptions",
         )
 
+        # Stage 3: OCR Text Extraction (Optional / Default True)
+        ocr_artifact = output_root / "ocr" / "transcripts" / f"{video_id}.jsonl"
+        ocr_manifest = ocr_artifact.with_suffix(".manifest.json")
+        if args.enable_ocr:
+            ocr_cmd = [
+                sys.executable,
+                str(REPO_ROOT / "scripts/run_ocr_extraction.py"),
+                "--config", str(args.config),
+                "--video-id", video_id,
+                "--frame-manifest", str(frame_manifest),
+                "--data-root", str(data_root),
+                "--output", str(ocr_artifact),
+                "--device", args.device,
+                "--backend", args.ocr_backend,
+                "--threshold", str(args.ocr_threshold),
+            ]
+            if args.no_resume:
+                ocr_cmd.append("--no-resume")
+            if args.limit:
+                ocr_cmd.extend(["--limit", str(args.limit)])
+            run_pipeline_step(ocr_cmd, step_name="run_ocr_extraction")
+
+        # Stage 4: Multi-Modal Metadata Fusion
+        unified_artifact = output_root / "unified_metadata" / f"{video_id}.jsonl"
+        fusion_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/build_unified_frame_metadata.py"),
+            "--video-id", video_id,
+            "--frame-manifest", str(frame_manifest),
+            "--descriptions", str(description_artifact),
+            "--output", str(unified_artifact),
+        ]
+        if args.enable_ocr and ocr_artifact.is_file():
+            fusion_cmd.extend(["--ocr-transcripts", str(ocr_artifact)])
+        run_pipeline_step(fusion_cmd, step_name="build_unified_frame_metadata")
+
         # Sync to Google Drive
         if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
-            ok1 = rclone_sync_file(description_artifact, args.rclone_dest)
-            ok2 = rclone_sync_file(description_manifest, args.rclone_dest)
-            if not (ok1 and ok2):
-                logger.warning("  [RCLONE] Direct single-file upload failed; executing directory sync fallback...")
-                rclone_sync_dir(description_artifact.parent, args.rclone_dest)
+            rclone_sync_file(description_artifact, f"{args.rclone_dest.rstrip('/')}/descriptions/")
+            rclone_sync_file(description_manifest, f"{args.rclone_dest.rstrip('/')}/descriptions/")
+            if unified_artifact.is_file():
+                rclone_sync_file(unified_artifact, f"{args.rclone_dest.rstrip('/')}/unified_metadata/")
+            if ocr_artifact.is_file():
+                rclone_sync_file(ocr_artifact, f"{args.rclone_dest.rstrip('/')}/ocr_transcripts/")
+            map_csv = output_root / "map-keyframes" / f"{video_id}.csv"
+            if map_csv.is_file():
+                rclone_sync_file(map_csv, f"{args.rclone_dest.rstrip('/')}/map-keyframes/")
 
         elapsed_vid = time.time() - video_start_time
         completed_in_run += 1
