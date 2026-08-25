@@ -12,26 +12,46 @@ from .geometry import Detection
 
 
 DEFAULT_OPEN_VOCABULARY = [
-    # People & Attire
-    "person", "man", "woman", "child", "crowd",
-    # Vehicles & Transportation
-    "car", "vehicle", "automobile", "motorcycle", "motorbike", "bicycle", "bike",
-    "bus", "truck", "van", "boat", "ship", "airplane", "train",
-    # Infrastructure, Buildings & Architecture
-    "building", "house", "roof", "bridge", "road", "street", "highway", "sidewalk",
-    "traffic light", "street sign", "billboard", "banner", "fence", "wall", "gate",
-    "door", "window", "pole", "power line",
-    # Nature, Landforms & Hazards
-    "tree", "plant", "flower", "grass", "water", "river", "canal", "lake", "sea",
-    "mountain", "hill", "landslide", "road collapse", "flood", "mud", "sky",
-    "fire", "smoke",
-    # Indoor & Everyday Objects
-    "chair", "table", "desk", "sofa", "bed", "television", "tv screen", "monitor",
-    "laptop", "computer", "phone", "cell phone", "camera", "clock",
-    "bottle", "cup", "glass", "plate", "bowl", "food", "fruit",
-    "backpack", "bag", "handbag", "suitcase", "umbrella", "hat", "helmet", "glasses", "sunglasses",
-    # Salient / Catch-all
-    "sign", "logo", "poster", "document", "text", "animal", "dog", "cat", "bird", "object",
+    # 1. People, Roles & Body Parts
+    "person", "man", "woman", "child", "girl", "boy", "crowd",
+    "chef", "news anchor", "reporter", "host", "police officer", "doctor", "athlete",
+    "human face", "human hand",
+
+    # 2. Clothing, Attire & Accessories
+    "clothing", "shirt", "jacket", "chef jacket", "suit", "dress", "t-shirt", "coat",
+    "apron", "tie", "pants", "shorts", "shoes",
+    "glasses", "sunglasses", "hat", "cap", "helmet", "gloves", "mask",
+    "backpack", "bag", "handbag", "suitcase", "watch",
+
+    # 3. Vehicles & Transportation
+    "car", "automobile", "vehicle", "motorcycle", "motorbike", "scooter", "bicycle", "bike",
+    "bus", "truck", "van", "ambulance", "fire truck",
+    "boat", "ship", "canoe", "airplane", "helicopter", "train",
+    "license plate", "traffic light", "traffic sign",
+
+    # 4. Urban, Infrastructure, Architecture & Hazards
+    "building", "house", "roof", "window", "door", "gate", "wall", "fence", "balcony",
+    "bridge", "road", "street", "highway", "sidewalk", "intersection", "pavement",
+    "electric pole", "billboard", "banner", "poster", "flag", "signboard",
+    "landslide", "road collapse", "flood", "mud", "fire", "smoke",
+
+    # 5. Nature, Environment & Water
+    "tree", "plant", "flower", "grass", "leaves", "forest",
+    "water", "river", "canal", "lake", "pond", "sea", "beach",
+    "mountain", "hill", "sky", "cloud",
+
+    # 6. Food, Cooking & Kitchenware
+    "food", "dish", "meal", "vegetable", "tomato", "salad", "fruit", "meat", "fish", "soup", "snack",
+    "bowl", "plate", "dish", "cup", "glass", "bottle",
+    "frying pan", "pot", "pan", "stove", "cutting board", "tableware", "spoon", "fork", "knife", "chopsticks",
+
+    # 7. Studio, Media, Electronics & Office
+    "desk", "table", "chair", "sofa", "podium",
+    "microphone", "camera", "tv screen", "television", "monitor", "laptop", "computer", "phone", "smartphone",
+    "logo", "text", "document", "paper", "book", "clock",
+
+    # 8. Animals
+    "dog", "cat", "bird", "fish", "horse", "cow", "chicken", "animal",
 ]
 
 
