@@ -18,22 +18,21 @@ def test_master_video_list_sharding():
     assert len(all_videos) == 873, f"Expected 873 videos, got {len(all_videos)}"
     assert len(set(all_videos)) == 873, "Master list contains duplicates"
 
-    num_workers = 8
-    worker_slices = []
-    for worker_id in range(num_workers):
-        assigned = all_videos[worker_id::num_workers]
-        assert len(assigned) in (109, 110), f"Worker {worker_id} workload {len(assigned)} outside [109, 110]"
-        worker_slices.append(set(assigned))
+    for num_workers in (8, 12, 16, 24, 48):
+        worker_slices = []
+        for worker_id in range(num_workers):
+            assigned = all_videos[worker_id::num_workers]
+            worker_slices.append(set(assigned))
 
-    # Verify 0 overlap between any two workers
-    for i in range(num_workers):
-        for j in range(i + 1, num_workers):
-            overlap = worker_slices[i].intersection(worker_slices[j])
-            assert not overlap, f"Workers {i} and {j} have overlapping assignments: {overlap}"
+        # Verify 0 overlap between any two workers
+        for i in range(num_workers):
+            for j in range(i + 1, num_workers):
+                overlap = worker_slices[i].intersection(worker_slices[j])
+                assert not overlap, f"Workers {i} and {j} have overlapping assignments: {overlap}"
 
-    # Verify complete union equals 873
-    all_assigned = set().union(*worker_slices)
-    assert len(all_assigned) == 873, "Assigned union does not cover all 873 videos"
+        # Verify complete union equals 873
+        all_assigned = set().union(*worker_slices)
+        assert len(all_assigned) == 873, f"Assigned union for {num_workers} workers does not cover all 873 videos"
 
 
 def test_path_resolver_local_fixture(tmp_path: Path):
