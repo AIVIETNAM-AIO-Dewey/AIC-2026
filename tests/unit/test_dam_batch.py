@@ -63,3 +63,23 @@ def test_path_resolver_local_fixture(tmp_path: Path):
 
     m_csv = resolver.resolve_map_csv("L21_V001")
     assert m_csv == map_root / "L21_V001.csv"
+
+
+def test_create_keyframe_zip(tmp_path: Path):
+    from scripts.run_dam_batch import create_keyframe_zip
+    import zipfile
+
+    kf_dir = tmp_path / "keyframes" / "L21_V001"
+    kf_dir.mkdir(parents=True)
+    (kf_dir / "00000001.jpg").write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF")
+    (kf_dir / "00000002.jpg").write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF")
+
+    zip_out = tmp_path / "keyframes_zips" / "L21_V001.zip"
+    created = create_keyframe_zip(kf_dir, zip_out)
+    assert created is not None
+    assert zip_out.is_file()
+
+    with zipfile.ZipFile(zip_out, "r") as zf:
+        namelist = zf.namelist()
+        assert "L21_V001/00000001.jpg" in namelist
+        assert "L21_V001/00000002.jpg" in namelist

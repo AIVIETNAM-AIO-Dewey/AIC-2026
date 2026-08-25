@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,29 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("dam_batch_runner")
+
+
+def create_keyframe_zip(keyframes_dir: Path, zip_output_path: Path) -> Path | None:
+    """Create a compressed .zip archive of all keyframes for a video using ZIP_STORED (ultra fast)."""
+    if not keyframes_dir.is_dir():
+        return None
+    jpg_files = sorted(keyframes_dir.glob("*.jpg"))
+    if not jpg_files:
+        return None
+
+    zip_output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_zip = zip_output_path.with_suffix(".zip.tmp")
+    try:
+        with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_STORED) as zf:
+            for jpg in jpg_files:
+                zf.write(jpg, arcname=f"{keyframes_dir.name}/{jpg.name}")
+        temp_zip.replace(zip_output_path)
+        return zip_output_path
+    except Exception as exc:
+        logger.warning("  ⚠️ Failed to create keyframe zip archive for %s: %s", keyframes_dir.name, exc)
+        if temp_zip.exists():
+            temp_zip.unlink()
+        return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -263,8 +288,8 @@ def find_rclone_config() -> str | None:
     return None
 
 
-def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -> bool:
-    """Sync a single file to rclone remote with exponential backoff retries and explicit config."""
+def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 10) -> bool:
+    """Sync a single file to rclone remote with 10-attempt exponential backoff retries and jitter."""
     if not local_path.is_file():
         logger.error("  [RCLONE] Source file does not exist: %s", local_path)
         return False
@@ -276,16 +301,16 @@ def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -
     if config_path:
         base_cmd.extend(["--config", config_path])
     base_cmd.extend([
-        "--retries", "5",
+        "--retries", "10",
         "--retries-sleep", "3s",
-        "--low-level-retries", "10",
+        "--low-level-retries", "20",
         "--timeout", "5m",
         "--contimeout", "60s",
         "--drive-chunk-size", "64M",
         "--tpslimit", "5",
     ])
 
-    backoff_delays = [5, 10, 20, 30, 60]
+    backoff_delays = [5, 10, 15, 25, 35, 45, 60, 90, 120, 180]
     for attempt in range(1, max_retries + 1):
         try:
             res = subprocess.run(
@@ -313,8 +338,9 @@ def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -
             logger.warning("  [RCLONE] Attempt %d/%d exception for %s: %s", attempt, max_retries, local_path.name, exc)
 
         if attempt < max_retries:
-            delay = backoff_delays[min(attempt - 1, len(backoff_delays) - 1)]
-            logger.info("  [RCLONE] Retrying upload in %ds...", delay)
+            base_delay = backoff_delays[min(attempt - 1, len(backoff_delays) - 1)]
+            delay = base_delay + random.uniform(1.0, 5.0)
+            logger.info("  [RCLONE] Retrying upload in %.1fs (attempt %d/%d)...", delay, attempt + 1, max_retries)
             time.sleep(delay)
 
     return False
@@ -492,10 +518,10 @@ def main(argv: list[str] | None = None) -> int:
     remote_completed_videos: set[str] = set()
     if args.rclone_dest and not args.no_resume:
         config_path = find_rclone_config()
-        lsf_cmd = ["rclone", "lsf", args.rclone_dest, "--fast-list", "--tpslimit", "5"]
+        lsf_cmd = ["rclone", "lsf", args.rclone_dest, "-R", "--include", "*.jsonl", "--fast-list", "--tpslimit", "5"]
         if config_path:
             lsf_cmd.extend(["--config", config_path])
-        for attempt in range(1, 4):
+        for attempt in range(1, 11):
             try:
                 res = subprocess.run(
                     lsf_cmd,
@@ -504,19 +530,19 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=90,
                 )
                 if res.returncode == 0:
-                    for fname in res.stdout.splitlines():
-                        fname = fname.strip()
-                        if fname.endswith(".jsonl"):
-                            remote_completed_videos.add(fname[:-6])
+                    for line in res.stdout.splitlines():
+                        fname = Path(line.strip())
+                        if fname.suffix == ".jsonl" and not fname.stem.endswith(".manifest"):
+                            remote_completed_videos.add(fname.stem)
                     if remote_completed_videos:
                         logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
                     break
                 else:
-                    logger.warning("Remote pre-fetch attempt %d/3 warning (code %d). Retrying in 5s...", attempt, res.returncode)
-                    time.sleep(5)
+                    logger.warning("Remote pre-fetch attempt %d/10 warning (code %d). Retrying in 3s...", attempt, res.returncode)
+                    time.sleep(3 + random.uniform(1.0, 3.0))
             except Exception as exc:
-                logger.warning("Remote pre-fetch attempt %d/3 exception: %s. Retrying in 5s...", attempt, exc)
-                time.sleep(5)
+                logger.warning("Remote pre-fetch attempt %d/10 exception: %s. Retrying in 3s...", attempt, exc)
+                time.sleep(3 + random.uniform(1.0, 3.0))
 
     for idx, video_id in enumerate(assigned_videos, start=1):
         video_start_time = time.time()
@@ -704,22 +730,44 @@ def main(argv: list[str] | None = None) -> int:
             fusion_cmd.extend(["--embeddings", str(emb_artifact)])
         run_pipeline_step(fusion_cmd, step_name="build_unified_frame_metadata")
 
-        # Sync to Google Drive
-        if args.rclone_dest and is_video_completed(description_artifact, description_manifest):
-            rclone_sync_file(description_artifact, f"{args.rclone_dest.rstrip('/')}/descriptions/")
-            rclone_sync_file(description_manifest, f"{args.rclone_dest.rstrip('/')}/descriptions/")
-            if unified_artifact.is_file():
-                rclone_sync_file(unified_artifact, f"{args.rclone_dest.rstrip('/')}/unified_metadata/")
-            if ocr_artifact.is_file():
-                rclone_sync_file(ocr_artifact, f"{args.rclone_dest.rstrip('/')}/ocr_transcripts/")
-            if emb_artifact.is_file():
-                rclone_sync_file(emb_artifact, f"{args.rclone_dest.rstrip('/')}/scene_embeddings/")
-            safetensors_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
-            if safetensors_mat.is_file():
-                rclone_sync_file(safetensors_mat, f"{args.rclone_dest.rstrip('/')}/scene_embeddings/")
-            map_csv = output_root / "map-keyframes" / f"{video_id}.csv"
-            if map_csv.is_file():
-                rclone_sync_file(map_csv, f"{args.rclone_dest.rstrip('/')}/map-keyframes/")
+        # Atomic & Fault-Tolerant Google Drive Upload
+        if args.rclone_dest:
+            rclone_base = args.rclone_dest.rstrip('/')
+            try:
+                # 1. Package keyframes into zip archive
+                keyframes_dir = output_root / "keyframes" / video_id
+                keyframe_zip = output_root / "keyframes_zips" / f"{video_id}.zip"
+                if create_keyframe_zip(keyframes_dir, keyframe_zip):
+                    rclone_sync_file(keyframe_zip, f"{rclone_base}/keyframes_zips/")
+
+                # 2. Sync DAM descriptions
+                if description_artifact.is_file():
+                    rclone_sync_file(description_artifact, f"{rclone_base}/descriptions/")
+                if description_manifest.is_file():
+                    rclone_sync_file(description_manifest, f"{rclone_base}/descriptions/")
+
+                # 3. Sync OCR transcripts
+                if ocr_artifact.is_file():
+                    rclone_sync_file(ocr_artifact, f"{rclone_base}/ocr_transcripts/")
+
+                # 4. Sync SigLIP2 Scene Embeddings
+                safetensors_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
+                if safetensors_mat.is_file():
+                    rclone_sync_file(safetensors_mat, f"{rclone_base}/scene_embeddings/")
+                if emb_artifact.is_file():
+                    rclone_sync_file(emb_artifact, f"{rclone_base}/scene_embeddings/")
+
+                # 5. Sync map-keyframes CSV
+                map_csv = output_root / "map-keyframes" / f"{video_id}.csv"
+                if map_csv.is_file():
+                    rclone_sync_file(map_csv, f"{rclone_base}/map-keyframes/")
+
+                # 6. LAST FILE: Sync search-ready Unified Metadata (acts as atomic completion lock)
+                if unified_artifact.is_file():
+                    rclone_sync_file(unified_artifact, f"{rclone_base}/unified_metadata/")
+                    remote_completed_videos.add(video_id)
+            except Exception as rclone_exc:
+                logger.error("  ❌ [RCLONE] Exception during sync for %s: %s (will continue to next video)", video_id, rclone_exc)
 
         elapsed_vid = time.time() - video_start_time
         completed_in_run += 1
