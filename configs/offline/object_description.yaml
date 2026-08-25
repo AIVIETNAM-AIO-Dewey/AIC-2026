@@ -3,6 +3,14 @@ run:
   run_id: object-description-v1
 seed: 2026
 device: auto
+frame_extractor: transnetv2
+adaptive_sampling:
+  single_frame_before_s: 2.0
+  cadence_from_s: 4.0
+  extreme_shot_from_s: 7.0
+  cadence_s: 1.5
+  max_frames_per_shot: 10
+  dedupe_tolerance_s: 0.5
 
 detector: yolo-world
 detector_model: yolov8x-worldv2.pt

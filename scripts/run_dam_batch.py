@@ -27,9 +27,11 @@ logger = logging.getLogger("dam_batch_runner")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/offline/object_description.yaml")
-    parser.add_argument("--keyframes-root", type=Path, required=True, help="Root directory containing keyframe images (aic-26-video)")
+    parser.add_argument("--videos-root", type=Path, default=None, help="Root directory containing raw video MP4s (e.g. Videos/ or Videos_L21/video/)")
+    parser.add_argument("--keyframes-root", type=Path, default=None, help="Root directory containing keyframe images (optional with TransNetV2)")
     parser.add_argument("--objects-root", type=Path, default=None, help="Root directory containing object bounding boxes (optional with YOLO-World)")
-    parser.add_argument("--map-keyframes-root", type=Path, required=True, help="Root directory containing map-keyframes CSVs")
+    parser.add_argument("--map-keyframes-root", type=Path, default=None, help="Root directory containing map-keyframes CSVs (optional with TransNetV2)")
+    parser.add_argument("--frame-extractor", choices=["transnetv2", "organizer"], default="transnetv2", help="Keyframe extraction method")
     parser.add_argument("--detector", choices=["yolo-world", "organizer"], default="yolo-world", help="Object detector backend")
     parser.add_argument("--detector-model", type=str, default="yolov8x-worldv2.pt", help="YOLO-World checkpoint or path")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
@@ -71,15 +73,63 @@ def load_master_video_list(list_path: Path, objects_root: Path | None = None, ke
 
 class PathResolver:
     """Fast, safe path resolution engine for custom dataset folder hierarchies."""
-    def __init__(self, keyframes_root: Path, map_keyframes_root: Path, objects_root: Path | None = None) -> None:
-        self.keyframes_root = keyframes_root.expanduser().resolve()
-        self.map_keyframes_root = map_keyframes_root.expanduser().resolve()
+    def __init__(
+        self,
+        videos_root: Path | None = None,
+        keyframes_root: Path | None = None,
+        map_keyframes_root: Path | None = None,
+        objects_root: Path | None = None,
+    ) -> None:
+        self.videos_root = videos_root.expanduser().resolve() if videos_root else None
+        self.keyframes_root = keyframes_root.expanduser().resolve() if keyframes_root else None
+        self.map_keyframes_root = map_keyframes_root.expanduser().resolve() if map_keyframes_root else None
         self.objects_root = objects_root.expanduser().resolve() if objects_root else None
+        self._video_index: dict[str, Path] | None = None
         self._keyframe_index: dict[str, Path] | None = None
         self._objects_index: dict[str, Path] | None = None
         self._map_csv_index: dict[str, Path] | None = None
 
+    def _build_video_index(self) -> dict[str, Path]:
+        if self.videos_root is None:
+            return {}
+        if self._video_index is not None:
+            return self._video_index
+        logger.info("Fast-indexing video files under %s ...", self.videos_root)
+        index: dict[str, Path] = {}
+        for root, _, files in os.walk(self.videos_root):
+            for f in files:
+                if f.endswith(".mp4") and f.startswith("L"):
+                    p = Path(root) / f
+                    index[p.stem] = p
+        logger.info("Indexed %d video MP4 files.", len(index))
+        self._video_index = index
+        return index
+
+    def resolve_video_path(self, video_id: str) -> Path:
+        if self.videos_root is None:
+            raise FileNotFoundError("videos_root is not configured")
+        batch = video_id.split("_")[0]  # e.g. L21
+        candidates = [
+            self.videos_root / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
+            self.videos_root / f"Videos_{batch}" / f"{video_id}.mp4",
+            self.videos_root / "Videos" / f"Videos_{batch}" / "video" / f"{video_id}.mp4",
+            self.videos_root / "Videos" / f"{video_id}.mp4",
+            self.videos_root / "video" / f"{video_id}.mp4",
+            self.videos_root / f"{video_id}.mp4",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
+        index = self._build_video_index()
+        if video_id in index and index[video_id].is_file():
+            return index[video_id]
+
+        raise FileNotFoundError(f"Video file {video_id}.mp4 not found under {self.videos_root}")
+
     def _build_keyframe_index(self) -> dict[str, Path]:
+        if self.keyframes_root is None:
+            return {}
         if self._keyframe_index is not None:
             return self._keyframe_index
         logger.info("Fast-indexing keyframe directories under %s ...", self.keyframes_root)
@@ -110,12 +160,14 @@ class PathResolver:
         return index
 
     def _build_map_csv_index(self) -> dict[str, Path]:
+        if self.map_keyframes_root is None:
+            return {}
         if self._map_csv_index is not None:
             return self._map_csv_index
         logger.info("Fast-indexing map-keyframes CSVs under %s ...", self.map_keyframes_root)
         index: dict[str, Path] = {}
         for root_to_scan in (self.map_keyframes_root, REPO_ROOT / "data" / "map-keyframes"):
-            if root_to_scan.exists():
+            if root_to_scan and root_to_scan.exists():
                 for root, _, files in os.walk(root_to_scan):
                     for f in files:
                         if f.endswith(".csv") and f.startswith("L"):
@@ -126,6 +178,8 @@ class PathResolver:
         return index
 
     def resolve_frames_dir(self, video_id: str) -> Path:
+        if self.keyframes_root is None:
+            raise FileNotFoundError("keyframes_root is not configured")
         batch = video_id.split("_")[0]  # e.g. L21
         candidates = [
             self.keyframes_root / f"Keyframes_{batch}" / "keyframes" / video_id,
@@ -165,6 +219,8 @@ class PathResolver:
         return None
 
     def resolve_map_csv(self, video_id: str) -> Path:
+        if self.map_keyframes_root is None:
+            raise FileNotFoundError("map_keyframes_root is not configured")
         candidates = [
             self.map_keyframes_root / f"{video_id}.csv",
             self.map_keyframes_root / "map-keyframes" / f"{video_id}.csv",
@@ -328,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f" Worker Index:         {args.worker_id} / {args.num_workers}")
     print(f" Total Corpus Videos:  {len(all_videos)}")
     print(f" Assigned Workload:    {len(assigned_videos)} videos")
+    print(f" Frame Extractor:      {args.frame_extractor.upper()}")
+    print(f" Videos Source:        {args.videos_root}")
     print(f" Keyframes Source:     {args.keyframes_root}")
     print(f" Objects Source:       {args.objects_root}")
     print(f" Map-Keyframes Source: {args.map_keyframes_root}")
@@ -345,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. Path Resolver
     resolver = PathResolver(
+        videos_root=args.videos_root,
         keyframes_root=args.keyframes_root,
         objects_root=args.objects_root,
         map_keyframes_root=args.map_keyframes_root,
@@ -372,9 +431,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         for idx, vid in enumerate(assigned_videos, start=1):
             try:
-                f_dir = resolver.resolve_frames_dir(vid)
+                if args.frame_extractor == "transnetv2":
+                    v_path = resolver.resolve_video_path(vid)
+                    source_desc = f"Video: {v_path.name}"
+                else:
+                    f_dir = resolver.resolve_frames_dir(vid)
+                    m_csv = resolver.resolve_map_csv(vid)
+                    source_desc = f"Frames: {f_dir.name} | Map: {m_csv.name}"
+
                 o_dir = resolver.resolve_objects_dir(vid)
-                m_csv = resolver.resolve_map_csv(vid)
                 if idx == 1 and o_dir is not None:
                     sample_json = next(o_dir.glob("*.json"), None)
                     if sample_json and sample_json.is_file():
@@ -384,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
                         logger.info("  🎯 Sample Box Filter Test (%s/%s): %d raw boxes -> %d distinct objects: %s", vid, sample_json.name, len(raw_dets), len(filtered), labels)
                 if idx <= 5 or idx == len(assigned_videos):
                     obj_info = o_dir.name if o_dir else f"(Dynamic {args.detector.upper()})"
-                    logger.info("  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s", idx, len(assigned_videos), vid, f_dir.name, obj_info, m_csv.name)
+                    logger.info("  [%d/%d] %s -> %s | Objects: %s", idx, len(assigned_videos), vid, source_desc, obj_info)
             except FileNotFoundError as error:
                 logger.error("  ❌ Missing path for %s: %s", vid, error)
                 missing_count += 1
@@ -480,35 +545,58 @@ def main(argv: list[str] | None = None) -> int:
                 rclone_sync_file(description_manifest, args.rclone_dest)
             continue
 
-        try:
-            frames_dir = resolver.resolve_frames_dir(video_id)
-            objects_dir = resolver.resolve_objects_dir(video_id)
-            map_csv = resolver.resolve_map_csv(video_id)
-        except FileNotFoundError as error:
-            logger.error("  ❌ Skipping %s due to missing path: %s", video_id, error)
-            continue
-
-        # Stage 0: Build Frame Manifest
+        objects_dir = resolver.resolve_objects_dir(video_id)
         limit_args = ["--limit", str(args.limit)] if args.limit else []
         resume_args = ["--resume"] if not args.no_resume else []
 
-        run_pipeline_step(
-            [
+        # Stage 0: Frame Manifest / Keyframe Extraction
+        if args.frame_extractor == "transnetv2":
+            try:
+                video_path = resolver.resolve_video_path(video_id)
+            except FileNotFoundError as error:
+                logger.error("  ❌ Skipping %s due to missing video: %s", video_id, error)
+                continue
+
+            stage0_cmd = [
                 sys.executable,
-                str(REPO_ROOT / "scripts/build_frame_manifest.py"),
+                str(REPO_ROOT / "scripts/extract_transnet_frames.py"),
                 "--config", str(args.config),
                 "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
+                "--video-path", str(video_path),
                 "--output-root", str(output_root),
-                "--cache-root", str(cache_root),
-                "--map-csv", str(map_csv),
-                "--frames-dir", str(frames_dir),
-                "--output", str(frame_manifest),
-                *resume_args,
+                "--device", args.device,
                 *limit_args,
-            ],
-            step_name="build_frame_manifest",
-        )
+            ]
+            if args.no_resume:
+                stage0_cmd.append("--no-resume")
+            run_pipeline_step(stage0_cmd, step_name="extract_transnet_frames")
+            data_root = output_root
+        else:
+            try:
+                frames_dir = resolver.resolve_frames_dir(video_id)
+                map_csv = resolver.resolve_map_csv(video_id)
+            except FileNotFoundError as error:
+                logger.error("  ❌ Skipping %s due to missing path: %s", video_id, error)
+                continue
+
+            run_pipeline_step(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/build_frame_manifest.py"),
+                    "--config", str(args.config),
+                    "--video-id", video_id,
+                    "--data-root", str(resolver.keyframes_root),
+                    "--output-root", str(output_root),
+                    "--cache-root", str(cache_root),
+                    "--map-csv", str(map_csv),
+                    "--frames-dir", str(frames_dir),
+                    "--output", str(frame_manifest),
+                    *resume_args,
+                    *limit_args,
+                ],
+                step_name="build_frame_manifest",
+            )
+            data_root = resolver.keyframes_root
 
         # Stage 1: SAM Masks / Object Detection
         stage1_cmd = [
@@ -516,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             str(REPO_ROOT / "scripts/prepare_object_masks.py"),
             "--config", str(args.config),
             "--video-id", video_id,
-            "--data-root", str(resolver.keyframes_root),
+            "--data-root", str(data_root),
             "--output-root", str(output_root),
             "--cache-root", str(cache_root),
             "--frame-manifest", str(frame_manifest),
@@ -538,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(REPO_ROOT / "scripts/run_dam_descriptions.py"),
                 "--config", str(args.config),
                 "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
+                "--data-root", str(data_root),
                 "--output-root", str(output_root),
                 "--cache-root", str(cache_root),
                 "--mask-artifact", str(mask_artifact),
