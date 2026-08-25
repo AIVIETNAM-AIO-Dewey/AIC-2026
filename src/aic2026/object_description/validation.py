@@ -28,10 +28,10 @@ def _safe_image_path(data_root: Path, relative: str) -> Path:
 def validate_mask_stage_inputs(
     *,
     frame_manifest: Path,
-    objects_dir: Path,
     data_root: Path,
     video_id: str,
     limit: int | None,
+    objects_dir: Path | None = None,
 ) -> dict[str, int]:
     refs = [FrameRef.model_validate(raw) for raw in iter_jsonl(frame_manifest)]
     if limit is not None:
@@ -41,8 +41,8 @@ def validate_mask_stage_inputs(
     uids = [ref.frame_uid for ref in refs]
     if len(uids) != len(set(uids)):
         raise ValueError("Frame manifest contains duplicate frame_uid values")
-    object_files = index_object_files(objects_dir)
-    if limit is None:
+    object_files = index_object_files(objects_dir) if objects_dir is not None else None
+    if object_files is not None and limit is None:
         surplus = sorted(set(object_files).difference(ref.keyframe_n for ref in refs))
         if surplus:
             raise ValueError(
@@ -54,10 +54,11 @@ def validate_mask_stage_inputs(
             raise ValueError(
                 f"Frame manifest video_id {ref.video_id!r} does not match {video_id!r}"
             )
-        object_path = object_files.get(ref.keyframe_n)
-        if object_path is None:
-            raise ValueError(f"Missing Objects JSON for keyframe n={ref.keyframe_n}")
-        detection_count += len(load_organizer_detections(object_path))
+        if object_files is not None:
+            object_path = object_files.get(ref.keyframe_n)
+            if object_path is None:
+                raise ValueError(f"Missing Objects JSON for keyframe n={ref.keyframe_n}")
+            detection_count += len(load_organizer_detections(object_path))
         image_path = _safe_image_path(data_root, ref.frame_relpath)
         with Image.open(image_path) as image:
             if image.size != (ref.width, ref.height):

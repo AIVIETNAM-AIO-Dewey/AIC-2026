@@ -28,8 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/offline/object_description.yaml")
     parser.add_argument("--keyframes-root", type=Path, required=True, help="Root directory containing keyframe images (aic-26-video)")
-    parser.add_argument("--objects-root", type=Path, required=True, help="Root directory containing object bounding boxes")
+    parser.add_argument("--objects-root", type=Path, default=None, help="Root directory containing object bounding boxes (optional with YOLO-World)")
     parser.add_argument("--map-keyframes-root", type=Path, required=True, help="Root directory containing map-keyframes CSVs")
+    parser.add_argument("--detector", choices=["yolo-world", "organizer"], default="yolo-world", help="Object detector backend")
+    parser.add_argument("--detector-model", type=str, default="yolov8x-worldv2.pt", help="YOLO-World checkpoint or path")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
     parser.add_argument("--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache"))
     parser.add_argument("--device", default="cuda", help="Execution device (cuda or auto)")
@@ -43,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_master_video_list(list_path: Path, objects_root: Path) -> list[str]:
+def load_master_video_list(list_path: Path, objects_root: Path | None = None, keyframes_root: Path | None = None) -> list[str]:
     """Load sorted master list of all 873 video IDs."""
     if list_path.exists():
         with list_path.open("r", encoding="utf-8") as fp:
@@ -51,25 +53,28 @@ def load_master_video_list(list_path: Path, objects_root: Path) -> list[str]:
         if vids:
             return sorted(set(vids))
     
-    # Fallback to scanning objects_root
-    logger.info("Master list file not found at %s, discovering from %s", list_path, objects_root)
-    discovered = []
-    for entry in objects_root.iterdir():
-        if entry.is_dir() and entry.name.startswith("L"):
-            discovered.append(entry.name)
-        elif entry.is_file() and entry.suffix == ".json" and entry.stem.startswith("L"):
-            discovered.append(entry.stem)
-    if not discovered:
-        raise FileNotFoundError(f"Could not load or discover master video list from {objects_root}")
-    return sorted(set(discovered))
+    # Fallback to scanning objects_root or keyframes_root
+    scan_root = objects_root if (objects_root and objects_root.exists()) else keyframes_root
+    if scan_root and scan_root.exists():
+        logger.info("Master list file not found at %s, discovering from %s", list_path, scan_root)
+        discovered = []
+        for entry in scan_root.iterdir():
+            if entry.is_dir() and entry.name.startswith("L"):
+                discovered.append(entry.name)
+            elif entry.is_file() and entry.suffix == ".json" and entry.stem.startswith("L"):
+                discovered.append(entry.stem)
+        if discovered:
+            return sorted(set(discovered))
+
+    raise FileNotFoundError(f"Could not load or discover master video list from {list_path}")
 
 
 class PathResolver:
     """Fast, safe path resolution engine for custom dataset folder hierarchies."""
-    def __init__(self, keyframes_root: Path, objects_root: Path, map_keyframes_root: Path) -> None:
+    def __init__(self, keyframes_root: Path, map_keyframes_root: Path, objects_root: Path | None = None) -> None:
         self.keyframes_root = keyframes_root.expanduser().resolve()
-        self.objects_root = objects_root.expanduser().resolve()
         self.map_keyframes_root = map_keyframes_root.expanduser().resolve()
+        self.objects_root = objects_root.expanduser().resolve() if objects_root else None
         self._keyframe_index: dict[str, Path] | None = None
         self._objects_index: dict[str, Path] | None = None
         self._map_csv_index: dict[str, Path] | None = None
@@ -89,6 +94,8 @@ class PathResolver:
         return index
 
     def _build_objects_index(self) -> dict[str, Path]:
+        if self.objects_root is None:
+            return {}
         if self._objects_index is not None:
             return self._objects_index
         logger.info("Fast-indexing object directories under %s ...", self.objects_root)
@@ -139,7 +146,9 @@ class PathResolver:
 
         raise FileNotFoundError(f"Keyframe directory for {video_id} not found under {self.keyframes_root}")
 
-    def resolve_objects_dir(self, video_id: str) -> Path:
+    def resolve_objects_dir(self, video_id: str) -> Path | None:
+        if self.objects_root is None:
+            return None
         candidates = [
             self.objects_root / video_id,
             self.objects_root / "objects" / video_id,
@@ -153,7 +162,7 @@ class PathResolver:
         if video_id in index and index[video_id].is_dir():
             return index[video_id]
 
-        raise FileNotFoundError(f"Objects directory for {video_id} not found under {self.objects_root}")
+        return None
 
     def resolve_map_csv(self, video_id: str) -> Path:
         candidates = [
@@ -366,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                 f_dir = resolver.resolve_frames_dir(vid)
                 o_dir = resolver.resolve_objects_dir(vid)
                 m_csv = resolver.resolve_map_csv(vid)
-                if idx == 1:
+                if idx == 1 and o_dir is not None:
                     sample_json = next(o_dir.glob("*.json"), None)
                     if sample_json and sample_json.is_file():
                         raw_dets = load_organizer_detections(sample_json)
@@ -374,7 +383,8 @@ def main(argv: list[str] | None = None) -> int:
                         labels = [d.class_entity for d in filtered]
                         logger.info("  🎯 Sample Box Filter Test (%s/%s): %d raw boxes -> %d distinct objects: %s", vid, sample_json.name, len(raw_dets), len(filtered), labels)
                 if idx <= 5 or idx == len(assigned_videos):
-                    logger.info("  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s", idx, len(assigned_videos), vid, f_dir.name, o_dir.name, m_csv.name)
+                    obj_info = o_dir.name if o_dir else f"(Dynamic {args.detector.upper()})"
+                    logger.info("  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s", idx, len(assigned_videos), vid, f_dir.name, obj_info, m_csv.name)
             except FileNotFoundError as error:
                 logger.error("  ❌ Missing path for %s: %s", vid, error)
                 missing_count += 1
@@ -500,25 +510,26 @@ def main(argv: list[str] | None = None) -> int:
             step_name="build_frame_manifest",
         )
 
-        # Stage 1: SAM Masks
-        run_pipeline_step(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts/prepare_object_masks.py"),
-                "--config", str(args.config),
-                "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
-                "--output-root", str(output_root),
-                "--cache-root", str(cache_root),
-                "--frame-manifest", str(frame_manifest),
-                "--objects-dir", str(objects_dir),
-                "--output", str(mask_artifact),
-                "--device", args.device,
-                *resume_args,
-                *limit_args,
-            ],
-            step_name="prepare_object_masks",
-        )
+        # Stage 1: SAM Masks / Object Detection
+        stage1_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/prepare_object_masks.py"),
+            "--config", str(args.config),
+            "--video-id", video_id,
+            "--data-root", str(resolver.keyframes_root),
+            "--output-root", str(output_root),
+            "--cache-root", str(cache_root),
+            "--frame-manifest", str(frame_manifest),
+            "--detector", args.detector,
+            "--detector-model", args.detector_model,
+            "--output", str(mask_artifact),
+            "--device", args.device,
+            *resume_args,
+            *limit_args,
+        ]
+        if objects_dir is not None:
+            stage1_cmd.extend(["--objects-dir", str(objects_dir)])
+        run_pipeline_step(stage1_cmd, step_name="prepare_object_masks")
 
         # Stage 2: DAM Descriptions
         run_pipeline_step(

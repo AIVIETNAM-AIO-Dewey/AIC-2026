@@ -31,6 +31,10 @@ from .rle import decode_mask, encode_mask
 from .sam_backend import MaskPrediction
 
 
+class DetectorBackend(Protocol):
+    def detect(self, image: Image.Image) -> list[Detection]: ...
+
+
 class MaskBackend(Protocol):
     def generate(
         self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]
@@ -195,16 +199,19 @@ def _frame_records(path: Path) -> list[FrameRef]:
 def prepare_masks(
     *,
     frame_manifest: Path,
-    objects_dir: Path,
     data_root: Path,
     output: Path,
     run_id: str,
     mask_backend: MaskBackend,
+    objects_dir: Path | None = None,
+    detector: DetectorBackend | None = None,
     filter_config: FilterConfig | None = None,
     resume: bool = False,
     limit: int | None = None,
     progress: Callable[[ObjectFrameRecord], None] | None = None,
 ) -> dict[str, int]:
+    if detector is None and objects_dir is None:
+        raise ValueError("Either detector or objects_dir must be provided to prepare_masks")
     filter_config = filter_config or FilterConfig()
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
@@ -218,16 +225,12 @@ def prepare_masks(
         raise ValueError("frame manifest is empty")
     expected_records = [(frame.frame_uid, run_id) for frame in frame_refs]
     writer.validate_prefix(expected_records, caption_mode="pending")
-    object_files = index_object_files(objects_dir)
+    object_files = index_object_files(objects_dir) if objects_dir is not None else None
     counters = {"frames": 0, "regions": 0, "bbox_fallbacks": 0, "skipped": 0}
     for frame in frame_refs:
         if frame.frame_uid in writer.seen:
             counters["skipped"] += 1
             continue
-        object_path = object_files.get(frame.keyframe_n)
-        if object_path is None:
-            raise ValueError(f"Missing Objects JSON for keyframe n={frame.keyframe_n}")
-        detections = filter_detections(load_organizer_detections(object_path), filter_config)
         image_path = (data_root / frame.frame_relpath).resolve()
         try:
             image_path.relative_to(data_root.resolve())
@@ -237,13 +240,24 @@ def prepare_masks(
             image = source_image.convert("RGB")
         if image.size != (frame.width, frame.height):
             raise ValueError(f"Frame dimensions changed since manifest: {image_path}")
+
+        if detector is not None:
+            raw_detections = detector.detect(image)
+        else:
+            assert object_files is not None
+            object_path = object_files.get(frame.keyframe_n)
+            if object_path is None:
+                raise ValueError(f"Missing Objects JSON for keyframe n={frame.keyframe_n}")
+            raw_detections = load_organizer_detections(object_path)
+
+        detections = filter_detections(raw_detections, filter_config)
         boxes = [
             normalized_to_pixels(detection.bbox_yxyx_norm, frame.width, frame.height)
             for detection in detections
         ]
         predictions = mask_backend.generate(image, boxes)
         if len(predictions) != len(detections):
-            raise ValueError("SAM backend returned a different number of masks than boxes")
+            raise ValueError("Mask backend returned a different number of masks than boxes")
         regions: list[ObjectRegion] = []
         for detection, box, prediction in zip(detections, boxes, predictions, strict=True):
             rle = encode_mask(prediction.mask)

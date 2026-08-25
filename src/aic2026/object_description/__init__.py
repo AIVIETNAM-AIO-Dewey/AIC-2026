@@ -6,6 +6,7 @@ from .geometry import Detection, FilterConfig, filter_detections, normalized_to_
 from .organizer import load_organizer_detections, parse_organizer_detections
 from .pipeline import prepare_masks, run_descriptions, validate_description_settings
 from .sam_backend import BboxMaskGenerator, SamMaskGenerator
+from .yolo_detector import YoloWorldDetector
 from .validation import (
     validate_description_stage_inputs,
     validate_mask_stage_inputs,
@@ -19,6 +20,7 @@ __all__ = [
     "Detection",
     "FilterConfig",
     "SamMaskGenerator",
+    "YoloWorldDetector",
     "filter_detections",
     "load_organizer_detections",
     "normalize_caption",

@@ -4,8 +4,11 @@ run:
 seed: 2026
 device: auto
 
+detector: yolo-world
+detector_model: yolov8x-worldv2.pt
+detector_conf: 0.20
 mask_backend: bbox
-score_threshold: 0.30
+score_threshold: 0.20
 min_area_ratio: 0.005
 max_area_ratio: 0.85
 class_nms_iou: 0.45

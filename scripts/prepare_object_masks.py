@@ -35,6 +35,7 @@ from aic2026.object_description import (  # noqa: E402
     BboxMaskGenerator,
     FilterConfig,
     SamMaskGenerator,
+    YoloWorldDetector,
     prepare_masks,
     validate_mask_stage_inputs,
     validate_published_object_artifact,
@@ -45,7 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
     parser.add_argument("--frame-manifest", type=Path, required=True)
-    parser.add_argument("--objects-dir", type=Path, required=True)
+    parser.add_argument("--objects-dir", type=Path, default=None, help="Directory containing organizer JSON files")
+    parser.add_argument("--detector", choices=["yolo-world", "organizer"], default=None, help="Object detector backend")
+    parser.add_argument("--detector-model", type=str, default=None, help="YOLO-World checkpoint or path (default: yolov8x-worldv2.pt)")
+    parser.add_argument("--detector-conf", type=float, default=None, help="Detector confidence threshold")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--use-bbox",
@@ -64,7 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     if not video_id:
         raise SystemExit("--video-id is required")
     frame_manifest = args.frame_manifest.expanduser().resolve()
-    objects_dir = args.objects_dir.expanduser().resolve()
+    objects_dir = args.objects_dir.expanduser().resolve() if args.objects_dir else None
+    detector_type = args.detector or config.get("detector", "yolo-world")
+    detector_model = args.detector_model or config.get("detector_model", "yolov8x-worldv2.pt")
+    detector_conf = args.detector_conf if args.detector_conf is not None else float(config.get("detector_conf", 0.20))
+    if detector_type == "organizer" and objects_dir is None:
+        raise SystemExit("--objects-dir is required when using organizer detector")
     output = (
         args.output.expanduser().resolve()
         if args.output
@@ -89,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
         "seed": seed,
         "device": device,
         "limit": args.limit,
+        "detector": detector_type,
+        "detector_model": detector_model if detector_type == "yolo-world" else None,
+        "detector_conf": detector_conf if detector_type == "yolo-world" else None,
         "region_filter": {
             "minimum_score": filter_config.minimum_score,
             "minimum_area_ratio": filter_config.minimum_area_ratio,
@@ -100,17 +112,24 @@ def main(argv: list[str] | None = None) -> int:
         "sam_model_id": sam_id,
         "sam_revision": sam_revision,
     }
-    input_paths = [("frame_manifest", frame_manifest), ("objects", objects_dir)]
+    input_paths = [("frame_manifest", frame_manifest)]
+    if objects_dir is not None:
+        input_paths.append(("objects", objects_dir))
     frame_manifest_sidecar = frame_manifest.with_suffix(".manifest.json")
     if frame_manifest_sidecar.exists():
         input_paths.append(("frame_manifest_run", frame_manifest_sidecar))
+    
+    models = [{"model_id": sam_id, "revision": sam_revision, "license": "Apache-2.0"}]
+    if detector_type == "yolo-world":
+        models.append({"model_id": detector_model, "revision": "latest", "license": "AGPL-3.0"})
+
     manifest = create_manifest(
         run_id=run_id,
         stage="sam_masks",
         config=resolved,
         seed=seed,
         input_paths=input_paths,
-        models=[{"model_id": sam_id, "revision": sam_revision, "license": "Apache-2.0"}],
+        models=models,
         repo_root=REPO_ROOT,
     )
     manifest, complete = prepare_resume(
@@ -178,13 +197,23 @@ def main(argv: list[str] | None = None) -> int:
                 cache_dir=roots["cache_root"] / "huggingface",
                 device=device,
             )
+        detector_instance = (
+            YoloWorldDetector(
+                model_id_or_path=detector_model,
+                device=device,
+                conf=detector_conf,
+            )
+            if detector_type == "yolo-world"
+            else None
+        )
         counters = prepare_masks(
             frame_manifest=frame_manifest,
-            objects_dir=objects_dir,
             data_root=roots["data_root"],
             output=output,
             run_id=run_id,
             mask_backend=backend,
+            objects_dir=objects_dir,
+            detector=detector_instance,
             filter_config=filter_config,
             resume=args.resume,
             limit=args.limit,
