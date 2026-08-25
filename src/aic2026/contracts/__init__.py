@@ -13,6 +13,7 @@ from .models import (
     ShotRecord,
 )
 from .query import AnswerSource, QueryEvent, QuerySpec, TaskType, TemporalOperator
+from .scene_embedding import SCENE_EMBEDDING_SCHEMA, SceneEmbeddingRecord
 
 __all__ = [
     "AnswerSource",
@@ -28,6 +29,8 @@ __all__ = [
     "QueryEvent",
     "QuerySpec",
     "RunManifest",
+    "SCENE_EMBEDDING_SCHEMA",
+    "SceneEmbeddingRecord",
     "SegmentationResult",
     "ShotRecord",
     "TaskType",

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Stage 4: Multi-Modal Frame Metadata Fusion.
+"""Stage 5: Multi-Modal Frame Metadata Fusion.
 
-Joins Frame Manifest, YOLO+DAM Visual Descriptions, and OCR On-Screen Text
-into a clean, unified, search-ready JSONL artifact per video.
+Joins Frame Manifest, YOLO+DAM Visual Descriptions, OCR On-Screen Text,
+and SigLIP2 Scene Embeddings into a clean, unified, search-ready JSONL artifact per video.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-manifest", type=Path, required=True, help="Path to frame manifest JSONL")
     parser.add_argument("--descriptions", type=Path, help="Path to DAM descriptions JSONL")
     parser.add_argument("--ocr-transcripts", type=Path, help="Path to OCR transcripts JSONL")
+    parser.add_argument("--embeddings", type=Path, help="Path to SigLIP2 scene embeddings JSONL")
     parser.add_argument("--output", type=Path, required=True, help="Path to output unified metadata JSONL")
     return parser
 
@@ -57,12 +58,21 @@ def main(argv: list[str] | None = None) -> int:
             if uid:
                 ocr_by_uid[uid] = rec
 
-    # 4. Merge into Search-Ready Unified Records
+    # 4. Load Scene Embeddings Index (if available)
+    emb_by_uid: dict[str, dict] = {}
+    if args.embeddings and args.embeddings.expanduser().resolve().is_file():
+        for rec in iter_jsonl(args.embeddings.expanduser().resolve()):
+            uid = rec.get("frame_uid")
+            if uid:
+                emb_by_uid[uid] = rec
+
+    # 5. Merge into Search-Ready Unified Records
     unified_records: list[dict] = []
     for idx, frame in enumerate(frames, start=1):
         uid = frame.frame_uid
         desc_entry = desc_by_uid.get(uid, {})
         ocr_entry = ocr_by_uid.get(uid, {})
+        emb_entry = emb_by_uid.get(uid, {})
 
         # Format visual descriptions
         raw_regions = desc_entry.get("regions", [])
@@ -89,25 +99,33 @@ def main(argv: list[str] | None = None) -> int:
         ocr_text = ocr_entry.get("full_text", "").strip()
         ocr_spans = ocr_entry.get("spans", [])
 
-        unified_records.append(
-            {
-                "point_id": idx,
-                "video_id": frame.video_id,
-                "keyframe_n": frame.keyframe_n,
-                "frame_idx": frame.frame_idx,
-                "pts_time_s": round(float(frame.pts_time_s), 4),
-                "fps": round(float(frame.fps), 2),
-                "frame_uid": frame.frame_uid,
-                "image_relpath": frame.frame_relpath,
-                "width": frame.width,
-                "height": frame.height,
-                "dam_summary_en": dam_summary_en,
-                "num_objects": len(dam_regions),
-                "dam_regions": dam_regions,
-                "ocr_text": ocr_text,
-                "ocr_spans": ocr_spans,
-            }
-        )
+        # Embedding metadata link
+        embedding_row = emb_entry.get("row")
+        embedding_dim = emb_entry.get("embedding_dim", 768) if embedding_row is not None else None
+
+        record = {
+            "point_id": idx,
+            "video_id": frame.video_id,
+            "keyframe_n": frame.keyframe_n,
+            "frame_idx": frame.frame_idx,
+            "pts_time_s": round(float(frame.pts_time_s), 4),
+            "fps": round(float(frame.fps), 2),
+            "frame_uid": frame.frame_uid,
+            "image_relpath": frame.frame_relpath,
+            "width": frame.width,
+            "height": frame.height,
+            "dam_summary_en": dam_summary_en,
+            "num_objects": len(dam_regions),
+            "dam_regions": dam_regions,
+            "ocr_text": ocr_text,
+            "ocr_spans": ocr_spans,
+        }
+        if embedding_row is not None:
+            record["embedding_row"] = embedding_row
+            record["embedding_dim"] = embedding_dim
+            record["embedding_matrix_relpath"] = f"scene_embeddings/{video_id}.safetensors"
+
+        unified_records.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl_atomic(output_path, unified_records)

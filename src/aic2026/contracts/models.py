@@ -221,7 +221,7 @@ class ModelRevision(StrictModel):
 class RunManifest(StrictModel):
     schema_version: Literal["aic26.run_manifest.v1"] = "aic26.run_manifest.v1"
     run_id: str = Field(min_length=1)
-    stage: Literal["frame_manifest", "sam_masks", "dam_descriptions"]
+    stage: Literal["frame_manifest", "sam_masks", "dam_descriptions", "scene_embeddings"]
     status: Literal["running", "completed", "failed"]
     git_sha: str | None = None
     git_dirty: bool | None = None

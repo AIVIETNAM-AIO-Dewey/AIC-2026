@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ocr", action="store_false", dest="enable_ocr", help="Disable Stage 3 OCR extraction")
     parser.add_argument("--ocr-backend", default="auto", choices=["auto", "easyocr", "paddleocr"], help="OCR engine backend")
     parser.add_argument("--ocr-threshold", type=float, default=0.30, help="Confidence threshold for OCR")
+    parser.add_argument("--enable-siglip", action="store_true", default=True, help="Enable Stage 4 SigLIP2 embedding (default: True)")
+    parser.add_argument("--no-siglip", action="store_false", dest="enable_siglip", help="Disable Stage 4 SigLIP2 embedding")
+    parser.add_argument("--siglip-model", default="google/siglip2-base-patch16-224", help="SigLIP2 model ID or path")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
     parser.add_argument("--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache"))
     parser.add_argument("--device", default="cuda", help="Execution device (cuda or auto)")
@@ -665,7 +668,27 @@ def main(argv: list[str] | None = None) -> int:
                 ocr_cmd.extend(["--limit", str(args.limit)])
             run_pipeline_step(ocr_cmd, step_name="run_ocr_extraction")
 
-        # Stage 4: Multi-Modal Metadata Fusion
+        # Stage 4: SigLIP2 Dense Scene Embeddings (Optional / Default True)
+        emb_artifact = output_root / "scene_embeddings" / f"{video_id}.jsonl"
+        if args.enable_siglip:
+            siglip_cmd = [
+                sys.executable,
+                str(REPO_ROOT / "scripts/run_scene_embeddings.py"),
+                "--config", str(args.config),
+                "--video-id", video_id,
+                "--frame-manifest", str(frame_manifest),
+                "--data-root", str(data_root),
+                "--output", str(emb_artifact),
+                "--device", args.device,
+                "--matrix-format", "safetensors",
+            ]
+            if args.no_resume:
+                siglip_cmd.append("--no-resume")
+            if args.limit:
+                siglip_cmd.extend(["--limit", str(args.limit)])
+            run_pipeline_step(siglip_cmd, step_name="run_scene_embeddings")
+
+        # Stage 5: Multi-Modal Metadata Fusion
         unified_artifact = output_root / "unified_metadata" / f"{video_id}.jsonl"
         fusion_cmd = [
             sys.executable,
@@ -677,6 +700,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.enable_ocr and ocr_artifact.is_file():
             fusion_cmd.extend(["--ocr-transcripts", str(ocr_artifact)])
+        if args.enable_siglip and emb_artifact.is_file():
+            fusion_cmd.extend(["--embeddings", str(emb_artifact)])
         run_pipeline_step(fusion_cmd, step_name="build_unified_frame_metadata")
 
         # Sync to Google Drive
@@ -687,6 +712,11 @@ def main(argv: list[str] | None = None) -> int:
                 rclone_sync_file(unified_artifact, f"{args.rclone_dest.rstrip('/')}/unified_metadata/")
             if ocr_artifact.is_file():
                 rclone_sync_file(ocr_artifact, f"{args.rclone_dest.rstrip('/')}/ocr_transcripts/")
+            if emb_artifact.is_file():
+                rclone_sync_file(emb_artifact, f"{args.rclone_dest.rstrip('/')}/scene_embeddings/")
+            safetensors_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
+            if safetensors_mat.is_file():
+                rclone_sync_file(safetensors_mat, f"{args.rclone_dest.rstrip('/')}/scene_embeddings/")
             map_csv = output_root / "map-keyframes" / f"{video_id}.csv"
             if map_csv.is_file():
                 rclone_sync_file(map_csv, f"{args.rclone_dest.rstrip('/')}/map-keyframes/")
