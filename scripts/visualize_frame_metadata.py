@@ -179,21 +179,46 @@ def main() -> None:
     ax_text.set_facecolor("#1e1e1e")
     ax_text.axis("off")
 
-    info_text = (
-        f"--- VIDEO & FRAME INFO ---\n"
-        f"• Video ID:        {meta['video_id']}\n"
-        f"• Frame UID:       {meta['frame_uid']} (Frame #{meta['frame_idx']})\n"
-        f"• Timestamp:       {meta['pts_time_s']:.3f} seconds\n"
-        f"• Resolution:      {W} x {H} px\n\n"
-        f"--- DAM-3B VISUAL DESCRIPTION ---\n"
-        f"{meta.get('dam_summary_en', 'N/A')}\n\n"
-        f"--- EASYOCR VIETNAMESE TRANSCRIPT ---\n"
-        f"\"{meta.get('ocr_text', 'None')}\"\n"
-    )
+    import textwrap
+
+    lines = [
+        "--- VIDEO & FRAME INFO ---",
+        f"• Video ID:        {meta['video_id']}",
+        f"• Frame UID:       {meta['frame_uid']} (Frame #{meta['frame_idx']})",
+        f"• Timestamp:       {meta['pts_time_s']:.3f}s | Resolution: {W}x{H}px",
+        "",
+        "--- INDIVIDUAL DAM-3B REGIONAL DESCRIPTIONS ---"
+    ]
+
+    regions = desc.get("regions", [])
+    if regions:
+        for r_idx, region in enumerate(regions):
+            det = region.get("detector", {})
+            label = det.get("class_name") or det.get("class_entity") or f"Object {r_idx+1}"
+            score = det.get("score")
+            score_str = f" ({score:.2f})" if score is not None else ""
+            caption_text = region.get("caption", {}).get("description_en", "N/A")
+            
+            lines.append(f"▶ [DAM #{r_idx+1}] {label.upper()}{score_str}:")
+            wrapped = textwrap.wrap(caption_text, width=65)
+            for w in wrapped[:3]:  # Wrap lines cleanly
+                lines.append(f"   {w}")
+            if len(wrapped) > 3:
+                lines.append("   ...")
+    else:
+        lines.append(f"• Summary: {meta.get('dam_summary_en', 'N/A')}")
+
+    lines.extend([
+        "",
+        "--- EASYOCR VIETNAMESE TRANSCRIPT ---",
+        f"\"{meta.get('ocr_text', 'None')}\""
+    ])
+
+    info_text = "\n".join(lines)
 
     ax_text.text(
-        0.03, 0.97, info_text, transform=ax_text.transAxes,
-        fontsize=10.5, color="#f0f0f0", verticalalignment="top", fontfamily="sans-serif",
+        0.02, 0.98, info_text, transform=ax_text.transAxes,
+        fontsize=9.5, color="#f0f0f0", verticalalignment="top", fontfamily="sans-serif",
         bbox=dict(facecolor="#262626", edgecolor="#3d3d3d", boxstyle="round,pad=0.8")
     )
 
