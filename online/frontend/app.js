@@ -6,6 +6,9 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // App State
 // ──────────────────────────────────────────────────────────────────────────────
+import { createIcons, ExternalLink, Maximize, Pause, Play, RotateCcw, RotateCw } from "lucide";
+import { createYouTubeVideoView } from "./src/youtube-video-view.ts";
+
 const state = {
   taskType: "KIS",
   queryMode: "auto", // "auto", "edit", "direct"
@@ -19,6 +22,7 @@ const state = {
   selectedSubmission: "",
   activeBBoxObjects: [],
   activeTrakeEventIndex: 0,
+  inspectorMediaMode: "keyframe",
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -80,12 +84,21 @@ const el = {
   inspectorCanvas: document.getElementById("inspector-canvas"),
   inspectorPlaceholder: document.getElementById("inspector-img-placeholder"),
   placeholderText: document.getElementById("placeholder-text"),
+  keyframeView: document.getElementById("keyframe-view"),
+  videoView: document.getElementById("video-view"),
+  btnViewKeyframe: document.getElementById("btn-view-keyframe"),
+  btnViewVideo: document.getElementById("btn-view-video"),
+  keyframeControls: document.getElementById("keyframe-visual-controls"),
+  mappingStatus: document.getElementById("mapping-status"),
   chkBBoxes: document.getElementById("chk-show-bboxes"),
   
   inspVideoId: document.getElementById("insp-video-id"),
   inspKeyframeN: document.getElementById("insp-keyframe-n"),
   inspFrameIdx: document.getElementById("insp-frame-idx"),
   inspScoreRank: document.getElementById("insp-score-rank"),
+  inspMatchedTime: document.getElementById("insp-matched-time"),
+  inspVideoSource: document.getElementById("insp-video-source"),
+  inspMappingOffset: document.getElementById("insp-mapping-offset"),
   inspAsrText: document.getElementById("insp-asr-text"),
   inspDamText: document.getElementById("insp-dam-text"),
   inspOcrText: document.getElementById("insp-ocr-text"),
@@ -109,8 +122,41 @@ const el = {
 // ──────────────────────────────────────────────────────────────────────────────
 // Initialization
 // ──────────────────────────────────────────────────────────────────────────────
+function refreshVideoIcons() {
+  createIcons({ icons: { ExternalLink, Maximize, Pause, Play, RotateCcw, RotateCw } });
+}
+
+function setMappingStatus(label, status = "pending") {
+  el.mappingStatus.textContent = label;
+  el.mappingStatus.classList.toggle("ready", status === "ready");
+  el.mappingStatus.classList.toggle("error", status === "error");
+}
+
+function toVideoFrame(item) {
+  return {
+    videoId: item.video_id,
+    ptsTimeS: Number(item.pts_time_s || 0),
+    posterPath: getImageUrl(item),
+  };
+}
+
+const videoController = createYouTubeVideoView({
+  onSessionChange: (label) => {
+    el.sessionBadge.classList.remove("hidden");
+    el.sessionBadge.textContent = label;
+  },
+  onSourceChange: (label) => {
+    el.inspVideoSource.textContent = label;
+  },
+  onStatusChange: setMappingStatus,
+  onToast: showToast,
+  refreshIcons: refreshVideoIcons,
+});
+
 async function initApp() {
   bindEvents();
+  setInspectorMediaMode("keyframe");
+  refreshVideoIcons();
   await loadServerConfig();
   updateQueryModeUI();
 }
@@ -211,6 +257,8 @@ function bindEvents() {
 
   // Inspector modal
   el.btnCloseInspector.addEventListener("click", closeInspector);
+  el.btnViewKeyframe.addEventListener("click", () => setInspectorMediaMode("keyframe"));
+  el.btnViewVideo.addEventListener("click", () => setInspectorMediaMode("video"));
   el.btnToggleInSubmission.addEventListener("click", toggleCurrentInSubmission);
   el.chkBBoxes.addEventListener("change", drawBBoxesOnCanvas);
 
@@ -515,6 +563,17 @@ function renderResults(results) {
   } else {
     renderStandardCards(list);
   }
+
+  const firstItem = isTrake
+    ? {
+        ...(list[0].event_dossiers?.[0] || {}),
+        video_id: list[0].video_id,
+        frame_idx: list[0].matched_frames?.[0] || 0,
+        keyframe_n: list[0].event_dossiers?.[0]?.keyframe_n || 1,
+        pts_time_s: list[0].timestamps?.[0] || list[0].event_dossiers?.[0]?.pts_time_s || 0,
+      }
+    : list[0];
+  void videoController.preload(toVideoFrame(firstItem)).catch(() => {});
 }
 
 // Standard KIS & VQA Cards
@@ -631,9 +690,24 @@ function renderTrakeSequences(list) {
 // Frame Inspector Modal
 // ──────────────────────────────────────────────────────────────────────────────
 
+function setInspectorMediaMode(mode) {
+  state.inspectorMediaMode = mode;
+  const showVideo = mode === "video";
+  el.btnViewKeyframe.classList.toggle("active", !showVideo);
+  el.btnViewVideo.classList.toggle("active", showVideo);
+  el.btnViewKeyframe.setAttribute("aria-selected", String(!showVideo));
+  el.btnViewVideo.setAttribute("aria-selected", String(showVideo));
+  el.keyframeView.classList.toggle("hidden", showVideo);
+  el.videoView.classList.toggle("hidden", !showVideo);
+  el.keyframeControls.classList.toggle("hidden", showVideo);
+  if (showVideo) void videoController.activate().catch(() => {});
+  else videoController.deactivate();
+}
+
 // Standard Inspector (KIS & VQA)
-async function openStandardInspector(item) {
+async function openStandardInspector(item, preserveMediaMode = false) {
   state.activeInspectorItem = item;
+  if (!preserveMediaMode) setInspectorMediaMode("keyframe");
   el.modal.classList.remove("hidden");
   el.trakeTabsBar.classList.add("hidden");
 
@@ -653,6 +727,7 @@ async function openStandardInspector(item) {
 async function openTrakeInspector(sequence, activeEventIndex = 0) {
   state.activeInspectorItem = sequence;
   state.activeTrakeEventIndex = activeEventIndex;
+  setInspectorMediaMode("keyframe");
   el.modal.classList.remove("hidden");
   el.trakeTabsBar.classList.remove("hidden");
   el.inspVqaBox.classList.add("hidden");
@@ -720,6 +795,7 @@ function displayTrakeActiveEvent(sequence, eventIdx) {
 }
 
 function populateInspectorCommon(item) {
+  videoController.deactivate();
   el.inspVideoId.textContent = item.video_id || "-";
   el.inspKeyframeN.textContent = String(item.keyframe_n || 1).padStart(3, "0");
   el.inspFrameIdx.textContent = `${item.frame_idx || 0} (${item.pts_time_s ? item.pts_time_s.toFixed(1) + 's' : '-'})`;
@@ -728,8 +804,15 @@ function populateInspectorCommon(item) {
   const score = item.final_score || item.stage1_score || 0.0;
   el.inspScoreRank.textContent = `${score.toFixed(4)} • #${rank}`;
 
+  const ptsTime = Number(item.pts_time_s || 0);
+  const minutes = Math.floor(ptsTime / 60);
+  const seconds = Math.floor(ptsTime % 60);
+  el.inspMatchedTime.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${Math.floor((ptsTime % 1) * 10)}`;
+  el.inspMappingOffset.textContent = "0.0s";
+
   const imgUrl = getImageUrl(item);
   el.inspectorImg.src = imgUrl;
+  videoController.setFrame(toVideoFrame(item));
   el.inspectorImg.onerror = () => {
     el.inspectorPlaceholder.classList.remove("hidden");
     el.placeholderText.textContent = `${item.video_id} / ${String(item.keyframe_n || 1).padStart(3, "0")}.jpg`;
@@ -743,6 +826,10 @@ function populateInspectorCommon(item) {
   el.inspDamText.textContent = item.dam_summary || "(No visual description available)";
   if (el.inspOcrText) {
     el.inspOcrText.textContent = item.ocr_text || "(No text detected on screen)";
+  }
+
+  if (state.inspectorMediaMode === "video") {
+    void videoController.activate().catch(() => {});
   }
 
   updateInspectorSubmitBtn();
@@ -892,7 +979,7 @@ async function loadFilmstrip(videoId, currentKeyframeN, minFrame = null, maxFram
           showToast(`Event E${evIdx + 1} updated to frame ${kf.frame_idx}!`);
         } else {
           // Standard mode
-          openStandardInspector(kf);
+          openStandardInspector(kf, true);
         }
       });
     }
@@ -919,12 +1006,14 @@ function navigateFilmstrip(step) {
     if (state.activeInspectorItem && Array.isArray(state.activeInspectorItem.matched_frames)) {
       displayTrakeActiveEvent(state.activeInspectorItem, state.activeTrakeEventIndex);
     } else {
-      openStandardInspector(nextKf);
+      openStandardInspector(nextKf, true);
     }
   }
 }
 
 function closeInspector() {
+  videoController.deactivate();
+  setInspectorMediaMode("keyframe");
   el.modal.classList.add("hidden");
 }
 

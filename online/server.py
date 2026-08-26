@@ -16,8 +16,10 @@ Provides low-latency endpoints for:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -431,6 +433,26 @@ async def get_video_keyframes(video_id: str):
     if not kfs:
         raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
     return {"video_id": video_id, "total_keyframes": len(kfs), "keyframes": kfs}
+
+
+@app.get("/api/video/{video_id}/media-info")
+async def get_video_media_info(video_id: str):
+    """Return the YouTube mapping metadata for a video without loading retrieval models."""
+    canonical_id = video_id.upper().replace("-", "_")
+    if not re.fullmatch(r"[A-Z0-9_]+", canonical_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
+
+    media_info_dir = Path(__file__).resolve().parents[1] / "data" / "media-info"
+    media_info_path = media_info_dir / f"{canonical_id}.json"
+    if not media_info_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Media info for {canonical_id} not found")
+
+    try:
+        with media_info_path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        logger.warning("Could not read media info %s: %s", media_info_path, error)
+        raise HTTPException(status_code=500, detail="Media info could not be read") from error
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -37,6 +37,8 @@ runs/**
 !runs/README.md
 
 # Model and framework caches
+node_modules/
+.tools/
 .cache/
 cache/
 models/

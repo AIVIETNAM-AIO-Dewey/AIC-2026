@@ -97,11 +97,11 @@
         <div class="weights-header">
           <div class="weights-title">
             <span>🎛️ DYNAMIC MODALITY WEIGHTS (SUM = 1.00)</span>
-            <span class="weights-hint">— Drag sliders and click Re-fuse for instant (<5ms) re-weighting</span>
+            <span class="weights-hint">— Drag sliders and click Re-fuse for instant (&lt;5ms) re-weighting</span>
           </div>
           <div class="weights-actions">
             <button id="btn-re-fuse" class="btn-accent" title="Re-fuse Stage 1 pool instantly using cached branch hits">
-              <span>⚡ Re-Fuse Pool (<5ms)</span>
+              <span>⚡ Re-Fuse Pool (&lt;5ms)</span>
             </button>
             <button id="btn-re-rank" class="btn-outline" title="Re-run Stage 2 Cross-Encoder on newly fused pool">
               <span>🔄 Re-Rank Top 50</span>
@@ -235,15 +235,59 @@
       <div class="inspector-main">
         <!-- Left: Large Keyframe Canvas & Image -->
         <div class="inspector-visual-pane">
+          <div class="visual-mode-bar">
+            <div class="visual-mode-tabs" role="tablist" aria-label="Inspector media mode">
+              <button id="btn-view-keyframe" class="visual-mode-btn active" type="button" role="tab" aria-selected="true">Keyframe</button>
+              <button id="btn-view-video" class="visual-mode-btn" type="button" role="tab" aria-selected="false">Video</button>
+            </div>
+            <span id="mapping-status" class="mapping-status">Mapping pending</span>
+          </div>
           <div class="image-wrapper" id="inspector-image-wrapper">
-            <img id="inspector-img" alt="Keyframe Preview" src="">
-            <canvas id="inspector-canvas"></canvas>
-            <div id="inspector-img-placeholder" class="missing-img-overlay hidden">
-              <div class="placeholder-icon">🖼️</div>
-              <div id="placeholder-text" class="placeholder-lbl">L21_V001 / 001.jpg</div>
+            <div id="keyframe-view" class="inspector-media-view keyframe-view">
+              <img id="inspector-img" alt="Keyframe Preview" src="">
+              <canvas id="inspector-canvas"></canvas>
+              <div id="inspector-img-placeholder" class="missing-img-overlay hidden">
+                <div class="placeholder-icon">🖼️</div>
+                <div id="placeholder-text" class="placeholder-lbl">L21_V001 / 001.jpg</div>
+              </div>
+            </div>
+            <div id="video-view" class="inspector-media-view video-view hidden">
+              <div id="video-mock" class="video-mock" aria-label="Video player preview">
+                <iframe id="youtube-player" class="youtube-player" title="YouTube video player" src="about:blank" loading="eager" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+                <img id="video-poster" class="video-poster" alt="Video preview poster" src="">
+                <div class="video-vignette"></div>
+                <button id="btn-video-center-play" class="video-center-play" type="button" title="Play preview" aria-label="Play preview">
+                  <i data-lucide="play"></i>
+                </button>
+                <div class="video-controls-shell">
+                  <input id="video-progress" class="video-progress" type="range" min="0" max="1262" step="0.1" value="0" aria-label="Video position">
+                  <div class="video-control-row">
+                    <div class="video-control-group">
+                      <button id="btn-video-play" class="video-icon-btn" type="button" title="Play" aria-label="Play">
+                        <i data-lucide="play"></i>
+                      </button>
+                      <button id="btn-video-back" class="video-icon-btn" type="button" title="Back 5 seconds" aria-label="Back 5 seconds">
+                        <i data-lucide="rotate-ccw"></i>
+                      </button>
+                      <button id="btn-video-forward" class="video-icon-btn" type="button" title="Forward 5 seconds" aria-label="Forward 5 seconds">
+                        <i data-lucide="rotate-cw"></i>
+                      </button>
+                      <span id="video-time" class="video-time">00:00 / 21:02</span>
+                    </div>
+                    <div class="video-control-group">
+                      <button id="btn-open-youtube" class="video-icon-btn" type="button" title="Open at timestamp on YouTube" aria-label="Open at timestamp on YouTube" disabled>
+                        <i data-lucide="external-link"></i>
+                      </button>
+                      <button id="btn-video-fullscreen" class="video-icon-btn" type="button" title="Fullscreen" aria-label="Fullscreen">
+                        <i data-lucide="maximize"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="visual-controls">
+          <div id="keyframe-visual-controls" class="visual-controls">
             <label class="checkbox-label">
               <input type="checkbox" id="chk-show-bboxes" checked>
               <span>Show DAM Bounding Boxes</span>
@@ -275,6 +319,18 @@
             <div class="meta-field">
               <span class="meta-lbl">SCORE / RANK</span>
               <span class="meta-val" id="insp-score-rank">-</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">MATCHED TIMESTAMP</span>
+              <span class="meta-val highlight" id="insp-matched-time">-</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">VIDEO SOURCE</span>
+              <span class="meta-val" id="insp-video-source">Not configured</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">MAPPING OFFSET</span>
+              <span class="meta-val" id="insp-mapping-offset">0.0s</span>
             </div>
           </div>
 
@@ -346,6 +402,6 @@
   <!-- TOAST NOTIFICATION -->
   <div id="toast" class="toast hidden">Copied to clipboard!</div>
 
-  <script src="app.js"></script>
+  <script type="module" src="./src/main.ts"></script>
 </body>
 </html>
