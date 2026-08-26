@@ -121,27 +121,39 @@ def main() -> None:
 
     W, H = image.size
 
-    # 1. Overlay DAM Object Bounding Boxes (Cyan / Magenta)
-    dam_colors = ["#00ffcc", "#ff007f", "#00bfff", "#ff6600"]
+    # 1. Overlay DAM Object Bounding Boxes (Cyan / Magenta / Lime)
+    dam_colors = ["#00ffcc", "#ff007f", "#00bfff", "#39ff14", "#ff6600"]
     for r_idx, region in enumerate(desc.get("regions", [])):
-        bbox = region.get("box_2d") or region.get("box")
-        if bbox:
-            y1, x1, y2, x2 = bbox
-            if max(bbox) <= 1.0:
-                x1, y1, x2, y2 = x1 * W, y1 * H, x2 * W, y2 * H
+        # Check pixel or normalized box
+        bbox_px = region.get("bbox_xyxy_px")
+        bbox_norm = region.get("bbox_yxyx_norm")
+        
+        if bbox_px:
+            x1, y1, x2, y2 = bbox_px
+        elif bbox_norm:
+            ny1, nx1, ny2, nx2 = bbox_norm
+            x1, y1, x2, y2 = nx1 * W, ny1 * H, nx2 * W, ny2 * H
+        else:
+            continue
             
-            color = dam_colors[r_idx % len(dam_colors)]
-            rect = patches.Rectangle(
-                (x1, y1), x2 - x1, y2 - y1,
-                linewidth=2.5, edgecolor=color, facecolor="none", linestyle="-"
-            )
-            ax_img.add_patch(rect)
-            label = region.get("label", f"Obj {r_idx+1}")
-            ax_img.text(
-                x1 + 4, max(15, y1 - 4), f"[DAM #{r_idx+1}] {label}",
-                color="black", fontsize=9, fontweight="bold",
-                bbox=dict(facecolor=color, alpha=0.9, edgecolor="none", boxstyle="round,pad=0.2")
-            )
+        color = dam_colors[r_idx % len(dam_colors)]
+        rect = patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1,
+            linewidth=2.5, edgecolor=color, facecolor="none", linestyle="-"
+        )
+        ax_img.add_patch(rect)
+        
+        # Detector label
+        detector_info = region.get("detector", {})
+        label = detector_info.get("class_name") or detector_info.get("class_entity") or f"Obj {r_idx+1}"
+        score = detector_info.get("score")
+        score_str = f" ({score:.2f})" if score is not None else ""
+        
+        ax_img.text(
+            x1 + 4, max(15, y1 - 4), f"[DAM #{r_idx+1}] {label}{score_str}",
+            color="black", fontsize=9, fontweight="bold",
+            bbox=dict(facecolor=color, alpha=0.9, edgecolor="none", boxstyle="round,pad=0.2")
+        )
 
     # 2. Overlay EasyOCR Text Polygons (Yellow / Gold)
     for o_idx, span in enumerate(ocr.get("spans", [])):
