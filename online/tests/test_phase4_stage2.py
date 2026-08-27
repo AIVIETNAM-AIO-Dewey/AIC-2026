@@ -1,7 +1,7 @@
 """Phase 4 Test: Stage 2 Task-Specific Precision Layer (KIS, VQA, TRAKE).
 
 Runs Stage 2 on all 3 competition test queries:
-1. KIS: BGE-Reranker-v2-m3 Cross-Encoder blend (0.40 * S1 + 0.60 * CE).
+1. KIS: BGE-Reranker-v2-m3 Cross-Encoder + Heuristic Scoring layer.
 2. VQA: Cross-Encoder + Extractive LLM Answer Reader for Top 1 frame.
 3. TRAKE: Dynamic Programming Monotonic Path Finder across E1-E4.
 """
@@ -27,11 +27,11 @@ def print_kis_results(reranked_pool: list[dict[str, Any]], raw_query: str):
     print(f"\n{'='*105}")
     print(f"🎯 TASK 1: KNOWN-ITEM SEARCH (KIS) — FINAL STAGE 2 RANKINGS")
     print(f"📝 Raw Query: \"{raw_query}\"")
-    print(f"⚖️ Final Score Formula: 0.40 * Stage1_Norm + 0.60 * CrossEncoder_Score")
+    print(f"⚖️ Pipeline: RRF Fusion → BGE Cross-Encoder → Heuristic Scoring")
     print(f"{'='*105}")
 
     print("\n### 📋 Official Submission Candidate List (Top 10)")
-    print("| Final Rank | Official Submission String | Frame Index | Time (s) | Stage 1 (Norm) | BGE-Reranker Score | Final Blended Score | Image Path (AIC Relative) |")
+    print("| Final Rank | Official Submission String | Frame Index | Time (s) | Stage 1 (Norm) | BGE-Reranker Score | Final Heuristic Score | Image Path (AIC Relative) |")
     print("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|")
     for r in reranked_pool[:10]:
         print(
@@ -49,7 +49,8 @@ def print_kis_results(reranked_pool: list[dict[str, Any]], raw_query: str):
     print(f"• Local Keyframe Image Path: `{top1['image_relpath']}`")
     print(f"• Stage 1 RRF Score: `{top1['stage1_score']:.6f}` (Active Modalities: {top1['active_channels']}/3, Synergy: {top1['synergy_multiplier']}x)")
     print(f"• BGE Cross-Encoder Confidence: `{top1['cross_encoder_score']:.4f}` (Raw Relevance)")
-    print(f"• Final Blended Score: `{top1['final_score']:.4f}` (0.40 * {top1['normalized_score']:.2f} + 0.60 * {top1['cross_encoder_score']:.4f})")
+    print(f"• Final Heuristic Score: `{top1['final_score']:.4f}`")
+    print(f"• Heuristic Breakdown: `{top1.get('heuristic_breakdown', 'n/a')}`")
     print(f"• DAM Visual Entities: \"{top1.get('dam_summary') or 'N/A'}\"")
     if top1.get("matched_boxes"):
         boxes_str = "; ".join([f"{b['class_entity']} (Sim: {b['score']}, BBox: {b['bbox']})" for b in top1["matched_boxes"]])

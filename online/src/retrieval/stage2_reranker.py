@@ -1,7 +1,7 @@
 """Stage 2: Precision Cross-Attention Re-Ranking & TRAKE Dynamic Programming Path Finder.
 
 Implements task-specific precision layers:
-1. KIS: bge-reranker-v2-m3 Cross-Encoder on candidate dossiers (Score = 0.40 * Stage1 + 0.60 * Reranker).
+1. KIS: bge-reranker-v2-m3 Cross-Encoder on candidate dossiers, then a Heuristic Scoring layer.
 2. VQA: Cross-Encoder ranking + Extractive LLM Reader for Top 1 evidence answer.
 3. TRAKE: Dynamic Programming Monotonic Path Matching across events (t(f1) < t(f2) < ... < t(fN)).
 """
@@ -9,6 +9,8 @@ Implements task-specific precision layers:
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from collections import defaultdict
 from typing import Any, Optional
 
@@ -20,9 +22,45 @@ from online.src.retrieval.vqa_reasoner import VQAReasoner
 
 logger = logging.getLogger(__name__)
 
+_DIACRITIC_D = str.maketrans({"đ": "d", "Đ": "d"})
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize_text(text: str) -> str:
+    """Fold text to lowercase, diacritic-free, punctuation-free for literal matching.
+
+    Real OCR payloads are noisy and accented ("giây", "06:30:11"), while operators
+    routinely type queries unaccented ("giay"). Matching the raw strings misses ~94%
+    of accented rows, so both sides are folded before comparison.
+    """
+    if not text:
+        return ""
+    folded = unicodedata.normalize("NFD", text.lower().translate(_DIACRITIC_D))
+    folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
+    return " ".join(_PUNCT_RE.sub(" ", folded).split())
+
 
 class Stage2Reranker:
     """Stage 2 Precision Re-Ranker and Reasoning Layer."""
+
+    # Heuristic Scoring weights (tunable in one place).
+    # Stage 1 already computes channel consensus, visual similarity and OCR hits, but
+    # the cross-encoder only ever sees a flattened text dossier. These weights control
+    # how much of that structured evidence is scored back in.
+    HEURISTIC_WEIGHTS = {
+        "stage1": 0.35,                 # RRF consensus evidence carried from Stage 1
+        "cross_encoder": 0.65,          # BGE cross-encoder semantic relevance
+        "consensus_per_channel": 0.04,  # per extra channel agreeing beyond the first
+        "visual_confidence": 0.10,      # SigLIP probability, invisible to the dossier
+        "ocr_exact": 0.08,              # queried OCR keyword literally on screen
+        "ocr_folded_discount": 0.5,     # credit for a diacritic-folded-only OCR hit
+        "dam_coverage": 0.06,           # fraction of queried objects detected in frame
+        "textless_ce_trust": 0.25,      # CE trust when the dossier holds no real text
+    }
+
+    # Folded OCR matching is only allowed for tokens at least this long: short folded
+    # tokens collide badly in Vietnamese ("ở" folds to "o" and matches ô/ổ/ộ/ố/ơ).
+    MIN_FOLDED_MATCH_LEN = 4
 
     def __init__(
         self,
@@ -33,8 +71,130 @@ class Stage2Reranker:
         self.vqa_reasoner = vqa_reasoner or VQAReasoner()
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 1. KIS Precision Re-Ranking (BGE Cross-Encoder)
+    # 1. KIS Precision Re-Ranking (BGE Cross-Encoder -> Heuristic Scoring)
     # ──────────────────────────────────────────────────────────────────────────
+    def _build_dossier(self, c: dict[str, Any]) -> tuple[str, dict[str, bool]]:
+        """Flatten a candidate's multimodal payload into cross-encoder input text.
+
+        Returns the dossier plus which modalities actually contributed text, so the
+        scoring layer knows whether the cross-encoder had anything real to read.
+        """
+        parts = []
+        coverage = {"dam": False, "asr": False, "ocr": False}
+
+        if c.get("dam_summary"):
+            parts.append(f"[Visual Objects] {c['dam_summary']}")
+            coverage["dam"] = True
+        if c.get("asr_transcript"):
+            parts.append(f"[Spoken Speech] {c['asr_transcript']}")
+            coverage["asr"] = True
+        if c.get("ocr_text"):
+            parts.append(f"[Screen Text] {c['ocr_text']}")
+            coverage["ocr"] = True
+
+        if parts:
+            return " ".join(parts), coverage
+
+        # No text payload at all: the cross-encoder will be scoring a placeholder.
+        return f"[Scene] Video {c['video_id']} frame {c['frame_idx']}", coverage
+
+    def compute_heuristic_score(
+        self,
+        parsed_query: ParsedQuery,
+        c: dict[str, Any],
+        ce_score: float,
+        coverage: dict[str, bool],
+    ) -> tuple[float, str]:
+        """Heuristic Scoring: re-inject the structured signals the cross-encoder never saw.
+
+        The cross-encoder only reads a flattened text dossier, so it is blind to channel
+        consensus, visual similarity and exact OCR hits -- all of which Stage 1 already
+        computed and stored on the candidate. This layer scores those explicitly instead
+        of hiding them behind a single hard-coded Stage 1 weight.
+
+        Returns:
+            (final_score, human-readable breakdown of every term that fired)
+        """
+        w = self.HEURISTIC_WEIGHTS
+        norm_s1 = float(c.get("normalized_score", 0.0) or 0.0)
+        has_text = any(coverage.values())
+        breakdown = []
+
+        # Base blend. A dossier with no text makes ce_score meaningless (it scored a
+        # placeholder string), so lean on Stage 1 visual evidence rather than let a
+        # near-zero cross-encoder score bury an otherwise strong frame.
+        if has_text:
+            base = w["stage1"] * norm_s1 + w["cross_encoder"] * ce_score
+            breakdown.append(
+                f"{w['stage1']:.2f}*s1({norm_s1:.3f}) + {w['cross_encoder']:.2f}*ce({ce_score:.3f})"
+            )
+        else:
+            trust = w["textless_ce_trust"]
+            base = (1.0 - trust) * norm_s1 + trust * ce_score
+            breakdown.append(
+                f"textless {1.0 - trust:.2f}*s1({norm_s1:.3f}) + {trust:.2f}*ce({ce_score:.3f})"
+            )
+
+        bonus = 0.0
+
+        # H1. Channel consensus: agreement across independent modalities is the single
+        # strongest precision signal Stage 1 produces, and the dossier erases it.
+        extra_channels = max(0, int(c.get("active_channels", 0) or 0) - 1)
+        if extra_channels:
+            term = w["consensus_per_channel"] * extra_channels
+            bonus += term
+            breakdown.append(f"+consensus({extra_channels}ch)={term:.3f}")
+
+        # H2. Visual confidence: SigLIP similarity is never part of the text dossier.
+        prob_vis = float(c.get("prob_vis", 0.0) or 0.0)
+        if prob_vis > 0:
+            term = w["visual_confidence"] * prob_vis
+            bonus += term
+            breakdown.append(f"+visual({prob_vis:.3f})={term:.3f}")
+
+        # H3. OCR exact match: a literal on-screen string hit is near-decisive evidence,
+        # but the cross-encoder treats it as ordinary prose.
+        raw_ocr = (c.get("ocr_text") or "").lower()
+        folded_ocr = _normalize_text(raw_ocr)
+        keywords = [k.strip().lower() for k in (parsed_query.ocr_keywords or []) if k.strip()]
+        if raw_ocr and keywords:
+            # Two tiers. A diacritic-exact hit is trusted fully. A hit that only appears
+            # after folding is credited at a discount: it recovers PPOCR mis-reading the
+            # tone mark ("giây" -> "giày"/"giay"), but folding also merges genuinely
+            # different Vietnamese words ("tai/tài/tại"), so it must not score as highly.
+            exact = 0.0
+            fuzzy = 0.0
+            for kw in keywords:
+                if kw in raw_ocr:
+                    exact += 1.0
+                    continue
+                folded_kw = _normalize_text(kw)
+                # Short tokens are far too collision-prone once folded ("ở" -> "o").
+                if len(folded_kw) >= self.MIN_FOLDED_MATCH_LEN and folded_kw in folded_ocr:
+                    fuzzy += 1.0
+
+            if exact or fuzzy:
+                credit = exact + w["ocr_folded_discount"] * fuzzy
+                term = w["ocr_exact"] * (credit / len(keywords))
+                bonus += term
+                breakdown.append(
+                    f"+ocr(exact {exact:.0f} fuzzy {fuzzy:.0f}/{len(keywords)})={term:.3f}"
+                )
+
+        # H4. DAM object coverage: reward frames whose detected objects literally cover
+        # the objects the query asked for. Captions are English, so folding only strips
+        # case and punctuation here -- no Vietnamese tone collapse to worry about.
+        dam_summary = _normalize_text(c.get("dam_summary") or "")
+        objects = [n for n in (_normalize_text(o) for o in (parsed_query.objects_en or [])) if n]
+        if dam_summary and objects:
+            hits = sum(1 for o in objects if o in dam_summary)
+            if hits:
+                term = w["dam_coverage"] * (hits / len(objects))
+                bonus += term
+                breakdown.append(f"+dam({hits}/{len(objects)})={term:.3f}")
+
+        return max(0.0, base + bonus), " ".join(breakdown)
+
     def rerank_kis(
         self,
         parsed_query: ParsedQuery,
@@ -42,8 +202,8 @@ class Stage2Reranker:
         final_top_k: int = 20,
         top_k_rerank: int = 50,
     ) -> list[dict[str, Any]]:
-        """Re-rank Stage 1 candidate pool using BGE-Reranker-v2-m3 Cross-Encoder.
-        
+        """RRF pool -> BGE cross-encoder -> heuristic scoring -> ranked evidence.
+
         Args:
             parsed_query: Query with text descriptors
             candidates: Candidate pool from Stage 1 (e.g. 300 items)
@@ -54,37 +214,32 @@ class Stage2Reranker:
             return []
 
         user_query = parsed_query.original_query
-        
+
         # Only send top_k_rerank candidates to the heavy cross-encoder
         to_eval = candidates[:top_k_rerank]
-        dossiers = []
-
+        dossiers: list[str] = []
+        coverages: list[dict[str, bool]] = []
         for c in to_eval:
-            parts = []
-            if c.get("dam_summary"):
-                parts.append(f"[Visual Objects] {c['dam_summary']}")
-            if c.get("asr_transcript"):
-                parts.append(f"[Spoken Speech] {c['asr_transcript']}")
-            if c.get("ocr_text"):
-                parts.append(f"[Screen Text] {c['ocr_text']}")
-            
-            # If no text payload, fallback to scene description
-            dossier_text = " ".join(parts) if parts else f"[Scene] Video {c['video_id']} frame {c['frame_idx']}"
+            dossier_text, coverage = self._build_dossier(c)
             dossiers.append(dossier_text)
+            coverages.append(coverage)
 
         # Compute Cross-Encoder scores for the top candidates
         ce_scores = self.registry.compute_rerank_scores(user_query, dossiers)
 
-        # Blend Stage 1 and Stage 2 scores: 0.40 * Stage1 + 0.60 * CrossEncoder
+        # Heuristic Scoring layer on top of the cross-encoder relevance
         reranked = []
         for i, c in enumerate(to_eval):
             c_copy = dict(c)
             ce_score = float(ce_scores[i])
-            norm_s1 = c.get("normalized_score", 1.0)
-            final_score = round(0.40 * norm_s1 + 0.60 * ce_score, 4)
+            final_score, breakdown = self.compute_heuristic_score(
+                parsed_query, c, ce_score, coverages[i]
+            )
 
             c_copy["cross_encoder_score"] = round(ce_score, 4)
-            c_copy["final_score"] = final_score
+            c_copy["final_score"] = round(final_score, 4)
+            c_copy["heuristic_breakdown"] = breakdown
+            c_copy["dossier_coverage"] = coverages[i]
             c_copy["submission_string"] = f"{c['video_id']}, {c['frame_idx']}"
             reranked.append(c_copy)
 
