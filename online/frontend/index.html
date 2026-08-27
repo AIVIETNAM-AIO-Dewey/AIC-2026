@@ -92,59 +92,56 @@
         </div>
       </div>
 
-      <!-- DYNAMIC WEIGHT ADJUSTMENT PANEL -->
-      <div class="weights-panel">
-        <div class="weights-header">
-          <div class="weights-title">
-            <span>🎛️ DYNAMIC MODALITY WEIGHTS (SUM = 1.00)</span>
-            <span class="weights-hint">— Drag sliders and click Re-fuse for instant (<5ms) re-weighting</span>
+      <!-- 4 INDEPENDENT CHANNELS NAVIGATION PANEL -->
+      <div class="channels-tab-panel">
+        <div class="channels-tab-header">
+          <div class="channels-title">
+            <span>⚡ INDEPENDENT UN-FUSED RETRIEVAL CHANNELS</span>
+            <span class="channels-hint">— 4 Standalone Methods (Top 100 Candidates Each)</span>
           </div>
-          <div class="weights-actions">
-            <button id="btn-re-fuse" class="btn-accent" title="Re-fuse Stage 1 pool instantly using cached branch hits">
-              <span>⚡ Re-Fuse Pool (<5ms)</span>
-            </button>
-            <button id="btn-re-rank" class="btn-outline" title="Re-run Stage 2 Cross-Encoder on newly fused pool">
-              <span>🔄 Re-Rank Top 50</span>
+          <div class="channels-actions">
+            <button id="btn-export-all-channels" class="btn-accent" title="Export all 4 channels to individual submission CSVs">
+              <span>📥 Export All 4 CSVs (400 Rows)</span>
             </button>
           </div>
         </div>
 
-        <div class="sliders-grid">
-          <!-- Visual SigLIP Slider -->
-          <div class="slider-group">
-            <div class="slider-label-row">
-              <span class="modality-name">👁️ Visual Scene (SigLIP-2)</span>
-              <span class="slider-val" id="val-w-vis">0.35</span>
+        <div class="channel-tabs-grid">
+          <button class="channel-tab active" data-channel="siglip2" id="tab-siglip2">
+            <span class="tab-icon">👁️</span>
+            <div class="tab-meta">
+              <span class="tab-title">SigLIP-2 Visual</span>
+              <span class="tab-sub">Dense 768-d Scene Embedding</span>
             </div>
-            <input type="range" id="slider-w-vis" min="0" max="1" step="0.05" value="0.35">
-          </div>
+            <span class="tab-count-badge" id="badge-count-siglip2">100</span>
+          </button>
 
-          <!-- DAM Objects Slider -->
-          <div class="slider-group">
-            <div class="slider-label-row">
-              <span class="modality-name">📦 Objects (DAM)</span>
-              <span class="slider-val" id="val-w-dam">0.30</span>
+          <button class="channel-tab" data-channel="dam" id="tab-dam">
+            <span class="tab-icon">📦</span>
+            <div class="tab-meta">
+              <span class="tab-title">DAM Objects</span>
+              <span class="tab-sub">SAM-2 + YOLO-World Pooling</span>
             </div>
-            <input type="range" id="slider-w-dam" min="0" max="1" step="0.05" value="0.30">
-          </div>
+            <span class="tab-count-badge" id="badge-count-dam">100</span>
+          </button>
 
-          <!-- Speech ASR Slider -->
-          <div class="slider-group">
-            <div class="slider-label-row">
-              <span class="modality-name">🎙️ Speech Dialogue (ASR)</span>
-              <span class="slider-val" id="val-w-asr">0.35</span>
+          <button class="channel-tab" data-channel="asr" id="tab-asr">
+            <span class="tab-icon">🎙️</span>
+            <div class="tab-meta">
+              <span class="tab-title">Speech ASR</span>
+              <span class="tab-sub">PhoWhisper 1024-d Dialogue</span>
             </div>
-            <input type="range" id="slider-w-asr" min="0" max="1" step="0.05" value="0.35">
-          </div>
+            <span class="tab-count-badge" id="badge-count-asr">100</span>
+          </button>
 
-          <!-- OCR Text Slider -->
-          <div class="slider-group">
-            <div class="slider-label-row">
-              <span class="modality-name">🔤 Screen Text (OCR)</span>
-              <span class="slider-val" id="val-w-ocr">0.00</span>
+          <button class="channel-tab" data-channel="ocr" id="tab-ocr">
+            <span class="tab-icon">🔤</span>
+            <div class="tab-meta">
+              <span class="tab-title">Screen OCR</span>
+              <span class="tab-sub">PP-OCR Inverted Index</span>
             </div>
-            <input type="range" id="slider-w-ocr" min="0" max="1" step="0.05" value="0.00">
-          </div>
+            <span class="tab-count-badge" id="badge-count-ocr">100</span>
+          </button>
         </div>
       </div>
     </section>

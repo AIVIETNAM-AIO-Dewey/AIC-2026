@@ -163,7 +163,7 @@ class QueryParser:
             headers={"Content-Type": "application/json"},
         )
 
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=5) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             content = res_data.get("message", {}).get("content", "{}").strip()
             

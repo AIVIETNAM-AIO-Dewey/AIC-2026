@@ -202,7 +202,11 @@ async def parse_query_endpoint(req: ParseRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     t0 = time.perf_counter()
-    parsed = _parser.parse(req.query, task_type=req.task_type, engine=req.engine)
+    try:
+        parsed = _parser.parse(req.query, task_type=req.task_type, engine=req.engine)
+    except Exception as e:
+        logger.warning(f"⚠️ Query parsing error ({e}). Falling back to robust rule parser...")
+        parsed = _parser._parse_local(req.query, req.task_type or "KIS")
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
     return {
@@ -273,51 +277,43 @@ async def search_endpoint(req: SearchRequest):
         )
         fused_pool = raw_sequences
 
-    # Branch B: KIS / VQA Standard Single-Query Pipeline
+    # Branch B: 4-Channel Independent Un-Fused Pipeline (SigLIP2, DAM, ASR, OCR)
     else:
-        # 1. Retrieve 4 branches independently
-        branches = _fusion.retrieve_branches(parsed, branch_limit=branch_limit)
+        # 1. Retrieve 4 branches independently (100 items each)
+        branches = _fusion.retrieve_branches(parsed, branch_limit=max(100, req.top_k_pool))
 
-        # 2. Store branch hits in memory cache for instant weight adjustment re-runs
+        # 2. Store branch hits in memory cache
         _branch_cache[session_id] = {
             "parsed_query": parsed,
             "branches": branches,
             "created_at": time.time(),
         }
 
-        # 3. Fuse branches with Weighted RRF & Synergy
-        fused_pool = _fusion.fuse_from_branch_hits(
-            vis_hits=branches["vis"],
-            dam_hits=branches["dam"],
-            asr_hits=branches["asr"],
-            ocr_hits=branches["ocr"],
-            weights=parsed.weights,
-            top_k_pool=req.top_k_pool,
-        )
+        # 3. Format pure un-fused results for each of the 4 channels independently
+        channel_results = {
+            "siglip2": list(branches.get("vis", [])[:100]),
+            "dam": list(branches.get("dam", [])[:100]),
+            "asr": list(branches.get("asr", [])[:100]),
+            "ocr": list(branches.get("ocr", [])[:100]),
+        }
 
-        # 4. Optional Stage 2 Reranking
-        results = fused_pool
-        if req.run_stage2:
-            if parsed.task_type == "KIS":
-                results = _reranker.rerank_kis(
-                    parsed,
-                    fused_pool,
-                    final_top_k=req.final_top_k,
-                    top_k_rerank=req.top_k_rerank,
-                )
-            elif parsed.task_type == "VQA":
-                results = _reranker.rerank_vqa(
-                    parsed,
-                    fused_pool,
-                    final_top_k=req.final_top_k,
-                    top_k_rerank=req.top_k_rerank,
-                )
+        for ch_name, ch_items in channel_results.items():
+            for r, it in enumerate(ch_items, 1):
+                it["rank"] = r
+                it["channel"] = ch_name
+                if "submission_string" not in it:
+                    it["submission_string"] = f"{it['video_id']}, {it['frame_idx']}"
+                if not it.get("image_relpath"):
+                    it["image_relpath"] = f"keyframes/{it['video_id']}/{it.get('keyframe_n', 1):03d}.jpg"
+
+        # Default results view to SigLIP2 or first available channel
+        results = channel_results["siglip2"] or channel_results["dam"] or channel_results["asr"] or channel_results["ocr"]
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     return {
         "session_id": session_id,
         "task_type": parsed.task_type,
-        "total_fused_candidates": len(fused_pool),
+        "channels": channel_results if parsed.task_type != "TRAKE" else {},
         "results": results,
         "execution_time_ms": round(dt_ms, 2),
     }

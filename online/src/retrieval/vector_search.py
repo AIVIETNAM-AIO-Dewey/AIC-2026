@@ -25,11 +25,77 @@ logger = logging.getLogger(__name__)
 class FastVectorSearchEngine:
     """High-speed vector retrieval engine using memory-mapped BLAS matrix operations."""
 
-    def __init__(self, unified_index_dir: str | Path = "/Users/khoale/Downloads/AIC_HCM/unified_index"):
+    def __init__(self, unified_index_dir: str | Path = "/Users/khoale/Downloads/AIC_HCM/unified_index", is_stub: bool = False):
+        if is_stub:
+            return
         clean_path = str(unified_index_dir).strip().strip('"').strip("'")
         self.index_dir = Path(clean_path).expanduser().resolve()
+        if not self.index_dir.exists():
+            logger.warning(f"⚠️ Unified index directory {self.index_dir} not found. Initializing in-memory synthetic stub for dry-run...")
+            self._init_synthetic_stub()
+            return
         self._load_matrices()
         self._load_metadata()
+
+    def _init_synthetic_stub(self, num_keyframes: int = 200, num_dam: int = 400):
+        """Builds in-memory normalized matrices and rich metadata for zero-dependency dry-runs."""
+        np.random.seed(42)
+        vis = np.random.randn(num_keyframes, 768).astype(np.float32)
+        vis /= np.linalg.norm(vis, axis=1, keepdims=True)
+        self.vis_matrix = vis.astype(np.float16)
+
+        speech = np.random.randn(num_keyframes, 1024).astype(np.float32)
+        speech /= np.linalg.norm(speech, axis=1, keepdims=True)
+        self.speech_matrix = speech.astype(np.float16)
+
+        dam = np.random.randn(num_dam, 1024).astype(np.float32)
+        dam /= np.linalg.norm(dam, axis=1, keepdims=True)
+        self.dam_matrix = dam.astype(np.float16)
+
+        self.keyframe_metadata = []
+        self.video_keyframes_map = defaultdict(list)
+        self.keyframe_lookup = {}
+        self.ocr_word_index = defaultdict(list)
+        sample_words = ["vietnam", "vtv1", "thoi", "su", "chuc", "mung", "nam", "moi", "xe", "oto", "nguoi"]
+
+        for i in range(num_keyframes):
+            vid_idx = (i // 15) + 1
+            vid = f"L01_V{vid_idx:03d}"
+            kn = (i % 15) + 1
+            f_idx = kn * 25
+            pts = float(f_idx) / 25.0
+            words = list(np.random.choice(sample_words, size=3, replace=False))
+            meta = {
+                "video_id": vid,
+                "keyframe_n": kn,
+                "frame_idx": f_idx,
+                "pts_time_s": pts,
+                "image_relpath": f"keyframes/{vid}/{kn:03d}.jpg",
+                "ocr_text": " ".join(words).upper(),
+                "asr_transcript_vi": f"Loi thoai thu {i} ve {words[0]}",
+                "dam_summary_en": f"a scene with {words[1]} and person",
+            }
+            self.keyframe_metadata.append(meta)
+            self.video_keyframes_map[vid].append(meta)
+            self.keyframe_lookup[(vid, kn)] = meta
+            for w in words:
+                self.ocr_word_index[w.lower()].append(i)
+
+        self.dam_metadata = []
+        self.frame_dam_map = defaultdict(list)
+        for i in range(num_dam):
+            kf_idx = i % num_keyframes
+            parent = self.keyframe_metadata[kf_idx]
+            dam_meta = {
+                "video_id": parent["video_id"],
+                "frame_idx": parent["frame_idx"],
+                "keyframe_n": parent["keyframe_n"],
+                "class_entity": "person" if i % 2 == 0 else "car",
+                "bbox": [0.1, 0.2, 0.4, 0.5],
+                "description_en": f"a detected entity in {parent['video_id']}",
+            }
+            self.dam_metadata.append(dam_meta)
+            self.frame_dam_map[(dam_meta["video_id"], dam_meta["frame_idx"])].append(dam_meta)
 
     def _load_matrices(self):
         logger.info(f"⚡ Loading memory-mapped matrices from {self.index_dir}...")
@@ -135,13 +201,16 @@ class FastVectorSearchEngine:
     # 1. Visual Search (SigLIP-2 768-d)
     # ──────────────────────────────────────────────────────────────────────────
     def search_visual(self, query_vector: np.ndarray, top_k: int = 100) -> list[dict[str, Any]]:
-        """Compute cosine similarity and SigLIP sigmoid probability across all 177k keyframe visual vectors."""
+        """Compute cosine similarity and SigLIP sigmoid probability across all keyframe visual vectors."""
         q = query_vector.astype(np.float32)
         # Cosine dot product (vectors are L2-normalized)
         raw_scores = np.dot(self.vis_matrix.astype(np.float32), q)
 
-        # Fast top-k partition
-        top_indices = np.argpartition(raw_scores, -top_k)[-top_k:]
+        # Fast top-k partition bounded by array size
+        k = min(top_k, len(raw_scores))
+        if k <= 0:
+            return []
+        top_indices = np.argpartition(raw_scores, -k)[-k:]
         top_indices = top_indices[np.argsort(-raw_scores[top_indices])]
 
         results = []
@@ -190,8 +259,11 @@ class FastVectorSearchEngine:
             q = q_vec.astype(np.float32)
             scores = np.dot(self.dam_matrix.astype(np.float32), q)
 
-            # Pick top 200 objects for this subject
-            top_obj_indices = np.argpartition(scores, -200)[-200:]
+            # Pick top objects for this subject bounded by matrix size
+            k_obj = min(200, len(scores))
+            if k_obj <= 0:
+                continue
+            top_obj_indices = np.argpartition(scores, -k_obj)[-k_obj:]
             top_obj_indices = top_obj_indices[np.argsort(-scores[top_obj_indices])]
 
             for obj_idx in top_obj_indices:
@@ -253,7 +325,10 @@ class FastVectorSearchEngine:
         q = query_vector.astype(np.float32)
         scores = np.dot(self.speech_matrix.astype(np.float32), q)
 
-        top_indices = np.argpartition(scores, -top_k)[-top_k:]
+        k = min(top_k, len(scores))
+        if k <= 0:
+            return []
+        top_indices = np.argpartition(scores, -k)[-k:]
         top_indices = top_indices[np.argsort(-scores[top_indices])]
 
         results = []

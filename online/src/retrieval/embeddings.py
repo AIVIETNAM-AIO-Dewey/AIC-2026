@@ -9,6 +9,7 @@ Encodes text sub-queries on Mac MPS / CPU with PyTorch:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -32,10 +33,24 @@ class ModelRegistry:
         device: Optional[str] = None,
     ):
         if device is None:
-            if torch.backends.mps.is_available():
-                self.device = "mps"
+            env_dev = os.environ.get("AIC_DEVICE")
+            if env_dev:
+                self.device = env_dev.lower()
             elif torch.cuda.is_available():
-                self.device = "cuda"
+                try:
+                    total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    if total_vram_gb < 3.5:
+                        logger.warning(
+                            f"⚠️ GPU 0 ({torch.cuda.get_device_name(0)}) has only {total_vram_gb:.2f}GB VRAM (< 3.5GB required for 3 AI models). "
+                            f"Automatically falling back to CPU to prevent CUDA OOM..."
+                        )
+                        self.device = "cpu"
+                    else:
+                        self.device = "cuda"
+                except Exception:
+                    self.device = "cpu"
+            elif torch.backends.mps.is_available():
+                self.device = "mps"
             else:
                 self.device = "cpu"
         else:

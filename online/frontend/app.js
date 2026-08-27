@@ -5,7 +5,6 @@
 
 // ──────────────────────────────────────────────────────────────────────────────
 // App State
-// ──────────────────────────────────────────────────────────────────────────────
 const state = {
   taskType: "KIS",
   queryMode: "auto", // "auto", "edit", "direct"
@@ -14,6 +13,8 @@ const state = {
   keyframesRoot: "/Users/khoale/Downloads/AIC_Challenger/data/keyframes",
   parsedQuery: null,
   searchResults: [],
+  channels: {},
+  activeChannel: "siglip2",
   activeInspectorItem: null,
   activeVideoKeyframes: [],
   selectedSubmission: "",
@@ -181,19 +182,39 @@ function bindEvents() {
     }
   });
 
-  // Sliders input
-  [el.sliderVis, el.sliderDam, el.sliderAsr, el.sliderOcr].forEach((s) => {
-    s.addEventListener("input", handleSliderChange);
+  // Sliders input (guarded)
+  if (el.sliderVis) {
+    [el.sliderVis, el.sliderDam, el.sliderAsr, el.sliderOcr].forEach((s) => {
+      if (s) s.addEventListener("input", handleSliderChange);
+    });
+  }
+
+  // Instant Re-Fuse and Re-Rank (guarded)
+  if (el.btnReFuse) el.btnReFuse.addEventListener("click", () => handleCachedReFuse(false));
+  if (el.btnReRank) el.btnReRank.addEventListener("click", () => handleCachedReFuse(true));
+
+  // Channel tab navigation
+  document.querySelectorAll(".channel-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".channel-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      state.activeChannel = tab.dataset.channel || "siglip2";
+      state.searchResults = (state.channels && state.channels[state.activeChannel]) || [];
+      renderResults(state.searchResults);
+    });
   });
 
-  // Instant Re-Fuse and Re-Rank
-  el.btnReFuse.addEventListener("click", () => handleCachedReFuse(false));
-  el.btnReRank.addEventListener("click", () => handleCachedReFuse(true));
+  const btnExportAll = document.getElementById("btn-export-all-channels");
+  if (btnExportAll) {
+    btnExportAll.addEventListener("click", exportAllChannelsCSV);
+  }
 
   // Top-k dropdown
-  el.selectTopK.addEventListener("change", () => {
-    renderResults(state.searchResults);
-  });
+  if (el.selectTopK) {
+    el.selectTopK.addEventListener("change", () => {
+      renderResults(state.searchResults);
+    });
+  }
 
   // Submission bar
   el.btnCopySubmission.addEventListener("click", copySubmissionToClipboard);
@@ -288,40 +309,44 @@ function updateQueryModeUI() {
 // Sliders & Weight Logic
 // ──────────────────────────────────────────────────────────────────────────────
 function getSliderWeights() {
+  if (!el.sliderVis) {
+    return { vis: 0.35, dam: 0.30, asr: 0.35, ocr: 0.00 };
+  }
   return {
-    vis: parseFloat(el.sliderVis.value),
-    dam: parseFloat(el.sliderDam.value),
-    asr: parseFloat(el.sliderAsr.value),
-    ocr: parseFloat(el.sliderOcr.value),
+    vis: parseFloat(el.sliderVis.value || 0.35),
+    dam: parseFloat(el.sliderDam.value || 0.30),
+    asr: parseFloat(el.sliderAsr.value || 0.35),
+    ocr: parseFloat(el.sliderOcr.value || 0.00),
   };
 }
 
 function setSliderValues(weights) {
-  if (!weights) return;
-  if (weights.vis !== undefined) {
+  if (!weights || !el.sliderVis) return;
+  if (weights.vis !== undefined && el.sliderVis) {
     el.sliderVis.value = weights.vis;
-    el.valVis.textContent = parseFloat(weights.vis).toFixed(2);
+    if (el.valVis) el.valVis.textContent = parseFloat(weights.vis).toFixed(2);
   }
-  if (weights.dam !== undefined) {
+  if (weights.dam !== undefined && el.sliderDam) {
     el.sliderDam.value = weights.dam;
-    el.valDam.textContent = parseFloat(weights.dam).toFixed(2);
+    if (el.valDam) el.valDam.textContent = parseFloat(weights.dam).toFixed(2);
   }
-  if (weights.asr !== undefined) {
+  if (weights.asr !== undefined && el.sliderAsr) {
     el.sliderAsr.value = weights.asr;
-    el.valAsr.textContent = parseFloat(weights.asr).toFixed(2);
+    if (el.valAsr) el.valAsr.textContent = parseFloat(weights.asr).toFixed(2);
   }
-  if (weights.ocr !== undefined) {
+  if (weights.ocr !== undefined && el.sliderOcr) {
     el.sliderOcr.value = weights.ocr;
-    el.valOcr.textContent = parseFloat(weights.ocr).toFixed(2);
+    if (el.valOcr) el.valOcr.textContent = parseFloat(weights.ocr).toFixed(2);
   }
 }
 
 function handleSliderChange() {
+  if (!el.sliderVis) return;
   const w = getSliderWeights();
-  el.valVis.textContent = w.vis.toFixed(2);
-  el.valDam.textContent = w.dam.toFixed(2);
-  el.valAsr.textContent = w.asr.toFixed(2);
-  el.valOcr.textContent = w.ocr.toFixed(2);
+  if (el.valVis) el.valVis.textContent = w.vis.toFixed(2);
+  if (el.valDam) el.valDam.textContent = w.dam.toFixed(2);
+  if (el.valAsr) el.valAsr.textContent = w.asr.toFixed(2);
+  if (el.valOcr) el.valOcr.textContent = w.ocr.toFixed(2);
 
   try {
     const data = JSON.parse(el.jsonEditor.value);
@@ -420,10 +445,28 @@ async function handleExecuteJsonClick(runStage2 = true) {
     });
 
     if (!res.ok) throw new Error("Search failed: " + res.statusText);
-    const data = await res.json();
-
     state.sessionId = data.session_id;
-    state.searchResults = data.results || [];
+    state.channels = data.channels || {};
+    if (!state.channels.siglip2 && data.results) {
+      state.channels = { siglip2: data.results, dam: [], asr: [], ocr: [] };
+    }
+
+    // Update tab count badges
+    const sCount = (state.channels.siglip2 || []).length;
+    const dCount = (state.channels.dam || []).length;
+    const aCount = (state.channels.asr || []).length;
+    const oCount = (state.channels.ocr || []).length;
+
+    const bSiglip = document.getElementById("badge-count-siglip2");
+    if (bSiglip) bSiglip.textContent = sCount;
+    const bDam = document.getElementById("badge-count-dam");
+    if (bDam) bDam.textContent = dCount;
+    const bAsr = document.getElementById("badge-count-asr");
+    if (bAsr) bAsr.textContent = aCount;
+    const bOcr = document.getElementById("badge-count-ocr");
+    if (bOcr) bOcr.textContent = oCount;
+
+    state.searchResults = (state.channels && state.channels[state.activeChannel]) || data.results || [];
 
     el.timingBadge.textContent = `Completed in ${data.execution_time_ms}ms`;
     el.sessionBadge.textContent = `Session: ${data.session_id.slice(0, 8)}...`;
@@ -1242,6 +1285,39 @@ function executeDownload100Csv() {
 
   closeExportModal();
   showToast(`📥 Successfully exported ${rows.length} submission rows for Query ${qId}!`);
+}
+
+function exportAllChannelsCSV() {
+  const qId = el.exportQueryId ? el.exportQueryId.value.trim() || "1" : "1";
+  const channelList = ["siglip2", "dam", "asr", "ocr"];
+  let totalExported = 0;
+
+  for (const ch of channelList) {
+    const items = (state.channels && state.channels[ch]) || [];
+    if (items.length === 0) continue;
+
+    const rows = [];
+    for (const item of items.slice(0, 100)) {
+      rows.push(`${item.video_id}, ${item.frame_idx}`);
+    }
+    const csvContent = rows.join("\n") + "\n";
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `submission_query_${qId}_${ch}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    totalExported += rows.length;
+  }
+
+  if (totalExported > 0) {
+    showToast(`📥 Exported 4 CSV files (${totalExported} rows total) for Query ${qId}!`);
+  } else {
+    showToast("No candidates found to export. Please run a search first.");
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
