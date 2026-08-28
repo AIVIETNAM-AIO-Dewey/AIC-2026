@@ -995,10 +995,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.skip_download:
         import google.auth
+        import google_auth_httplib2
+        import httplib2
         from googleapiclient.discovery import build
 
         credentials, _ = google.auth.default()
-        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        authorized_http = google_auth_httplib2.AuthorizedHttp(
+            credentials,
+            http=httplib2.Http(timeout=300),
+        )
+        service = build(
+            "drive",
+            "v3",
+            http=authorized_http,
+            cache_discovery=False,
+        )
         if data_root_folder_ids:
             if folder_ids or map_folder_ids:
                 raise ValueError(
