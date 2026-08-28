@@ -9,13 +9,24 @@ Encodes text sub-queries on Mac MPS / CPU with PyTorch:
 from __future__ import annotations
 
 import logging
+import threading
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
+from transformers import (
+    AutoImageProcessor,
+    AutoModel,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+)
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
 
 logger = logging.getLogger(__name__)
+SIGLIP_TEXT_MAX_TOKENS = 64
 
 
 class ModelRegistry:
@@ -47,7 +58,12 @@ class ModelRegistry:
         self.reranker_id = reranker_id
 
         self._siglip_tokenizer = None
+        self._siglip_image_processor = None
         self._siglip_model = None
+        # The MPS/CUDA model is shared by text and uploaded-image queries. A
+        # single re-entrant lock prevents concurrent calls from racing model
+        # initialization or competing for the same accelerator allocation.
+        self._siglip_inference_lock = threading.RLock()
 
         self._bge_tokenizer = None
         self._bge_model = None
@@ -67,54 +83,126 @@ class ModelRegistry:
     # 1. SigLIP-2 Text Embedding (768-d)
     # ──────────────────────────────────────────────────────────────────────────
     def _load_siglip(self):
-        if self._siglip_model is None:
-            logger.info(
-                "Loading SigLIP-2 model (%s @ %s)...",
-                self.siglip_id,
-                self.siglip_revision,
-            )
-            self._siglip_tokenizer = AutoTokenizer.from_pretrained(
-                self.siglip_id,
-                revision=self.siglip_revision,
-                trust_remote_code=False,
-            )
-            self._siglip_model = AutoModel.from_pretrained(
-                self.siglip_id,
-                revision=self.siglip_revision,
-                trust_remote_code=False,
-            ).to(self.device)
-            self._siglip_model.eval()
-            logger.info("✅ SigLIP-2 loaded successfully!")
+        with self._siglip_inference_lock:
+            if self._siglip_model is None:
+                logger.info(
+                    "Loading SigLIP-2 model (%s @ %s)...",
+                    self.siglip_id,
+                    self.siglip_revision,
+                )
+                self._siglip_tokenizer = AutoTokenizer.from_pretrained(
+                    self.siglip_id,
+                    revision=self.siglip_revision,
+                    trust_remote_code=False,
+                )
+                self._siglip_model = AutoModel.from_pretrained(
+                    self.siglip_id,
+                    revision=self.siglip_revision,
+                    trust_remote_code=False,
+                ).to(self.device)
+                self._siglip_model.eval()
+                logger.info("✅ SigLIP-2 loaded successfully!")
+
+    def _load_siglip_image_processor(self) -> None:
+        """Lazily load the exact processor used to create the visual index."""
+        with self._siglip_inference_lock:
+            if self._siglip_image_processor is None:
+                self._siglip_image_processor = AutoImageProcessor.from_pretrained(
+                    self.siglip_id,
+                    revision=self.siglip_revision,
+                    trust_remote_code=False,
+                    use_fast=True,
+                )
 
     @torch.inference_mode()
     def embed_siglip_text(self, text: str) -> np.ndarray:
         """Embed text using SigLIP-2 text encoder into 768-d normalized float32 vector."""
+        with self._siglip_inference_lock:
+            self._load_siglip()
+            inputs = self._siglip_tokenizer(
+                [text],
+                padding="max_length",
+                truncation=True,
+                max_length=SIGLIP_TEXT_MAX_TOKENS,
+                return_tensors="pt",
+            ).to(self.device)
+
+            # Extract text features
+            if hasattr(self._siglip_model, "get_text_features"):
+                features = self._siglip_model.get_text_features(**inputs)
+            else:
+                features = self._siglip_model(**inputs)
+
+            if isinstance(features, torch.Tensor):
+                text_embeds = features
+            elif hasattr(features, "pooler_output") and features.pooler_output is not None:
+                text_embeds = features.pooler_output
+            elif hasattr(features, "last_hidden_state"):
+                text_embeds = features.last_hidden_state[:, 0]
+            else:
+                text_embeds = features[0]
+
+            normalized = F.normalize(text_embeds, p=2, dim=-1)
+            return normalized.cpu().to(torch.float32).numpy()[0]
+
+    @torch.inference_mode()
+    def embed_siglip_image(self, image: Image) -> np.ndarray:
+        """Embed one RGB PIL image in the stored 768-d SigLIP visual space."""
+        with self._siglip_inference_lock:
+            self._load_siglip()
+            self._load_siglip_image_processor()
+            inputs = self._siglip_image_processor(
+                images=[image.convert("RGB")],
+                return_tensors="pt",
+            )
+            inputs = {name: value.to(self.device) for name, value in inputs.items()}
+
+            if hasattr(self._siglip_model, "get_image_features"):
+                features = self._siglip_model.get_image_features(**inputs)
+            else:
+                features = self._siglip_model(**inputs)
+
+            if isinstance(features, torch.Tensor):
+                image_embeds = features
+            elif hasattr(features, "pooler_output") and features.pooler_output is not None:
+                image_embeds = features.pooler_output
+            elif hasattr(features, "image_embeds") and features.image_embeds is not None:
+                image_embeds = features.image_embeds
+            elif hasattr(features, "last_hidden_state"):
+                image_embeds = features.last_hidden_state[:, 0]
+            else:
+                image_embeds = features[0]
+
+            normalized = F.normalize(image_embeds, p=2, dim=-1)
+            vector = normalized.cpu().to(torch.float32).numpy()[0]
+            if vector.shape != (768,) or not np.isfinite(vector).all():
+                raise ValueError(f"Invalid SigLIP image embedding shape/value: {vector.shape}")
+            return vector
+
+    def siglip_text_diagnostics(self, text: str) -> dict[str, object]:
+        """Expose the exact 64-token constraint instead of truncating invisibly."""
         self._load_siglip()
-        inputs = self._siglip_tokenizer(
-            [text],
-            padding="max_length",
-            truncation=True,
-            max_length=64,
-            return_tensors="pt",
-        ).to(self.device)
-
-        # Extract text features
-        if hasattr(self._siglip_model, "get_text_features"):
-            features = self._siglip_model.get_text_features(**inputs)
-        else:
-            features = self._siglip_model(**inputs)
-
-        if isinstance(features, torch.Tensor):
-            text_embeds = features
-        elif hasattr(features, "pooler_output") and features.pooler_output is not None:
-            text_embeds = features.pooler_output
-        elif hasattr(features, "last_hidden_state"):
-            text_embeds = features.last_hidden_state[:, 0]
-        else:
-            text_embeds = features[0]
-
-        normalized = F.normalize(text_embeds, p=2, dim=-1)
-        return normalized.cpu().to(torch.float32).numpy()[0]
+        encoded = self._siglip_tokenizer(
+            text,
+            add_special_tokens=True,
+            truncation=False,
+        )
+        token_ids = encoded["input_ids"]
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        token_count = len(token_ids)
+        truncated = token_count > SIGLIP_TEXT_MAX_TOKENS
+        effective_ids = token_ids[:SIGLIP_TEXT_MAX_TOKENS]
+        effective_text = self._siglip_tokenizer.decode(
+            effective_ids,
+            skip_special_tokens=True,
+        ).strip()
+        return {
+            "token_count": token_count,
+            "max_tokens": SIGLIP_TEXT_MAX_TOKENS,
+            "truncated": truncated,
+            "effective_query": effective_text,
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # 2. BGE-M3 Dense Embedding (1024-d)

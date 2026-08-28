@@ -25,5 +25,8 @@ models:
 retrieval:
   default_top_k: 20
   max_top_k: 100
+  # Diagnostic only: DAM rankings remain raw mean-best-region cosine. Matches
+  # below this value are shown as unsupported instead of trusted bounding boxes.
+  dam_match_threshold: 0.50
   # Limits temporary float32 memory while scanning the larger matrices on Mac.
   search_block_rows: 32768

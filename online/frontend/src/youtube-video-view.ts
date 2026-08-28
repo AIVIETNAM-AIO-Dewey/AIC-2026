@@ -47,10 +47,13 @@ declare global {
 }
 
 export interface YouTubeVideoViewOptions {
+  /** Prefix for a second independent player. Empty uses the inspector IDs. */
+  elementPrefix?: string;
   /** @deprecated Mapping state is reported through onStatusChange. */
   onSessionChange?(label: string): void;
   onSourceChange(label: string): void;
   onStatusChange(label: string, state?: MappingStatusState): void;
+  onTimeChange?(seconds: number): void;
   onToast(message: string): void;
   refreshIcons(): void;
 }
@@ -100,18 +103,19 @@ function describeYouTubeError(code: number): string {
 }
 
 export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTubeVideoViewController {
+  const elementId = (id: string) => options.elementPrefix ? `${options.elementPrefix}-${id}` : id;
   const elements = {
-    backButton: requireElement<HTMLButtonElement>("btn-video-back"),
-    centerPlay: requireElement<HTMLButtonElement>("btn-video-center-play"),
-    forwardButton: requireElement<HTMLButtonElement>("btn-video-forward"),
-    fullscreenButton: requireElement<HTMLButtonElement>("btn-video-fullscreen"),
-    mock: requireElement<HTMLDivElement>("video-mock"),
-    openButton: requireElement<HTMLButtonElement>("btn-open-youtube"),
-    playButton: requireElement<HTMLButtonElement>("btn-video-play"),
-    poster: requireElement<HTMLImageElement>("video-poster"),
-    progress: requireElement<HTMLInputElement>("video-progress"),
-    time: requireElement<HTMLSpanElement>("video-time"),
-    youtubeFrame: requireElement<HTMLIFrameElement>("youtube-player"),
+    backButton: requireElement<HTMLButtonElement>(elementId("btn-video-back")),
+    centerPlay: requireElement<HTMLButtonElement>(elementId("btn-video-center-play")),
+    forwardButton: requireElement<HTMLButtonElement>(elementId("btn-video-forward")),
+    fullscreenButton: requireElement<HTMLButtonElement>(elementId("btn-video-fullscreen")),
+    mock: requireElement<HTMLDivElement>(elementId("video-mock")),
+    openButton: requireElement<HTMLButtonElement>(elementId("btn-open-youtube")),
+    playButton: requireElement<HTMLButtonElement>(elementId("btn-video-play")),
+    poster: requireElement<HTMLImageElement>(elementId("video-poster")),
+    progress: requireElement<HTMLInputElement>(elementId("video-progress")),
+    time: requireElement<HTMLSpanElement>(elementId("video-time")),
+    youtubeFrame: requireElement<HTMLIFrameElement>(elementId("youtube-player")),
   };
 
   let active = false;
@@ -153,6 +157,15 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     elements.progress.max = String(knownDuration ?? Math.max(1, Math.ceil(currentSeconds)));
     elements.progress.value = clampSeconds(currentSeconds).toFixed(1);
     elements.time.textContent = `${formatTime(currentSeconds)} / ${knownDuration === null ? "--:--" : formatTime(knownDuration)}`;
+    options.onTimeChange?.(currentSeconds);
+  }
+
+  function samplePlayerTime(): void {
+    if (!player) return;
+    const sampledSeconds = Number(player.getCurrentTime());
+    if (!Number.isFinite(sampledSeconds)) return;
+    currentSeconds = clampSeconds(sampledSeconds);
+    updatePlaybackUi();
   }
 
   function setPlaying(playing: boolean): void {
@@ -161,6 +174,7 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
       window.clearInterval(playbackTimer);
       playbackTimer = null;
     }
+    if (!playing) samplePlayerTime();
     elements.centerPlay.classList.toggle("hidden", playing);
     elements.playButton.innerHTML = `<i data-lucide="${playing ? "pause" : "play"}"></i>`;
     elements.playButton.title = playing ? "Pause" : "Play";
@@ -372,7 +386,7 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
       const yt = await loadYouTubeApi();
       if (attemptId !== playerAttemptId) throw new Error("Player request superseded");
       await new Promise<void>((resolve, reject) => {
-        player = new yt.Player("youtube-player", {
+        player = new yt.Player(elementId("youtube-player"), {
           events: {
             onReady: (event) => {
               if (attemptId !== playerAttemptId) {
@@ -521,6 +535,7 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     async togglePlayback() {
       if (isPlaying) {
         player?.pauseVideo?.();
+        samplePlayerTime();
         return;
       }
       await playPrepared();

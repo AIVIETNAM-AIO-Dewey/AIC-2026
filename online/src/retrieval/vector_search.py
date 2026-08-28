@@ -69,6 +69,7 @@ class FastVectorSearchEngine:
         started = time.perf_counter()
         self.keyframe_metadata: list[dict[str, Any]] = []
         self.video_keyframes_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.video_frame_rows_map: dict[str, list[int]] = defaultdict(list)
         self.keyframe_lookup: dict[tuple[str, int], dict[str, Any]] = {}
         self.frame_lookup: dict[tuple[str, int], dict[str, Any]] = {}
 
@@ -85,6 +86,7 @@ class FastVectorSearchEngine:
                 keyframe_n = int(item["keyframe_n"])
                 frame_idx = int(item["frame_idx"])
                 self.video_keyframes_map[video_id].append(item)
+                self.video_frame_rows_map[video_id].append(expected_row)
                 self.keyframe_lookup[(video_id, keyframe_n)] = item
                 self.frame_lookup[(video_id, frame_idx)] = item
 
@@ -211,10 +213,43 @@ class FastVectorSearchEngine:
         return self.keyframe_lookup.get((video_id, keyframe_n))
 
     def get_video_keyframe_list(self, video_id: str) -> list[dict[str, Any]]:
+        canonical_id = video_id.upper().replace("-", "_")
         return sorted(
-            self.video_keyframes_map.get(video_id, []),
+            self.video_keyframes_map.get(canonical_id, []),
             key=lambda item: int(item["keyframe_n"]),
         )
+
+    def get_video_timeline(self, video_id: str) -> dict[str, Any] | None:
+        """Return the minimal canonical timeline needed by the video player."""
+        canonical_id = video_id.upper().replace("-", "_")
+        source = self.get_video_keyframe_list(canonical_id)
+        if not source:
+            return None
+
+        fps = float(source[0].get("fps", 0.0))
+        return {
+            "video_id": canonical_id,
+            "fps": fps,
+            "keyframe_count": len(source),
+            "keyframes": [
+                {
+                    "keyframe_n": int(item["keyframe_n"]),
+                    "frame_idx": int(item["frame_idx"]),
+                    "pts_time_s": float(item.get("pts_time_s", 0.0)),
+                    "image_relpath": str(item.get("image_relpath", "")),
+                }
+                for item in source
+            ],
+        }
+
+    def get_total_frame_count(self) -> int:
+        """Return the number of canonical keyframes in the visual index."""
+        return len(self.keyframe_metadata)
+
+    def get_video_frame_count(self, video_id: str) -> int:
+        """Return the number of indexed frames for a canonicalized video ID."""
+        canonical_id = video_id.upper().replace("-", "_")
+        return len(self.video_frame_rows_map.get(canonical_id, []))
 
     def get_dam_objects_for_frame(self, video_id: str, frame_idx: int) -> list[dict[str, Any]]:
         return self.frame_dam_map.get((video_id, frame_idx), [])
@@ -249,17 +284,64 @@ class FastVectorSearchEngine:
             results.append(result)
         return results
 
+    def search_visual_in_video(
+        self,
+        query_vector: np.ndarray,
+        video_id: str,
+        top_k: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Rank only one video's frames by the unchanged raw SigLIP cosine."""
+        canonical_id = video_id.upper().replace("-", "_")
+        frame_rows = np.asarray(
+            self.video_frame_rows_map.get(canonical_id, []),
+            dtype=np.int64,
+        )
+        if top_k < 1 or not len(frame_rows):
+            return []
+
+        query = self._normalized_query(query_vector, 768)
+        frame_matrix = np.asarray(self.vis_matrix[frame_rows], dtype=np.float32)
+        scores = frame_matrix @ query
+        finite_indices = np.flatnonzero(np.isfinite(scores))
+        if not len(finite_indices):
+            return []
+        ranked = np.lexsort(
+            (frame_rows[finite_indices], -scores[finite_indices])
+        )[: min(top_k, len(finite_indices))]
+        order = finite_indices[ranked]
+
+        results: list[dict[str, Any]] = []
+        for rank, local_index in enumerate(order, 1):
+            global_index = int(frame_rows[int(local_index)])
+            result = self._base_result(self.keyframe_metadata[global_index])
+            result.update(
+                {
+                    "rank": rank,
+                    "global_idx": global_index,
+                    "score": round(float(scores[int(local_index)]), 6),
+                    "score_type": "cosine",
+                    "scope": "video",
+                    "scope_video_id": canonical_id,
+                }
+            )
+            results.append(result)
+        return results
+
     def search_dam(
         self,
         query_vectors: list[np.ndarray],
         subject_names: list[str],
         top_k: int = 100,
+        *,
+        match_threshold: float = 0.50,
     ) -> list[dict[str, Any]]:
-        """Rank frames using transparent mean-best-region cosine aggregation."""
+        """Rank by raw mean cosine and label weak region evidence as unmatched."""
         if not query_vectors:
             return []
         if len(query_vectors) != len(subject_names):
             raise ValueError("DAM query vectors and subject names must have equal length")
+        if not -1.0 <= match_threshold <= 1.0:
+            raise ValueError("match_threshold must be between -1.0 and 1.0")
 
         queries = [self._normalized_query(vector, 1024) for vector in query_vectors]
         per_subject_best: list[np.ndarray] = []
@@ -287,26 +369,42 @@ class FastVectorSearchEngine:
             dam_rows = self.frame_dam_rows[frame_row]
             region_matrix = np.asarray(self.dam_matrix[dam_rows], dtype=np.float32)
             matched_boxes: list[dict[str, Any]] = []
+            best_region_candidates: list[dict[str, Any]] = []
             subject_scores: list[dict[str, Any]] = []
+            unmatched_subjects: list[str] = []
             for subject, query in zip(subject_names, queries, strict=True):
                 region_scores = region_matrix @ query
                 best_local = int(np.argmax(region_scores))
                 dam_row = dam_rows[best_local]
                 object_meta = self.dam_metadata[dam_row]
                 cosine = float(region_scores[best_local])
-                subject_scores.append({"subject": subject, "cosine": round(cosine, 6)})
-                matched_boxes.append(
+                matched = cosine >= match_threshold
+                candidate = {
+                    "query_subject": subject,
+                    "region_id": object_meta.get("region_id"),
+                    "class_entity": object_meta.get("class_entity", "Object"),
+                    "bbox": object_meta.get("bbox", []),
+                    "score": round(cosine, 6),
+                    "caption": object_meta.get("description_en", ""),
+                    "matched": matched,
+                }
+                subject_scores.append(
                     {
-                        "query_subject": subject,
-                        "region_id": object_meta.get("region_id"),
-                        "class_entity": object_meta.get("class_entity", "Object"),
-                        "bbox": object_meta.get("bbox", []),
-                        "score": round(cosine, 6),
-                        "caption": object_meta.get("description_en", ""),
+                        "subject": subject,
+                        "cosine": round(cosine, 6),
+                        "matched": matched,
+                        "best_region": candidate["class_entity"],
+                        "best_region_caption": candidate["caption"],
                     }
                 )
+                best_region_candidates.append(candidate)
+                if matched:
+                    matched_boxes.append(candidate)
+                else:
+                    unmatched_subjects.append(subject)
 
             score = float(frame_scores[frame_row])
+            matched_count = len(subject_names) - len(unmatched_subjects)
             result = self._base_result(self.keyframe_metadata[frame_row])
             result.update(
                 {
@@ -316,9 +414,13 @@ class FastVectorSearchEngine:
                     "score_type": "mean_best_region_cosine",
                     "aggregation": "mean(best region cosine per object query)",
                     "subject_scores": subject_scores,
-                    "subjects_matched": f"{len(subject_names)}/{len(subject_names)}",
+                    "match_threshold": match_threshold,
+                    "subjects_matched": f"{matched_count}/{len(subject_names)}",
+                    "coverage_ratio": round(matched_count / len(subject_names), 6),
+                    "unmatched_subjects": unmatched_subjects,
                     "matched_boxes": matched_boxes,
-                    # Compatibility aliases; no coverage or synergy bonus is applied.
+                    "best_region_candidates": best_region_candidates,
+                    # Compatibility aliases; threshold/coverage never alter ranking.
                     "composite_score": round(score, 6),
                     "avg_score": round(score, 6),
                 }

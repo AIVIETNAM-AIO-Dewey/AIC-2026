@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 TaskType = Literal["KIS", "TRAKE", "VQA"]
 
@@ -30,9 +30,14 @@ class TrakeEvent(BaseModel):
 class ParsedQuery(BaseModel):
     """Structured Sub-Queries output from LLM Query Decomposer."""
 
+    model_config = ConfigDict(extra="forbid")
+
     task_type: TaskType = Field(default="KIS", description="Identified task: KIS, TRAKE, or VQA")
     language: str = Field(default="vi", description="Input query language (vi, en, mixed)")
-    original_query: str = Field(description="Raw user query text")
+    original_query: str = Field(
+        default="",
+        description="Raw user query text; optional for manually authored direct JSON",
+    )
     session_id: str = Field(default="", description="Session ID for caching branch search hits")
 
     # 4-Channel Sub-Queries with exact language mapping:

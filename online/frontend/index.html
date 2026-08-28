@@ -19,18 +19,28 @@
       </div>
       
       <div class="task-selector">
-        <span id="task-selector-label">TASK:</span>
+        <span id="task-selector-label">SUBMISSION:</span>
         <div class="task-btn-group" role="group" aria-labelledby="task-selector-label">
           <button class="task-btn active" type="button" data-task="KIS" aria-pressed="true">KIS</button>
+          <button class="task-btn" type="button" data-task="VQA" aria-pressed="false">Q&amp;A</button>
+          <button class="task-btn" type="button" data-task="TRAKE" aria-pressed="false">TRAKE</button>
         </div>
       </div>
     </div>
 
     <div class="header-right">
-      <button id="btn-gemini-toggle" class="toggle-btn active" type="button" title="Toggle Gemini 3.6 Flash / Local Qwen 2.5">
-        <span class="indicator-dot"></span>
-        <span class="btn-text">Gemini 3.6 ON</span>
-      </button>
+      <div class="parser-selector" aria-label="Query parser settings">
+        <label for="select-parser-engine">Parser</label>
+        <select id="select-parser-engine">
+          <option value="gemini" selected>Gemini</option>
+          <option value="qwen">Qwen</option>
+          <option value="direct">Direct · no LLM</option>
+        </select>
+        <label class="parser-fallback-control" title="When disabled, Gemini errors must not invoke local Qwen">
+          <input id="chk-qwen-fallback" type="checkbox" checked>
+          <span>Qwen fallback</span>
+        </label>
+      </div>
 
       <div class="status-pill ready" role="status" aria-live="polite">
         <span class="status-dot"></span>
@@ -39,8 +49,50 @@
     </div>
   </header>
 
-  <!-- MAIN CONTAINER -->
-  <main class="main-container">
+  <nav class="workspace-tabs" aria-label="Retrieval workspaces">
+    <button class="workspace-tab active" type="button" data-workspace="text" aria-selected="true" aria-controls="workspace-text">⌨ Text Search</button>
+    <button class="workspace-tab" type="button" data-workspace="image" aria-selected="false" aria-controls="workspace-image">🖼 Image Search</button>
+    <button class="workspace-tab" type="button" data-workspace="video" aria-selected="false" aria-controls="workspace-video">▶ Watch Video</button>
+    <button id="btn-toggle-submission-rail" class="btn-toggle-submission-rail" type="button" aria-expanded="true" aria-controls="submission-rail">Submission <span id="submission-tab-count">0</span></button>
+  </nav>
+
+  <div class="workbench-shell">
+    <aside id="submission-rail" class="submission-rail" aria-label="Submission workspace">
+      <div class="submission-rail-header">
+        <div>
+          <div class="submission-rail-title">SUBMISSION DRAFT</div>
+          <div id="submission-schema-note" class="submission-schema-note">KIS · video_id, frame_idx · no header · up to 100 rows</div>
+        </div>
+        <span id="submission-count" class="submission-count">0</span>
+      </div>
+      <label class="submission-query-id-label" for="submission-query-id">Query/file ID (filename only)</label>
+      <input id="submission-query-id" class="submission-query-id" type="text" value="1" maxlength="64">
+      <div id="vqa-answer-panel" class="submission-mode-panel hidden">
+        <label for="vqa-answer-input">Human Q&amp;A answer (maximum 100 characters)</label>
+        <textarea id="vqa-answer-input" rows="2" maxlength="100" placeholder="Enter your final answer; the UI never invents one."></textarea>
+      </div>
+      <div id="trake-event-panel" class="submission-mode-panel hidden">
+        <div class="submission-mode-label">Active TRAKE event</div>
+        <div id="trake-event-tabs" class="trake-event-tabs"></div>
+        <div class="submission-mode-hint">Results are assigned to the highlighted event. Ordered sequence cards can add every event together.</div>
+      </div>
+      <div id="submission-list" class="submission-list" aria-live="polite">
+        <div class="submission-empty">Add a frame from any result, inspector, or video player.</div>
+      </div>
+      <div class="submission-summary">
+        <label for="submission-input">Top row / active selection</label>
+        <input type="text" id="submission-input" readonly value="No keyframe selected">
+      </div>
+      <div class="submission-rail-actions">
+        <button id="btn-copy-submission" class="btn-copy" type="button">📋 Copy</button>
+        <button id="btn-export-csv" class="btn-export" type="button">📥 Review CSV</button>
+        <button id="btn-clear-submission" class="btn-text" type="button">Clear draft</button>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTAINER -->
+    <main class="main-container">
+    <div id="workspace-text" class="workspace-panel" data-workspace-panel="text">
     <!-- QUERY CONTROL DECK -->
     <section class="control-deck">
       <div class="deck-header">
@@ -106,6 +158,19 @@
         <div id="modality-query-summary" class="modality-query-summary">
           Run a search to inspect the exact query and score definition for every pool.
         </div>
+        <div class="temporal-event-builder">
+          <div class="temporal-event-builder-header">
+            <label for="temporal-events-editor">⛓ ORDERED SIGLIP EVENTS</label>
+            <span id="temporal-event-count">0 usable events</span>
+          </div>
+          <textarea
+            id="temporal-events-editor"
+            rows="3"
+            spellcheck="false"
+            placeholder="One independently searchable English visual event per line (E1 → E2 → E3). Auto-filled from trake_events when available."
+          ></textarea>
+          <div class="temporal-event-builder-hint">This editor is an explicit fallback when the cloud/local parser cannot create trake_events. Lines are searched independently with SigLIP; their scores are not mixed with DAM, OCR, or ASR.</div>
+        </div>
       </div>
     </section>
 
@@ -113,10 +178,69 @@
     <section class="results-section">
       <div class="results-header">
         <div class="results-title-group">
-          <span class="results-heading">🎯 RAW MODALITY RESULTS</span>
+          <span id="results-heading" class="results-heading">🎯 RAW MODALITY RESULTS</span>
           <span id="results-count-badge" class="count-badge" role="status" aria-live="polite">0 independent results</span>
         </div>
         <div class="results-view-controls">
+          <button
+            id="btn-temporal-intersection"
+            class="btn-temporal-intersection"
+            type="button"
+            disabled
+            title="Intersect ordered SigLIP event searches by video ID and enforce increasing timestamps"
+          >⛓ Find ordered sequence</button>
+          <label class="temporal-gap-control" for="select-temporal-gap">
+            Max event gap:
+            <select id="select-temporal-gap" disabled>
+              <option value="10">10s</option>
+              <option value="30" selected>30s</option>
+              <option value="60">60s</option>
+              <option value="120">120s</option>
+              <option value="300">300s</option>
+            </select>
+          </label>
+          <details class="ordered-advanced-controls">
+            <summary>Advanced</summary>
+            <div class="ordered-advanced-popover">
+              <label for="select-temporal-candidates">Candidates / event
+                <select id="select-temporal-candidates">
+                  <option value="300" selected>300 · current default</option>
+                  <option value="500">500</option>
+                  <option value="1000">1,000</option>
+                </select>
+              </label>
+              <label for="select-temporal-sequences">Sequences requested
+                <select id="select-temporal-sequences">
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100" selected>100 · current default</option>
+                </select>
+              </label>
+              <label for="select-temporal-paths-per-video">Paths per video
+                <select id="select-temporal-paths-per-video">
+                  <option value="1" selected>1 · current default</option>
+                  <option value="3">3</option>
+                  <option value="5">5</option>
+                </select>
+              </label>
+              <label for="select-temporal-reservoir">Sequence reservoir
+                <select id="select-temporal-reservoir">
+                  <option value="same" selected>Same as returned</option>
+                  <option value="100">100</option>
+                  <option value="250">250</option>
+                  <option value="500">500</option>
+                </select>
+              </label>
+              <div class="ordered-advanced-hint">Higher values increase recall and latency. Ranking and no-fusion scoring remain unchanged.</div>
+            </div>
+          </details>
+          <button
+            id="btn-discovery-cascade"
+            class="btn-discovery-cascade"
+            type="button"
+            disabled
+            title="Use each DAM object independently to discover videos, then rank frames with raw SigLIP cosine"
+          >🧭 Discover videos → frames</button>
           <label for="select-top-k">Top Results:</label>
           <select id="select-top-k">
             <option value="10">Top 10</option>
@@ -137,48 +261,136 @@
         </div>
       </div>
     </section>
-  </main>
-
-  <!-- STICKY SUBMISSION BAR -->
-  <footer class="submission-bar">
-    <div class="submission-content">
-      <label class="submission-label" for="submission-input">CURRENT SUBMISSION:</label>
-      <div class="submission-string-container">
-        <input type="text" id="submission-input" readonly value="No keyframe selected">
-      </div>
-      <div class="submission-actions">
-        <button id="btn-copy-submission" class="btn-copy" type="button">
-          <span>📋 Copy #1</span>
-        </button>
-        <button id="btn-export-csv" class="btn-export" type="button">
-          <span>📥 Export 100-Row CSV</span>
-        </button>
-        <button id="btn-clear-submission" class="btn-text" type="button">Clear</button>
-      </div>
     </div>
-  </footer>
 
-  <!-- 100-ROW CSV EXPORT MODAL -->
+    <section id="workspace-image" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="image" aria-labelledby="image-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">SIGLIP IMAGE → IMAGE COSINE</div>
+          <h1 id="image-workspace-title">Search with an image</h1>
+          <p>The uploaded image is embedded with the same SigLIP model as the dataset. DAM, OCR, and ASR are not fused into this ranking.</p>
+        </div>
+        <span class="nofusion-badge">SIGLIP ONLY</span>
+      </div>
+      <div id="image-drop-zone" class="image-drop-zone" tabindex="0" role="button" aria-label="Choose or paste a query image">
+        <input id="image-query-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+        <img id="image-query-preview" class="image-query-preview hidden" alt="Selected query image preview">
+        <div id="image-drop-prompt">
+          <div class="image-drop-icon">🖼</div>
+          <strong>Drop, paste, or choose an image</strong>
+          <span>JPEG, PNG, or WebP</span>
+        </div>
+      </div>
+      <div class="feature-actions">
+        <button id="btn-choose-image" class="btn-secondary" type="button">Choose image</button>
+        <label for="select-image-top-k">Results
+          <select id="select-image-top-k">
+            <option value="20">20</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <button id="btn-run-image-search" class="btn-primary" type="button" disabled>Search image</button>
+        <button id="btn-clear-image" class="btn-text" type="button">Clear</button>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group">
+          <span class="results-heading">🖼 IMAGE QUERY RESULTS</span>
+          <span id="image-results-count" class="count-badge">No image selected</span>
+        </div>
+      </div>
+      <div id="image-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">🖼</div><div class="empty-title">Image Search Ready</div><div class="empty-desc">Choose an unknown visual example to find similar indexed frames.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-video" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="video" aria-labelledby="video-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">INDEPENDENT DATASET BROWSER</div>
+          <h1 id="video-workspace-title">Watch a video by dataset ID</h1>
+          <p>Playback is mapped to the nearest canonical indexed keyframe. The estimated raw frame is informative only and is never submitted.</p>
+        </div>
+      </div>
+      <form id="video-id-form" class="video-id-form">
+        <label for="video-id-input">Dataset video ID</label>
+        <input id="video-id-input" type="text" placeholder="L25_V060" autocomplete="off" spellcheck="false">
+        <button id="btn-load-video-id" class="btn-primary" type="submit">Load video</button>
+      </form>
+      <div id="standalone-video-area" class="standalone-video-area hidden">
+        <div class="standalone-player-column">
+          <div id="standalone-video-mock" class="video-mock standalone-video-mock" aria-label="Dataset video player">
+            <iframe id="standalone-youtube-player" class="youtube-player" title="Dataset YouTube video player" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+            <img id="standalone-video-poster" class="video-poster" alt="Nearest indexed keyframe">
+            <div class="video-vignette"></div>
+            <button id="standalone-btn-video-center-play" class="video-center-play" type="button" aria-label="Play video"><i data-lucide="play"></i></button>
+            <div class="video-controls-shell">
+              <input id="standalone-video-progress" class="video-progress" type="range" min="0" max="1" step="0.1" value="0" aria-label="Video position">
+              <div class="video-control-row">
+                <div class="video-control-group">
+                  <button id="standalone-btn-video-play" class="video-icon-btn" type="button" aria-label="Play"><i data-lucide="play"></i></button>
+                  <button id="standalone-btn-video-back" class="video-icon-btn" type="button" aria-label="Back 5 seconds"><i data-lucide="rotate-ccw"></i></button>
+                  <button id="standalone-btn-video-forward" class="video-icon-btn" type="button" aria-label="Forward 5 seconds"><i data-lucide="rotate-cw"></i></button>
+                  <span id="standalone-video-time" class="video-time">00:00 / --:--</span>
+                </div>
+                <div class="video-control-group">
+                  <button id="standalone-btn-open-youtube" class="video-icon-btn" type="button" aria-label="Open on YouTube" disabled><i data-lucide="external-link"></i></button>
+                  <button id="standalone-btn-video-fullscreen" class="video-icon-btn" type="button" aria-label="Fullscreen"><i data-lucide="maximize"></i></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="video-local-search-bar">
+            <input id="standalone-video-query" type="text" placeholder="Search only inside this video…">
+            <button id="btn-standalone-video-search" class="btn-secondary" type="button">Direct SigLIP search</button>
+          </div>
+        </div>
+        <aside class="playback-map-card">
+          <div id="standalone-video-source" class="mapping-status">Loading metadata</div>
+          <div class="playback-map-row"><span>Playback</span><strong id="watch-playback-time">0.0s</strong></div>
+          <div class="playback-map-row"><span>Estimated raw frame</span><strong id="watch-estimated-frame">—</strong></div>
+          <div class="playback-map-row canonical"><span>Nearest indexed keyframe</span><strong id="watch-keyframe-n">—</strong></div>
+          <div class="playback-map-row"><span>Canonical frame index</span><strong id="watch-frame-idx">—</strong></div>
+          <div class="playback-map-row"><span>Canonical timestamp</span><strong id="watch-keyframe-time">—</strong></div>
+          <div class="playback-map-row"><span>Mapping delta</span><strong id="watch-mapping-delta">—</strong></div>
+          <div class="playback-neighbor-actions">
+            <button id="btn-watch-prev-keyframe" type="button">← Previous</button>
+            <button id="btn-watch-next-keyframe" type="button">Next →</button>
+          </div>
+          <button id="btn-submit-watch-frame" class="btn-submit-toggle" type="button" disabled>+ Add nearest indexed frame</button>
+        </aside>
+      </div>
+      <div id="standalone-video-search-results" class="results-grid feature-results-grid hidden"></div>
+    </section>
+    </main>
+  </div>
+
+  <!-- OFFICIAL BTC CSV EXPORT MODAL -->
   <div id="export-modal" class="modal-backdrop hidden">
     <div class="export-modal-card" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" aria-describedby="export-modal-desc" tabindex="-1">
       <div class="export-modal-header">
-        <div class="export-modal-title" id="export-modal-title">📥 Export 100-Row Submission CSV</div>
+        <div class="export-modal-title" id="export-modal-title">📥 Export Official Submission CSV</div>
         <button id="btn-close-export-modal" class="btn-icon-close" type="button" aria-label="Close export dialog" title="Close">✕</button>
       </div>
       <div class="export-modal-body">
         <p class="export-modal-desc" id="export-modal-desc">
-          Export is enabled only when <strong>100 unique, verified rows</strong> are ready. Row 1 is your selected keyframe; the remaining rows come from canonical neighboring keyframes and retrieved pool results. No frame numbers are fabricated, and download stays disabled until all 100 rows are available.
+          The CSV follows the BTC format: UTF-8, comma-delimited, no header, no query ID column, and 1–100 data rows. Human selections stay first; TRAKE rows each contain one complete same-video event sequence. Only server-generated official CSV bytes can be downloaded.
         </p>
         <div class="export-field-group">
-          <label for="export-query-id">Query ID / Number:</label>
-          <input type="text" id="export-query-id" class="export-input" value="1" placeholder="e.g. 1, 2, Q01...">
+          <label for="export-query-id">Query/file ID (used only as the downloaded filename):</label>
+          <input type="text" id="export-query-id" class="export-input" value="1" placeholder="e.g. query-4-trake">
         </div>
         <div class="export-preview-box">
-          <div class="export-preview-lbl">Row 1 Preview (Your Human Pick):</div>
-          <code id="export-row1-preview" aria-live="polite">L21_V001, 100</code>
+          <div class="export-preview-lbl">CSV Preview:</div>
+          <code id="export-row1-preview" aria-live="polite">No submission rows yet</code>
+          <textarea id="export-csv-preview" rows="10" spellcheck="false" aria-label="Editable CSV rows"></textarea>
+          <div id="export-schema-warning" class="export-schema-warning"></div>
         </div>
       </div>
       <div class="export-modal-footer">
+        <button id="btn-revalidate-csv" class="btn-secondary" type="button" disabled>
+          <span>✓ Revalidate edited rows</span>
+        </button>
         <button id="btn-download-csv-action" class="btn-action-download" type="button">
           <span>⚡ Download CSV (100 Rows)</span>
         </button>
@@ -256,6 +468,19 @@
         <!-- Right: Metadata & Explainability Panel -->
         <div class="inspector-meta-pane">
           <div class="meta-section">
+            <div class="inspector-local-search">
+              <label for="inspector-video-query">SEARCH INSIDE THIS VIDEO</label>
+              <div class="inspector-local-search-row">
+                <input id="inspector-video-query" type="text" placeholder="Describe another moment in this video…">
+                <select id="inspector-parser-engine" aria-label="Inside-video parser">
+                  <option value="direct" selected>Direct SigLIP</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="qwen">Qwen</option>
+                </select>
+                <button id="btn-inspector-video-search" type="button">Search</button>
+              </div>
+              <div id="inspector-local-results" class="inspector-local-results hidden"></div>
+            </div>
             <div class="meta-field">
               <span class="meta-lbl">VIDEO</span>
               <span class="meta-val highlight" id="insp-video-id">-</span>

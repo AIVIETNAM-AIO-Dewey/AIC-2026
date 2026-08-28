@@ -8,47 +8,102 @@
 // ──────────────────────────────────────────────────────────────────────────────
 import { createIcons, ExternalLink, Maximize, Pause, Play, RotateCcw, RotateCw } from "lucide";
 import { createYouTubeVideoView } from "./src/youtube-video-view.ts";
+import {
+  createSubmissionStore,
+  frameIdentity,
+  orderedTrakeFrames,
+  serializeOfficialSubmissionRows,
+  submissionFilename,
+  submissionSchemaDefaults,
+} from "./src/submission-workbench.js";
+import { estimateRawFrame, nearestKeyframe } from "./src/time-keyframe-map.js";
 
 const state = {
   taskType: "KIS",
   queryMode: "auto", // "auto", "edit", "direct"
-  useGemini: true,
+  parserEngine: "gemini",
+  allowQwenFallback: true,
+  activeWorkspace: "text",
+  submissionContexts: {
+    text: "text:empty",
+    image: "image:empty",
+    video: "video:empty",
+  },
   sessionId: null,
   keyframesRoot: "/Users/macbookpro/Downloads/AIC-HCM-BATCH-1/AIC_HCM_BATCH_1/artifacts/keyframes",
   parsedQuery: null,
   modalityResults: {},
+  drilldown: null,
+  discoveryCascade: null,
+  temporalIntersection: null,
   activeModality: "all",
   searchResults: [],
   activeInspectorItem: null,
   activeVideoKeyframes: [],
-  selectedSubmission: "",
-  selectedSubmissionItem: null,
   activeBBoxObjects: [],
   inspectorMediaMode: "keyframe",
+  imageQueryFile: null,
+  imageQueryObjectUrl: null,
+  imageResults: [],
+  inspectorLocalResults: [],
+  exportBackfillByContext: {},
+  watch: {
+    videoId: "",
+    fps: null,
+    keyframes: [],
+    nearest: null,
+    searchResults: [],
+  },
 };
+
+const submissionStore = createSubmissionStore();
 
 const SEARCH_POOL_SIZE = 100;
 const FILMSTRIP_WINDOW_RADIUS = 12;
 let parseAbortController = null;
 let searchAbortController = null;
+let drilldownAbortController = null;
+let cascadeAbortController = null;
+let temporalAbortController = null;
 let inspectorAbortController = null;
 let filmstripAbortController = null;
 let parseRequestId = 0;
 let searchRequestId = 0;
+let drilldownRequestId = 0;
+let cascadeRequestId = 0;
+let temporalRequestId = 0;
 let inspectorRequestId = 0;
 let filmstripRequestId = 0;
 let resultsRenderId = 0;
 let toastTimer = null;
 let lastInspectorFocus = null;
 let lastExportFocus = null;
+let preparedExport = null;
+let exportPrepareRequestId = 0;
+let csvReviewDirty = false;
+let csvReviewGeneration = 0;
+let exportReviewAbortController = null;
+let imageSearchAbortController = null;
+let imageSearchRequestId = 0;
+let watchLoadAbortController = null;
+let watchLoadRequestId = 0;
+let standaloneScopedAbortController = null;
+let standaloneScopedRequestId = 0;
+let inspectorScopedAbortController = null;
+let inspectorScopedRequestId = 0;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // DOM Elements
 // ──────────────────────────────────────────────────────────────────────────────
 const el = {
   taskBtns: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".task-btn")),
-  geminiToggle: document.getElementById("btn-gemini-toggle"),
-  geminiText: document.querySelector("#btn-gemini-toggle .btn-text"),
+  parserEngine: /** @type {HTMLSelectElement} */ (document.getElementById("select-parser-engine")),
+  qwenFallback: /** @type {HTMLInputElement} */ (document.getElementById("chk-qwen-fallback")),
+  workspaceTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".workspace-tab")),
+  workspacePanels: /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("[data-workspace-panel]")),
+  btnToggleSubmissionRail: document.getElementById("btn-toggle-submission-rail"),
+  submissionRail: document.getElementById("submission-rail"),
+  submissionTabCount: document.getElementById("submission-tab-count"),
   modeTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".mode-tab")),
   
   colOriginalQuery: document.getElementById("col-original-query"),
@@ -65,15 +120,33 @@ const el = {
   sessionBadge: document.getElementById("session-badge"),
   statusPill: document.querySelector(".status-pill"),
   serverStatusText: document.getElementById("server-status-text"),
+  resultsHeading: document.getElementById("results-heading"),
   resultsGrid: document.getElementById("results-grid"),
   resultsCount: document.getElementById("results-count-badge"),
   selectTopK: /** @type {HTMLSelectElement} */ (document.getElementById("select-top-k")),
+  btnDiscoveryCascade: /** @type {HTMLButtonElement} */ (document.getElementById("btn-discovery-cascade")),
+  btnTemporalIntersection: /** @type {HTMLButtonElement} */ (document.getElementById("btn-temporal-intersection")),
+  selectTemporalGap: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-gap")),
+  selectTemporalCandidates: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-candidates")),
+  selectTemporalSequences: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-sequences")),
+  selectTemporalPathsPerVideo: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-paths-per-video")),
+  selectTemporalReservoir: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-reservoir")),
   
   modalityTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".modality-tab")),
   modalityQuerySummary: document.getElementById("modality-query-summary"),
+  temporalEventsEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("temporal-events-editor")),
+  temporalEventCount: document.getElementById("temporal-event-count"),
   
   // Submission & Export
   submissionInput: /** @type {HTMLInputElement} */ (document.getElementById("submission-input")),
+  submissionList: document.getElementById("submission-list"),
+  submissionCount: document.getElementById("submission-count"),
+  submissionSchemaNote: document.getElementById("submission-schema-note"),
+  submissionQueryId: /** @type {HTMLInputElement} */ (document.getElementById("submission-query-id")),
+  vqaAnswerPanel: document.getElementById("vqa-answer-panel"),
+  vqaAnswerInput: /** @type {HTMLTextAreaElement} */ (document.getElementById("vqa-answer-input")),
+  trakeEventPanel: document.getElementById("trake-event-panel"),
+  trakeEventTabs: document.getElementById("trake-event-tabs"),
   btnCopySubmission: document.getElementById("btn-copy-submission"),
   btnExportCsv: document.getElementById("btn-export-csv"),
   btnClearSubmission: document.getElementById("btn-clear-submission"),
@@ -86,6 +159,39 @@ const el = {
   btnDownloadCsvAction: /** @type {HTMLButtonElement} */ (document.getElementById("btn-download-csv-action")),
   exportQueryId: /** @type {HTMLInputElement} */ (document.getElementById("export-query-id")),
   exportRow1Preview: document.getElementById("export-row1-preview"),
+  exportCsvPreview: /** @type {HTMLTextAreaElement} */ (document.getElementById("export-csv-preview")),
+  exportSchemaWarning: document.getElementById("export-schema-warning"),
+  btnRevalidateCsv: /** @type {HTMLButtonElement} */ (document.getElementById("btn-revalidate-csv")),
+
+  // Image Search Workspace
+  imageDropZone: document.getElementById("image-drop-zone"),
+  imageQueryFile: /** @type {HTMLInputElement} */ (document.getElementById("image-query-file")),
+  imageQueryPreview: /** @type {HTMLImageElement} */ (document.getElementById("image-query-preview")),
+  imageDropPrompt: document.getElementById("image-drop-prompt"),
+  btnChooseImage: document.getElementById("btn-choose-image"),
+  btnRunImageSearch: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-image-search")),
+  btnClearImage: document.getElementById("btn-clear-image"),
+  selectImageTopK: /** @type {HTMLSelectElement} */ (document.getElementById("select-image-top-k")),
+  imageResultsCount: document.getElementById("image-results-count"),
+  imageResultsGrid: document.getElementById("image-results-grid"),
+
+  // Standalone Video Workspace
+  videoIdForm: /** @type {HTMLFormElement} */ (document.getElementById("video-id-form")),
+  videoIdInput: /** @type {HTMLInputElement} */ (document.getElementById("video-id-input")),
+  standaloneVideoArea: document.getElementById("standalone-video-area"),
+  standaloneVideoSource: document.getElementById("standalone-video-source"),
+  watchPlaybackTime: document.getElementById("watch-playback-time"),
+  watchEstimatedFrame: document.getElementById("watch-estimated-frame"),
+  watchKeyframeN: document.getElementById("watch-keyframe-n"),
+  watchFrameIdx: document.getElementById("watch-frame-idx"),
+  watchKeyframeTime: document.getElementById("watch-keyframe-time"),
+  watchMappingDelta: document.getElementById("watch-mapping-delta"),
+  btnWatchPrevKeyframe: /** @type {HTMLButtonElement} */ (document.getElementById("btn-watch-prev-keyframe")),
+  btnWatchNextKeyframe: /** @type {HTMLButtonElement} */ (document.getElementById("btn-watch-next-keyframe")),
+  btnSubmitWatchFrame: /** @type {HTMLButtonElement} */ (document.getElementById("btn-submit-watch-frame")),
+  standaloneVideoQuery: /** @type {HTMLInputElement} */ (document.getElementById("standalone-video-query")),
+  btnStandaloneVideoSearch: /** @type {HTMLButtonElement} */ (document.getElementById("btn-standalone-video-search")),
+  standaloneVideoSearchResults: document.getElementById("standalone-video-search-results"),
   
   // Inspector Modal
   modal: document.getElementById("inspector-modal"),
@@ -115,6 +221,10 @@ const el = {
   
   btnToggleInSubmission: document.getElementById("btn-toggle-in-submission"),
   btnCloseInspector: document.getElementById("btn-close-inspector"),
+  inspectorVideoQuery: /** @type {HTMLInputElement} */ (document.getElementById("inspector-video-query")),
+  inspectorParserEngine: /** @type {HTMLSelectElement} */ (document.getElementById("inspector-parser-engine")),
+  btnInspectorVideoSearch: /** @type {HTMLButtonElement} */ (document.getElementById("btn-inspector-video-search")),
+  inspectorLocalResults: document.getElementById("inspector-local-results"),
   
   filmstripScroll: document.getElementById("filmstrip-scroll"),
   filmstripCount: document.getElementById("filmstrip-count"),
@@ -152,8 +262,33 @@ const videoController = createYouTubeVideoView({
   refreshIcons: refreshVideoIcons,
 });
 
+const standaloneVideoController = createYouTubeVideoView({
+  elementPrefix: "standalone",
+  onSourceChange: (label) => {
+    el.standaloneVideoSource.textContent = label;
+  },
+  onStatusChange: (label, status = "pending") => {
+    el.standaloneVideoSource.textContent = label;
+    el.standaloneVideoSource.classList.toggle("ready", status === "ready");
+    el.standaloneVideoSource.classList.toggle("error", status === "error");
+  },
+  onTimeChange: updateWatchMapping,
+  onToast: showToast,
+  refreshIcons: refreshVideoIcons,
+});
+
 async function initApp() {
   bindEvents();
+  const initialSubmission = submissionStore.getSnapshot();
+  state.taskType = initialSubmission.mode;
+  submissionStore.subscribe(renderSubmissionRail);
+  renderSubmissionRail(initialSubmission);
+  setWorkspace("text");
+  if (window.matchMedia?.("(max-width: 1100px)").matches) {
+    el.submissionRail.classList.add("collapsed");
+    el.submissionRail.closest(".workbench-shell")?.classList.add("submission-collapsed");
+    el.btnToggleSubmissionRail.setAttribute("aria-expanded", "false");
+  }
   setInspectorMediaMode("keyframe");
   refreshVideoIcons();
   await loadServerConfig();
@@ -187,6 +322,24 @@ function setServerStatus(label, status = "ready") {
   el.statusPill.classList.toggle("pending", status === "pending");
 }
 
+async function responseError(response, prefix) {
+  let detail = "";
+  try {
+    const payload = await response.json();
+    if (Array.isArray(payload?.detail)) {
+      detail = payload.detail.map((issue) => {
+        const path = Array.isArray(issue.loc) ? issue.loc.slice(1).join(".") : "request";
+        return `${path || "request"}: ${issue.msg || "invalid value"}`;
+      }).join("; ");
+    } else if (typeof payload?.detail === "string") {
+      detail = payload.detail;
+    }
+  } catch (_) {
+    // The HTTP status remains useful when a proxy returns a non-JSON error body.
+  }
+  return new Error(`${prefix} (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Event Listeners
 // ──────────────────────────────────────────────────────────────────────────────
@@ -194,18 +347,25 @@ function bindEvents() {
   // Task selector
   el.taskBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
-      el.taskBtns.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.taskType = btn.dataset.task;
-      syncJsonEditorWithState();
+      submissionStore.setMode(btn.dataset.task);
     });
   });
 
-  // Gemini toggle
-  el.geminiToggle.addEventListener("click", () => {
-    state.useGemini = !state.useGemini;
-    el.geminiToggle.classList.toggle("active", state.useGemini);
-    el.geminiText.textContent = state.useGemini ? "Gemini 3.6 ON" : "Local Qwen 2.5";
+  el.parserEngine.addEventListener("change", () => {
+    state.parserEngine = el.parserEngine.value;
+    el.qwenFallback.disabled = state.parserEngine !== "gemini";
+  });
+  el.qwenFallback.addEventListener("change", () => {
+    state.allowQwenFallback = el.qwenFallback.checked;
+  });
+
+  el.workspaceTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setWorkspace(tab.dataset.workspace));
+  });
+  el.btnToggleSubmissionRail.addEventListener("click", () => {
+    const collapsed = el.submissionRail.classList.toggle("collapsed");
+    el.submissionRail.closest(".workbench-shell")?.classList.toggle("submission-collapsed", collapsed);
+    el.btnToggleSubmissionRail.setAttribute("aria-expanded", String(!collapsed));
   });
 
   // Query mode tabs
@@ -222,6 +382,12 @@ function bindEvents() {
   el.btnRunQuery.addEventListener("click", handleRunQueryClick);
   el.btnExecuteJson.addEventListener("click", () => void handleExecuteJsonClick());
   el.btnFormatJson.addEventListener("click", formatJsonEditor);
+  el.btnDiscoveryCascade.addEventListener("click", () => void runDiscoveryCascade());
+  el.btnTemporalIntersection.addEventListener("click", () => void runTemporalIntersection());
+  el.temporalEventsEditor.addEventListener("input", () => {
+    updateTemporalButtonState();
+    syncSubmissionEventsFromQuery(true);
+  });
 
   // Keyboard shortcut Ctrl+Enter / Cmd+Enter on textareas
   el.inputQuery.addEventListener("keydown", (e) => {
@@ -253,6 +419,17 @@ function bindEvents() {
   if (el.btnCloseExportModal) el.btnCloseExportModal.addEventListener("click", closeExportModal);
   if (el.btnCancelExportModal) el.btnCancelExportModal.addEventListener("click", closeExportModal);
   if (el.btnDownloadCsvAction) el.btnDownloadCsvAction.addEventListener("click", executeDownload100Csv);
+  el.btnRevalidateCsv.addEventListener("click", () => void revalidateEditedCsv());
+  el.exportCsvPreview.addEventListener("input", () => {
+    csvReviewGeneration += 1;
+    exportReviewAbortController?.abort();
+    exportReviewAbortController = null;
+    csvReviewDirty = true;
+    preparedExport = null;
+    el.btnDownloadCsvAction.disabled = true;
+    el.btnRevalidateCsv.disabled = false;
+    el.exportSchemaWarning.textContent = "Edited rows are not validated. Revalidate before download.";
+  });
   if (el.exportQueryId) el.exportQueryId.addEventListener("input", updateExportPreview);
   if (el.exportModal) {
     el.exportModal.addEventListener("click", (event) => {
@@ -261,7 +438,69 @@ function bindEvents() {
   }
 
   el.btnClearSubmission.addEventListener("click", () => {
-    clearSubmissionSelection();
+    submissionStore.clear();
+    showToast(`Cleared the ${state.taskType} draft.`, "success");
+  });
+  el.submissionQueryId.addEventListener("input", () => submissionStore.setQueryId(el.submissionQueryId.value));
+  el.vqaAnswerInput.addEventListener("input", () => {
+    const result = submissionStore.setAnswer(el.vqaAnswerInput.value);
+    const message = result.ok ? "" : "Q&A answers cannot exceed 100 characters.";
+    el.vqaAnswerInput.setCustomValidity(message);
+    if (message) showToast(message, "error");
+  });
+
+  // Image-query workspace
+  el.btnChooseImage.addEventListener("click", () => el.imageQueryFile.click());
+  el.imageDropZone.addEventListener("click", () => el.imageQueryFile.click());
+  el.imageDropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      el.imageQueryFile.click();
+    }
+  });
+  el.imageQueryFile.addEventListener("change", () => selectImageQueryFile(el.imageQueryFile.files?.[0] || null));
+  el.imageDropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    el.imageDropZone.classList.add("dragging");
+  });
+  el.imageDropZone.addEventListener("dragleave", () => el.imageDropZone.classList.remove("dragging"));
+  el.imageDropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    el.imageDropZone.classList.remove("dragging");
+    selectImageQueryFile(event.dataTransfer?.files?.[0] || null);
+  });
+  el.imageDropZone.addEventListener("paste", (event) => {
+    const file = [...(event.clipboardData?.files || [])].find((candidate) => candidate.type.startsWith("image/"));
+    if (file) {
+      event.preventDefault();
+      selectImageQueryFile(file);
+    }
+  });
+  el.btnRunImageSearch.addEventListener("click", () => void runImageSearch());
+  el.btnClearImage.addEventListener("click", clearImageQuery);
+
+  // Standalone video browser
+  el.videoIdForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void loadStandaloneVideo(el.videoIdInput.value);
+  });
+  el.btnWatchPrevKeyframe.addEventListener("click", (event) => {
+    event.preventDefault();
+    seekWatchNeighbor(-1);
+  });
+  el.btnWatchNextKeyframe.addEventListener("click", (event) => {
+    event.preventDefault();
+    seekWatchNeighbor(1);
+  });
+  el.btnSubmitWatchFrame.addEventListener("click", () => {
+    if (state.watch.nearest?.frame) addFrameToSubmission(state.watch.nearest.frame, { source: "video-player" });
+  });
+  el.btnStandaloneVideoSearch.addEventListener("click", () => void runStandaloneVideoSearch());
+  el.standaloneVideoQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runStandaloneVideoSearch();
+    }
   });
 
   // Inspector modal
@@ -269,6 +508,13 @@ function bindEvents() {
   el.btnViewKeyframe.addEventListener("click", () => setInspectorMediaMode("keyframe"));
   el.btnViewVideo.addEventListener("click", () => setInspectorMediaMode("video"));
   el.btnToggleInSubmission.addEventListener("click", toggleCurrentInSubmission);
+  el.btnInspectorVideoSearch.addEventListener("click", () => void runInspectorVideoSearch());
+  el.inspectorVideoQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runInspectorVideoSearch();
+    }
+  });
   el.chkBBoxes.addEventListener("change", drawBBoxesOnCanvas);
   el.modal.addEventListener("click", (event) => {
     if (event.target === el.modal) closeInspector();
@@ -346,17 +592,331 @@ function isInteractiveTarget(target) {
 }
 
 function clearSubmissionSelection() {
-  state.selectedSubmission = "";
-  state.selectedSubmissionItem = null;
-  el.submissionInput.value = "No keyframe selected";
+  // Submission drafts intentionally survive searches and workspace switches.
   updateInspectorSubmitBtn();
+}
+
+function setWorkspace(workspace) {
+  if (!new Set(["text", "image", "video"]).has(workspace)) return;
+  state.activeWorkspace = workspace;
+  submissionStore.setContext(state.submissionContexts[workspace]);
+  el.workspaceTabs.forEach((tab) => {
+    const active = tab.dataset.workspace === workspace;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  el.workspacePanels.forEach((panel) => panel.classList.toggle("hidden", panel.dataset.workspacePanel !== workspace));
+  if (workspace !== "video") standaloneVideoController.deactivate();
+  else if (state.watch.nearest?.frame) void standaloneVideoController.activate().catch(() => undefined);
+}
+
+function contextHash(value) {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function setSubmissionContext(workspace, identity) {
+  const contextKey = `${workspace}:${contextHash(identity)}`;
+  state.submissionContexts[workspace] = contextKey;
+  if (state.activeWorkspace === workspace) submissionStore.setContext(contextKey);
+}
+
+function currentSubmissionDraft(snapshot = submissionStore.getSnapshot()) {
+  return snapshot.drafts[snapshot.mode];
+}
+
+function submissionItemCount(snapshot = submissionStore.getSnapshot()) {
+  const draft = currentSubmissionDraft(snapshot);
+  return snapshot.mode === "TRAKE"
+    ? Object.keys(draft.eventSlots || {}).length
+    : (draft.items || []).length;
+}
+
+function syncSubmissionEventsFromQuery(editorOnly = false) {
+  const sourceEvents = editorOnly
+    ? String(el.temporalEventsEditor.value || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim().replace(/^E\d+\s*[:.)-]\s*/i, ""))
+      .filter(Boolean)
+      .slice(0, 6)
+      .map((line, index) => ({ order: index + 1, description: line, global_scene_en: line }))
+    : (Array.isArray(state.parsedQuery?.trake_events) ? state.parsedQuery.trake_events : []);
+  const events = sourceEvents.map((event, index) => ({
+    order: Number(event.order) || index + 1,
+    label: event.description || event.scene_en || event.global_scene_en || `Event ${index + 1}`,
+  }));
+  submissionStore.setTrakeEvents(events);
+}
+
+function renderSubmissionRail(snapshot) {
+  state.taskType = snapshot.mode;
+  const draft = currentSubmissionDraft(snapshot);
+  const count = submissionItemCount(snapshot);
+  el.taskBtns.forEach((button) => {
+    const active = button.dataset.task === snapshot.mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  el.submissionCount.textContent = String(count);
+  el.submissionTabCount.textContent = String(count);
+  el.submissionSchemaNote.textContent = submissionSchemaDefaults[snapshot.mode];
+  el.submissionQueryId.value = draft.queryId || "1";
+  el.exportQueryId.value = draft.queryId || "1";
+  el.vqaAnswerPanel.classList.toggle("hidden", snapshot.mode !== "VQA");
+  el.trakeEventPanel.classList.toggle("hidden", snapshot.mode !== "TRAKE");
+  if (snapshot.mode === "VQA") el.vqaAnswerInput.value = draft.answer || "";
+
+  renderTrakeEventTabs(snapshot.drafts.TRAKE);
+  el.submissionList.replaceChildren();
+  if (snapshot.mode === "TRAKE") renderTrakeSubmissionItems(draft);
+  else renderFrameSubmissionItems(draft.items || []);
+
+  if (!el.submissionList.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "submission-empty";
+    empty.textContent = snapshot.mode === "TRAKE"
+      ? "Choose an active event, then add a frame or an ordered sequence."
+      : "Add a frame from any result, inspector, or video player.";
+    el.submissionList.appendChild(empty);
+  }
+
+  const top = snapshot.mode === "TRAKE"
+    ? orderedTrakeFrames(draft)[0]?.item
+    : draft.items?.[0];
+  el.submissionInput.value = top ? `${top.video_id}, ${top.frame_idx}` : "No keyframe selected";
+  updateInspectorSubmitBtn();
+  updateWatchSubmitButton();
+}
+
+function renderTrakeEventTabs(draft) {
+  el.trakeEventTabs.replaceChildren();
+  const events = draft.events?.length
+    ? draft.events
+    : Array.from({ length: Math.max(1, Object.keys(draft.eventSlots || {}).length) }, (_, index) => ({
+      order: index + 1,
+      label: `Event ${index + 1}`,
+    }));
+  events.forEach((event) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "trake-event-tab";
+    button.classList.toggle("active", draft.activeEvent === event.order);
+    button.classList.toggle("filled", Boolean(draft.eventSlots?.[String(event.order)]));
+    button.textContent = `E${event.order}`;
+    button.title = event.label;
+    button.addEventListener("click", () => submissionStore.setActiveEvent(event.order));
+    el.trakeEventTabs.appendChild(button);
+  });
+}
+
+function renderFrameSubmissionItems(items) {
+  items.forEach((item, index) => {
+    const identity = frameIdentity(item);
+    const row = createSubmissionRow(item, {
+      index,
+      identity,
+      label: `#${index + 1}`,
+      onRemove: () => submissionStore.removeFrame(identity),
+      onMove: (direction) => submissionStore.reorderFrame(index, index + direction),
+      onEdit: (patch) => void updateAndValidateSubmissionFrame(identity, patch),
+    });
+    row.draggable = true;
+    row.addEventListener("dragstart", (event) => event.dataTransfer?.setData("text/plain", String(index)));
+    row.addEventListener("dragover", (event) => event.preventDefault());
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const from = Number.parseInt(event.dataTransfer?.getData("text/plain") || "", 10);
+      submissionStore.reorderFrame(from, index);
+    });
+    el.submissionList.appendChild(row);
+  });
+}
+
+function renderTrakeSubmissionItems(draft) {
+  const eventMap = new Map((draft.events || []).map((event) => [event.order, event]));
+  const orders = new Set([
+    ...(draft.events || []).map((event) => event.order),
+    ...Object.keys(draft.eventSlots || {}).map(Number),
+  ]);
+  [...orders].sort((a, b) => a - b).forEach((order) => {
+    const item = draft.eventSlots?.[String(order)];
+    if (!item) {
+      const empty = document.createElement("button");
+      empty.type = "button";
+      empty.className = "submission-event-empty";
+      empty.innerHTML = `<strong>E${order}</strong><span>${escapeHtml(eventMap.get(order)?.label || "Awaiting frame")}</span>`;
+      empty.addEventListener("click", () => submissionStore.setActiveEvent(order));
+      el.submissionList.appendChild(empty);
+      return;
+    }
+    el.submissionList.appendChild(createSubmissionRow(item, {
+      identity: String(order),
+      label: `E${order}`,
+      onRemove: () => submissionStore.removeFrame(order),
+      onMove: null,
+      onEdit: (patch) => void updateAndValidateSubmissionFrame(String(order), patch),
+    }));
+  });
+}
+
+function createSubmissionRow(item, options) {
+  const row = document.createElement("article");
+  row.className = "submission-item";
+  row.dataset.identity = options.identity;
+  const validationLabel = item.validation === "canonical" ? "canonical" : "not server-verified";
+  row.innerHTML = `
+    <div class="submission-item-head">
+      <span class="submission-item-order">${escapeHtml(options.label)}</span>
+      <span class="submission-item-source">${escapeHtml(item.source || "manual")}</span>
+      <button type="button" class="submission-remove" aria-label="Remove frame">×</button>
+    </div>
+    <div class="submission-item-edit">
+      <input class="submission-video-edit" value="${escapeHtml(item.video_id)}" aria-label="Video ID">
+      <input class="submission-frame-edit" type="number" min="0" step="1" value="${item.frame_idx}" aria-label="Frame index">
+    </div>
+    <div class="submission-item-meta">KF ${item.keyframe_n ?? "?"} · ${item.pts_time_s === null ? "?" : `${Number(item.pts_time_s).toFixed(1)}s`} · ${escapeHtml(validationLabel)}</div>
+    ${options.onMove ? `<div class="submission-reorder"><button type="button" data-move="-1" aria-label="Move up">↑</button><button type="button" data-move="1" aria-label="Move down">↓</button><span>drag to reorder</span></div>` : ""}`;
+  row.querySelector(".submission-remove").addEventListener("click", options.onRemove);
+  row.querySelectorAll("[data-move]").forEach((button) => button.addEventListener("click", () => options.onMove(Number(/** @type {HTMLElement} */ (button).dataset.move))));
+  const videoInput = /** @type {HTMLInputElement} */ (row.querySelector(".submission-video-edit"));
+  const frameInput = /** @type {HTMLInputElement} */ (row.querySelector(".submission-frame-edit"));
+  const saveEdit = () => options.onEdit({ video_id: videoInput.value, frame_idx: Number(frameInput.value), validation: "unverified" });
+  videoInput.addEventListener("change", saveEdit);
+  frameInput.addEventListener("change", saveEdit);
+  return row;
+}
+
+async function updateAndValidateSubmissionFrame(identityOrOrder, patch) {
+  const editSnapshot = submissionStore.getSnapshot();
+  const editContext = editSnapshot.contextKey;
+  const editMode = editSnapshot.mode;
+  const editedFrameIdentity = frameIdentity(patch);
+  const updated = submissionStore.updateFrame(identityOrOrder, patch);
+  if (!updated) {
+    showToast("That edit is invalid or duplicates an existing draft frame.", "error");
+    renderSubmissionRail(submissionStore.getSnapshot());
+    return;
+  }
+  try {
+    const timeline = await fetchVideoTimeline(patch.video_id);
+    const canonical = timeline.keyframes.find((frame) => Number(frame.frame_idx) === Number(patch.frame_idx));
+    if (!canonical) {
+      showToast("Frame index is not present in that video's canonical keyframe map.", "error");
+      return;
+    }
+    const currentSnapshot = submissionStore.getSnapshot();
+    if (currentSnapshot.contextKey !== editContext || currentSnapshot.mode !== editMode) return;
+    const currentDraft = currentSubmissionDraft(currentSnapshot);
+    const currentItem = currentSnapshot.mode === "TRAKE"
+      ? currentDraft.eventSlots?.[String(identityOrOrder)]
+      : currentDraft.items?.find((item) => frameIdentity(item) === editedFrameIdentity);
+    if (!currentItem || frameIdentity(currentItem) !== editedFrameIdentity) return;
+    const currentIdentity = currentSnapshot.mode === "TRAKE" ? identityOrOrder : editedFrameIdentity;
+    submissionStore.updateFrame(currentIdentity, { ...canonical, validation: "canonical" });
+    showToast("Manual edit matched a canonical indexed keyframe.", "success");
+  } catch (error) {
+    showToast(`Could not verify that edit: ${error.message}`, "error");
+  }
+}
+
+function addFrameToSubmission(item, context = {}) {
+  const eventOrder = context.eventOrder || item?.event_order || null;
+  const result = submissionStore.addFrame(item, {
+    source: context.source || item?.retrieval_modality || "result",
+    eventOrder,
+    validation: item?.validation || "canonical",
+  });
+  if (!result.ok) {
+    showToast("This result does not contain a valid canonical frame reference.", "error");
+    return;
+  }
+  const suffix = state.taskType === "TRAKE" ? ` to E${result.eventOrder}` : "";
+  showToast(`Added ${result.frame.video_id}, ${result.frame.frame_idx}${suffix}.`, "success");
 }
 
 function setSearchBusy(isBusy) {
   el.btnRunQuery.disabled = isBusy;
   el.btnExecuteJson.disabled = isBusy;
   el.selectTopK.disabled = isBusy;
+  el.modalityTabs.forEach((tab) => {
+    tab.disabled = isBusy
+      || Boolean(state.drilldown)
+      || Boolean(state.discoveryCascade)
+      || Boolean(state.temporalIntersection);
+  });
+  updateDiscoveryButtonState(isBusy);
+  updateTemporalButtonState(isBusy);
   el.btnRunQuery.setAttribute("aria-busy", String(isBusy));
+}
+
+function updateDiscoveryButtonState(isBusy = false) {
+  const hasVisualQuery = Boolean(String(state.parsedQuery?.global_scene_en || "").trim());
+  const hasObjectQuery = Array.isArray(state.parsedQuery?.objects_en)
+    && state.parsedQuery.objects_en.some((query) => String(query || "").trim());
+  const hasRawPools = Object.keys(state.modalityResults).length > 0;
+  el.btnDiscoveryCascade.disabled = isBusy
+    || !hasVisualQuery
+    || !hasObjectQuery
+    || !hasRawPools
+    || Boolean(state.drilldown)
+    || Boolean(state.discoveryCascade)
+    || Boolean(state.temporalIntersection);
+}
+
+function getUsableTemporalEvents() {
+  const editorLines = String(el.temporalEventsEditor?.value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^E\d+\s*[:.)-]\s*/i, ""))
+    .filter(Boolean)
+    .slice(0, 6);
+  if (editorLines.length > 0) {
+    return editorLines.map((query, index) => ({
+      order: index + 1,
+      description: query,
+      global_scene_en: query,
+    }));
+  }
+  if (!Array.isArray(state.parsedQuery?.trake_events)) return [];
+  return state.parsedQuery.trake_events
+    .map((event, index) => ({
+      order: Number(event?.order) || index + 1,
+      description: String(event?.description || `Event ${Number(event?.order) || index + 1}`).trim(),
+      global_scene_en: String(event?.scene_en || "").trim(),
+    }))
+    .filter((event) => event.global_scene_en)
+    .sort((left, right) => left.order - right.order);
+}
+
+function syncTemporalEventsEditorFromParsedQuery() {
+  const events = Array.isArray(state.parsedQuery?.trake_events)
+    ? state.parsedQuery.trake_events
+      .map((event) => String(event?.scene_en || "").trim())
+      .filter(Boolean)
+      .slice(0, 6)
+    : [];
+  el.temporalEventsEditor.value = events.join("\n");
+  updateTemporalButtonState();
+  syncSubmissionEventsFromQuery();
+}
+
+function updateTemporalButtonState(isBusy = false) {
+  const events = getUsableTemporalEvents();
+  const hasRawPools = Object.keys(state.modalityResults).length > 0;
+  const blockedByDerivedView = Boolean(
+    state.drilldown || state.discoveryCascade || state.temporalIntersection,
+  );
+  el.btnTemporalIntersection.disabled = isBusy
+    || events.length < 2
+    || !hasRawPools
+    || blockedByDerivedView;
+  el.selectTemporalGap.disabled = isBusy || events.length < 2 || blockedByDerivedView;
+  el.temporalEventsEditor.disabled = isBusy || blockedByDerivedView;
+  el.temporalEventCount.textContent = `${events.length} usable event${events.length === 1 ? "" : "s"}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -396,6 +956,7 @@ function updateQueryModeUI() {
 const MODALITY_ORDER = ["siglip", "dam", "ocr", "asr"];
 
 function setActiveModality(modality) {
+  if (state.drilldown || state.discoveryCascade || state.temporalIntersection) return;
   if (modality !== "all" && !MODALITY_ORDER.includes(modality)) return;
   state.activeModality = modality;
   el.modalityTabs.forEach((tab) => {
@@ -411,21 +972,56 @@ function formatPoolQuery(pool) {
   return Array.isArray(pool.query) ? pool.query.join(" · ") : String(pool.query || "");
 }
 
+function formatPoolDiagnostics(pool) {
+  const diagnostics = pool?.query_diagnostics;
+  if (!diagnostics) return "";
+  const tokenSummary = `${diagnostics.token_count}/${diagnostics.max_tokens} SigLIP tokens`;
+  if (!diagnostics.truncated) return tokenSummary;
+  return `⚠ ${tokenSummary}; effective query: ${diagnostics.effective_query || ""}`;
+}
+
 function updateModalityQuerySummary() {
-  if (!Object.keys(state.modalityResults).length) return;
+  if (state.temporalIntersection) {
+    const data = state.temporalIntersection.data;
+    const eventQueries = (data.event_pools || [])
+      .map((event) => `E${event.order}: <code>${escapeHtml(event.query || "")}</code>`)
+      .join("<br>");
+    el.modalityQuerySummary.innerHTML = `<strong>Ordered SigLIP intersection</strong> · each event is searched independently, video IDs are intersected, and timestamps must increase.<br>Cross-modal fusion: <strong>OFF</strong> · sequence score: <strong>(shared-scene anchor cosine + weakest event cosine) / 2</strong>; event mean is the next tie-break.<br>${eventQueries}`;
+    return;
+  }
+  if (state.discoveryCascade) {
+    const discovery = state.discoveryCascade.data;
+    el.modalityQuerySummary.innerHTML = `<strong>Explicit DAM → SigLIP discovery cascade</strong> · DAM searches each <code>objects_en</code> entry independently and only selects video scope.<br>Final frame rank is raw <code>global_scene_en</code> SigLIP cosine. DAM score is not added; cross-modal gating is applied and displayed.`;
+    if (discovery.siglip_query_diagnostics?.truncated) {
+      el.modalityQuerySummary.innerHTML += `<br>⚠ Effective SigLIP query: ${escapeHtml(discovery.siglip_query_diagnostics.effective_query || "")}`;
+    }
+    return;
+  }
+  if (state.drilldown) {
+    const pool = state.drilldown.pool;
+    const diagnostics = formatPoolDiagnostics(pool);
+    el.modalityQuerySummary.innerHTML = `<strong>${escapeHtml(pool.display_name)}</strong> · manual video scope · query source <code>global_scene_en</code> · query <code>${escapeHtml(formatPoolQuery(pool))}</code><br>${escapeHtml(pool.score_description)}${diagnostics ? `<br>${escapeHtml(diagnostics)}` : ""}`;
+    return;
+  }
+  if (!Object.keys(state.modalityResults).length) {
+    el.modalityQuerySummary.textContent = "Each modality uses only its own parsed subquery and raw score.";
+    return;
+  }
   if (state.activeModality === "all") {
     el.modalityQuerySummary.innerHTML = MODALITY_ORDER.map((modality) => {
       const pool = state.modalityResults[modality];
       if (!pool) return "";
       const query = pool.status === "ok" ? formatPoolQuery(pool) : pool.reason;
-      return `<strong>${escapeHtml(pool.display_name)}</strong>: <code>${escapeHtml(query)}</code> · ${escapeHtml(pool.score_type)}`;
+      const diagnostics = formatPoolDiagnostics(pool);
+      return `<strong>${escapeHtml(pool.display_name)}</strong>: <code>${escapeHtml(query)}</code> · ${escapeHtml(pool.score_type)}${diagnostics ? ` · ${escapeHtml(diagnostics)}` : ""}`;
     }).filter(Boolean).join("<br>");
     return;
   }
   const pool = state.modalityResults[state.activeModality];
   if (!pool) return;
   const query = pool.status === "ok" ? formatPoolQuery(pool) : pool.reason;
-  el.modalityQuerySummary.innerHTML = `<strong>${escapeHtml(pool.display_name)}</strong> · query source <code>${escapeHtml(pool.query_source)}</code> · query <code>${escapeHtml(query)}</code><br>${escapeHtml(pool.score_description)}`;
+  const diagnostics = formatPoolDiagnostics(pool);
+  el.modalityQuerySummary.innerHTML = `<strong>${escapeHtml(pool.display_name)}</strong> · query source <code>${escapeHtml(pool.query_source)}</code> · query <code>${escapeHtml(query)}</code><br>${escapeHtml(pool.score_description)}${diagnostics ? `<br>${escapeHtml(diagnostics)}` : ""}`;
 }
 
 function formatJsonEditor() {
@@ -440,9 +1036,96 @@ function formatJsonEditor() {
 function syncJsonEditorWithState() {
   try {
     const data = JSON.parse(el.jsonEditor.value);
-    data.task_type = state.taskType;
+    data.task_type = "KIS";
     el.jsonEditor.value = JSON.stringify(data, null, 2);
   } catch (_) {}
+}
+
+function clearVideoDrilldown({ restoreControls = true } = {}) {
+  const previous = state.drilldown;
+  drilldownAbortController?.abort();
+  drilldownAbortController = null;
+  drilldownRequestId += 1;
+  state.drilldown = null;
+
+  if (restoreControls && previous) {
+    el.selectTopK.value = previous.previousTopK;
+    state.activeModality = previous.previousActiveModality;
+  }
+  el.modalityTabs.forEach((tab) => {
+    const active = tab.dataset.modality === state.activeModality;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.disabled = false;
+  });
+  updateDiscoveryButtonState();
+  updateTemporalButtonState();
+}
+
+function exitVideoDrilldown() {
+  const previousTimingText = state.drilldown?.previousTimingText;
+  clearVideoDrilldown();
+  if (previousTimingText) el.timingBadge.textContent = previousTimingText;
+  setServerStatus("No fusion / no reranking", "ready");
+  renderModalityResults();
+}
+
+function clearDiscoveryCascade({ restoreControls = true } = {}) {
+  const previous = state.discoveryCascade;
+  cascadeAbortController?.abort();
+  cascadeAbortController = null;
+  cascadeRequestId += 1;
+  state.discoveryCascade = null;
+
+  if (restoreControls && previous) {
+    el.selectTopK.value = previous.previousTopK;
+    state.activeModality = previous.previousActiveModality;
+  }
+  el.modalityTabs.forEach((tab) => {
+    const active = tab.dataset.modality === state.activeModality;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.disabled = false;
+  });
+  updateDiscoveryButtonState();
+  updateTemporalButtonState();
+}
+
+function exitDiscoveryCascade() {
+  const previousTimingText = state.discoveryCascade?.previousTimingText;
+  clearDiscoveryCascade();
+  if (previousTimingText) el.timingBadge.textContent = previousTimingText;
+  setServerStatus("No fusion / no reranking", "ready");
+  renderModalityResults();
+}
+
+function clearTemporalIntersection({ restoreControls = true } = {}) {
+  const previous = state.temporalIntersection;
+  temporalAbortController?.abort();
+  temporalAbortController = null;
+  temporalRequestId += 1;
+  state.temporalIntersection = null;
+
+  if (restoreControls && previous) {
+    el.selectTopK.value = previous.previousTopK;
+    state.activeModality = previous.previousActiveModality;
+  }
+  el.modalityTabs.forEach((tab) => {
+    const active = tab.dataset.modality === state.activeModality;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.disabled = false;
+  });
+  updateDiscoveryButtonState();
+  updateTemporalButtonState();
+}
+
+function exitTemporalIntersection() {
+  const previousTimingText = state.temporalIntersection?.previousTimingText;
+  clearTemporalIntersection();
+  if (previousTimingText) el.timingBadge.textContent = previousTimingText;
+  setServerStatus("No fusion / no reranking", "ready");
+  renderModalityResults();
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -454,14 +1137,21 @@ async function handleRunQueryClick() {
     showToast("Please enter a query text.", "error");
     return;
   }
+  setSubmissionContext("text", query);
 
   parseAbortController?.abort();
   searchAbortController?.abort();
+  clearVideoDrilldown();
+  clearDiscoveryCascade();
+  clearTemporalIntersection();
   searchRequestId += 1;
   parseAbortController = new AbortController();
   const requestId = ++parseRequestId;
   setSearchBusy(true);
   clearSubmissionSelection();
+  state.parsedQuery = null;
+  el.temporalEventsEditor.value = "";
+  updateTemporalButtonState(true);
   state.modalityResults = {};
   state.searchResults = [];
   el.resultsCount.textContent = "Parsing…";
@@ -470,21 +1160,45 @@ async function handleRunQueryClick() {
   setServerStatus("Parsing query…", "pending");
 
   try {
+    if (state.parserEngine === "direct") {
+      state.parsedQuery = {
+        task_type: "KIS",
+        language: "en",
+        original_query: query,
+        global_scene_en: query,
+        objects_en: [query],
+        speech_vi: "",
+        ocr_keywords: [],
+        is_temporal_trake: false,
+        trake_events: [],
+        vqa_question: "",
+      };
+      el.jsonEditor.value = JSON.stringify(state.parsedQuery, null, 2);
+      syncTemporalEventsEditorFromParsedQuery();
+      if (state.queryMode === "auto") await handleExecuteJsonClick();
+      else {
+        el.timingBadge.textContent = "Direct contract ready (no parser model used)";
+        setServerStatus("Direct query ready", "ready");
+      }
+      return;
+    }
     const parseRes = await fetch("/api/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: query,
-        task_type: state.taskType,
-        engine: state.useGemini ? "gemini" : "qwen",
+        task_type: "KIS",
+        engine: state.parserEngine,
+        allow_qwen_fallback: state.allowQwenFallback,
       }),
       signal: parseAbortController.signal,
     });
 
-    if (!parseRes.ok) throw new Error("Parse failed: " + parseRes.statusText);
+    if (!parseRes.ok) throw await responseError(parseRes, "Parse failed");
     const parseData = await parseRes.json();
     if (requestId !== parseRequestId) return;
     state.parsedQuery = parseData.parsed_query;
+    syncTemporalEventsEditorFromParsedQuery();
 
     el.jsonEditor.value = JSON.stringify(state.parsedQuery, null, 2);
     if (state.queryMode === "auto") {
@@ -513,10 +1227,32 @@ async function handleExecuteJsonClick() {
     return;
   }
 
+  if (!parsedJson || typeof parsedJson !== "object" || Array.isArray(parsedJson)) {
+    showToast("Parsed query must be one JSON object.", "error");
+    return;
+  }
+
+  if (typeof parsedJson.original_query !== "string" || !parsedJson.original_query.trim()) {
+    const fallbackOriginal = el.inputQuery.value.trim()
+      || (typeof parsedJson.global_scene_en === "string" ? parsedJson.global_scene_en.trim() : "");
+    if (!fallbackOriginal) {
+      showToast("Missing required field: original_query", "error");
+      return;
+    }
+    parsedJson.original_query = fallbackOriginal;
+  }
+
   delete parsedJson.weights;
-  parsedJson.task_type = state.taskType;
+  parsedJson.task_type = "KIS";
+  setSubmissionContext("text", parsedJson.original_query || JSON.stringify(parsedJson));
+  state.parsedQuery = parsedJson;
+  el.jsonEditor.value = JSON.stringify(parsedJson, null, 2);
+  syncTemporalEventsEditorFromParsedQuery();
 
   searchAbortController?.abort();
+  clearVideoDrilldown();
+  clearDiscoveryCascade();
+  clearTemporalIntersection();
   searchAbortController = new AbortController();
   const requestId = ++searchRequestId;
   setSearchBusy(true);
@@ -542,7 +1278,7 @@ async function handleExecuteJsonClick() {
       signal: searchAbortController.signal,
     });
 
-    if (!res.ok) throw new Error("Search failed: " + res.statusText);
+    if (!res.ok) throw await responseError(res, "Search failed");
     const data = await res.json();
     if (requestId !== searchRequestId) return;
 
@@ -567,6 +1303,593 @@ async function handleExecuteJsonClick() {
   } finally {
     if (requestId === searchRequestId) setSearchBusy(false);
   }
+}
+
+async function runTemporalIntersection() {
+  const events = getUsableTemporalEvents();
+  if (events.length < 2) {
+    showToast("Ordered search needs at least two trake_events with non-empty scene_en values.", "error");
+    return;
+  }
+
+  temporalAbortController?.abort();
+  temporalAbortController = new AbortController();
+  const requestId = ++temporalRequestId;
+  const previousTopK = el.selectTopK.value;
+  const previousActiveModality = state.activeModality;
+  const previousTimingText = el.timingBadge.textContent;
+  const maxGapSeconds = Number(el.selectTemporalGap.value) || 30;
+  const anchorQuery = String(state.parsedQuery?.global_scene_en || "").trim();
+
+  setSearchBusy(true);
+  clearSubmissionSelection();
+  if (!el.modal.classList.contains("hidden")) closeInspector();
+  state.searchResults = [];
+  el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
+  el.resultsCount.textContent = `Searching ${events.length} ordered events…`;
+  el.resultsGrid.innerHTML = `<div class="empty-placeholder" aria-live="polite"><div class="empty-icon">⛓</div><div class="empty-title">Intersecting ordered visual events</div><div class="empty-desc">Every event runs as an independent SigLIP search. Candidate video IDs are intersected before timestamp order is enforced.</div></div>`;
+  el.timingBadge.textContent = `Searching ${events.length} SigLIP event pools...`;
+  setServerStatus("Ordered SigLIP intersection…", "pending");
+
+  try {
+    const response = await fetch("/api/search/temporal-intersection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events,
+        anchor_query: anchorQuery || null,
+        top_k_per_event: Number(el.selectTemporalCandidates.value) || 300,
+        top_k_sequences: Number(el.selectTemporalSequences.value) || 100,
+        paths_per_video: Number(el.selectTemporalPathsPerVideo.value) || 1,
+        sequence_reservoir_size: el.selectTemporalReservoir.value === "same"
+          ? null
+          : Number(el.selectTemporalReservoir.value),
+        max_gap_seconds: maxGapSeconds,
+      }),
+      signal: temporalAbortController.signal,
+    });
+    if (!response.ok) throw await responseError(response, "Ordered search failed");
+    const data = await response.json();
+    if (requestId !== temporalRequestId) return;
+
+    state.temporalIntersection = {
+      data,
+      previousTopK,
+      previousActiveModality,
+      previousTimingText,
+    };
+    el.selectTopK.value = "20";
+    el.modalityTabs.forEach((tab) => {
+      tab.classList.remove("active");
+      tab.setAttribute("aria-selected", "false");
+    });
+    el.timingBadge.textContent = `${data.event_count} event pools intersected in ${data.execution_time_ms}ms`;
+    setServerStatus("Ordered SigLIP · cross-modal fusion off", "ready");
+    renderModalityResults();
+    const count = Number(data.ordered_sequence_count ?? data.sequences?.length ?? 0);
+    showToast(
+      count > 0 ? `Found ${count} ordered video sequence${count === 1 ? "" : "s"}.` : "No video satisfied every event in order.",
+      count > 0 ? "success" : "error",
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    console.error(error);
+    el.resultsHeading.textContent = "🎯 RAW MODALITY RESULTS";
+    el.timingBadge.textContent = previousTimingText;
+    setServerStatus("No fusion / no reranking", "ready");
+    renderModalityResults();
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === temporalRequestId) setSearchBusy(false);
+  }
+}
+
+async function runDiscoveryCascade() {
+  const visualQuery = String(state.parsedQuery?.global_scene_en || "").trim();
+  const objectQueries = Array.isArray(state.parsedQuery?.objects_en)
+    ? state.parsedQuery.objects_en.filter((query) => String(query || "").trim())
+    : [];
+  if (!visualQuery || objectQueries.length === 0) {
+    showToast("Discovery needs both global_scene_en and at least one objects_en query.", "error");
+    return;
+  }
+
+  cascadeAbortController?.abort();
+  cascadeAbortController = new AbortController();
+  const requestId = ++cascadeRequestId;
+  const previousTopK = el.selectTopK.value;
+  const previousActiveModality = state.activeModality;
+  const previousTimingText = el.timingBadge.textContent;
+
+  setSearchBusy(true);
+  clearSubmissionSelection();
+  if (!el.modal.classList.contains("hidden")) closeInspector();
+  state.searchResults = [];
+  el.resultsHeading.textContent = "🧭 EXPLICIT DISCOVERY CASCADE";
+  el.resultsCount.textContent = "Discovering candidate videos…";
+  el.resultsGrid.innerHTML = `<div class="empty-placeholder" aria-live="polite"><div class="empty-icon">🧭</div><div class="empty-title">Discovering videos without score fusion</div><div class="empty-desc">Each DAM object independently selects its Top 20 raw frames. SigLIP then ranks Top 10 frames inside every resulting video.</div></div>`;
+  el.timingBadge.textContent = "Running explicit DAM → SigLIP discovery cascade...";
+  setServerStatus("DAM gating → raw SigLIP ranking…", "pending");
+
+  try {
+    const response = await fetch("/api/discover/dam-to-siglip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        parsed_query: state.parsedQuery,
+        dam_top_frames_per_object: 20,
+        siglip_top_frames_per_video: 10,
+      }),
+      signal: cascadeAbortController.signal,
+    });
+    if (!response.ok) throw await responseError(response, "Discovery cascade failed");
+    const data = await response.json();
+    if (requestId !== cascadeRequestId) return;
+
+    state.discoveryCascade = {
+      data,
+      previousTopK,
+      previousActiveModality,
+      previousTimingText,
+    };
+    el.selectTopK.value = "50";
+    el.modalityTabs.forEach((tab) => {
+      tab.classList.remove("active");
+      tab.setAttribute("aria-selected", "false");
+    });
+    el.timingBadge.textContent = `Cascade searched ${data.unique_candidate_video_count} unique videos in ${data.execution_time_ms}ms`;
+    setServerStatus("Explicit DAM → SigLIP cascade · no score fusion", "ready");
+    renderModalityResults();
+    showToast(`Discovered ${data.unique_candidate_video_count} candidate videos.`, "success");
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    console.error(error);
+    el.resultsHeading.textContent = "🎯 RAW MODALITY RESULTS";
+    el.timingBadge.textContent = previousTimingText;
+    setServerStatus("No fusion / no reranking", "ready");
+    renderModalityResults();
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === cascadeRequestId) setSearchBusy(false);
+  }
+}
+
+async function searchInsideVideo(item, sourceModality) {
+  const visualQuery = String(state.parsedQuery?.global_scene_en || "").trim();
+  if (!visualQuery) {
+    showToast("This action needs a non-empty global_scene_en SigLIP query.", "error");
+    return;
+  }
+
+  const videoId = String(item.video_id || "").toUpperCase().replace(/-/g, "_");
+  if (!videoId) {
+    showToast("The selected result has no video ID.", "error");
+    return;
+  }
+
+  drilldownAbortController?.abort();
+  drilldownAbortController = new AbortController();
+  const requestId = ++drilldownRequestId;
+  const previousTopK = el.selectTopK.value;
+  const previousActiveModality = state.activeModality;
+  const previousTimingText = el.timingBadge.textContent;
+
+  setSearchBusy(true);
+  clearSubmissionSelection();
+  if (!el.modal.classList.contains("hidden")) closeInspector();
+  state.searchResults = [];
+  el.resultsCount.textContent = `Searching ${videoId}…`;
+  el.resultsGrid.innerHTML = `<div class="empty-placeholder" aria-live="polite"><div class="empty-icon">⏳</div><div class="empty-title">Searching inside ${escapeHtml(videoId)}</div><div class="empty-desc">Running the same SigLIP cosine only over frames from this video.</div></div>`;
+  el.timingBadge.textContent = `Running manual SigLIP drill-down in ${videoId}...`;
+  setServerStatus("Video-scoped SigLIP search…", "pending");
+
+  try {
+    const response = await fetch(`/api/video/${encodeURIComponent(videoId)}/search/siglip`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        parsed_query: state.parsedQuery,
+        top_k: SEARCH_POOL_SIZE,
+      }),
+      signal: drilldownAbortController.signal,
+    });
+    if (!response.ok) throw await responseError(response, "Video drill-down failed");
+    const data = await response.json();
+    if (requestId !== drilldownRequestId) return;
+
+    state.drilldown = {
+      videoId: data.video_id,
+      pool: data.modality_result,
+      evaluatedFrames: data.evaluated_frames,
+      sourceModality,
+      sourceRank: item.rank,
+      previousTopK,
+      previousActiveModality,
+      previousTimingText,
+    };
+    state.activeModality = "siglip";
+    el.selectTopK.value = "50";
+    el.modalityTabs.forEach((tab) => {
+      const active = tab.dataset.modality === "siglip";
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+
+    el.timingBadge.textContent = `SigLIP searched ${data.evaluated_frames} frames in ${data.execution_time_ms}ms`;
+    setServerStatus("Manual video scope · no fusion", "ready");
+    renderModalityResults();
+    showToast(`Showing SigLIP cosine inside ${data.video_id}.`, "success");
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    console.error(error);
+    el.timingBadge.textContent = previousTimingText;
+    setServerStatus("No fusion / no reranking", "ready");
+    renderModalityResults();
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === drilldownRequestId) setSearchBusy(false);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Additive Image Search and Video Browser Workspaces
+// ──────────────────────────────────────────────────────────────────────────────
+function selectImageQueryFile(file) {
+  if (!file) return;
+  if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) {
+    showToast("Choose a JPEG, PNG, or WebP image.", "error");
+    return;
+  }
+  imageSearchAbortController?.abort();
+  imageSearchAbortController = null;
+  imageSearchRequestId += 1;
+  if (state.imageQueryObjectUrl) URL.revokeObjectURL(state.imageQueryObjectUrl);
+  state.imageQueryFile = file;
+  state.imageResults = [];
+  setSubmissionContext("image", `${file.name}:${file.size}:${file.lastModified}:${file.type}`);
+  state.imageQueryObjectUrl = URL.createObjectURL(file);
+  el.imageQueryPreview.src = state.imageQueryObjectUrl;
+  el.imageQueryPreview.classList.remove("hidden");
+  el.imageDropPrompt.classList.add("hidden");
+  el.btnRunImageSearch.disabled = false;
+  el.imageResultsCount.textContent = `${file.name || "pasted image"} ready`;
+  el.imageResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">🖼</div><div class="empty-title">New image ready</div><div class="empty-desc">Run Direct SigLIP image search to retrieve matching frames.</div></div>`;
+}
+
+function clearImageQuery() {
+  imageSearchAbortController?.abort();
+  imageSearchRequestId += 1;
+  if (state.imageQueryObjectUrl) URL.revokeObjectURL(state.imageQueryObjectUrl);
+  state.imageQueryFile = null;
+  state.imageQueryObjectUrl = null;
+  state.imageResults = [];
+  state.submissionContexts.image = "image:empty";
+  if (state.activeWorkspace === "image") submissionStore.setContext("image:empty");
+  el.imageQueryFile.value = "";
+  el.imageQueryPreview.removeAttribute("src");
+  el.imageQueryPreview.classList.add("hidden");
+  el.imageDropPrompt.classList.remove("hidden");
+  el.btnRunImageSearch.disabled = true;
+  el.imageResultsCount.textContent = "No image selected";
+  el.imageResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">🖼</div><div class="empty-title">Image Search Ready</div><div class="empty-desc">Choose an unknown visual example to find similar indexed frames.</div></div>`;
+}
+
+async function runImageSearch() {
+  if (!state.imageQueryFile) return;
+  imageSearchAbortController?.abort();
+  imageSearchAbortController = new AbortController();
+  const requestId = ++imageSearchRequestId;
+  el.btnRunImageSearch.disabled = true;
+  el.imageResultsCount.textContent = "Embedding and searching…";
+  el.imageResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">⏳</div><div class="empty-title">Running SigLIP image search</div><div class="empty-desc">No text parser or cross-modal fusion is used.</div></div>`;
+  try {
+    const body = new FormData();
+    body.append("file", state.imageQueryFile, state.imageQueryFile.name || "query-image.png");
+    body.append("top_k", el.selectImageTopK.value);
+    const response = await fetch("/api/search/image", {
+      method: "POST",
+      body,
+      signal: imageSearchAbortController.signal,
+    });
+    if (!response.ok) throw await responseError(response, "Image search failed");
+    const data = await response.json();
+    if (requestId !== imageSearchRequestId) return;
+    state.imageResults = data.modality_result?.results || [];
+    renderImageResults(data);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    console.error(error);
+    el.imageResultsCount.textContent = "Search failed";
+    el.imageResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">⚠</div><div class="empty-title">Image search failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === imageSearchRequestId) el.btnRunImageSearch.disabled = !state.imageQueryFile;
+  }
+}
+
+function renderImageResults(data) {
+  const renderId = ++resultsRenderId;
+  el.imageResultsGrid.replaceChildren();
+  el.imageResultsCount.textContent = `${state.imageResults.length} raw SigLIP cosine results · ${Number(data.execution_time_ms || 0).toFixed(1)}ms`;
+  if (!state.imageResults.length) {
+    el.imageResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">∅</div><div class="empty-title">No image matches</div></div>`;
+    return;
+  }
+  renderStandardCards(state.imageResults, el.imageResultsGrid, "image", renderId);
+}
+
+function normalizeRequestedVideoId(value) {
+  const videoId = String(value || "").trim().toUpperCase().replaceAll("-", "_");
+  return /^[A-Z0-9]+_V\d+$/.test(videoId) ? videoId : "";
+}
+
+function deriveTimelineFps(keyframes) {
+  const samples = (keyframes || []).flatMap((frame) => {
+    const index = Number(frame.frame_idx);
+    const seconds = Number(frame.pts_time_s);
+    return Number.isFinite(index) && Number.isFinite(seconds) && seconds > 0 ? [index / seconds] : [];
+  }).sort((left, right) => left - right);
+  if (!samples.length) return null;
+  return Number(samples[Math.floor(samples.length / 2)].toFixed(4));
+}
+
+async function fetchVideoTimeline(videoId, signal = undefined) {
+  const canonicalId = normalizeRequestedVideoId(videoId);
+  if (!canonicalId) throw new Error("Use a dataset video ID such as L25_V060.");
+  const endpoints = [
+    `/api/video/${encodeURIComponent(canonicalId)}/timeline`,
+    `/api/video/${encodeURIComponent(canonicalId)}/keyframes`,
+  ];
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, { signal });
+      if (!response.ok) {
+        lastError = await responseError(response, "Timeline unavailable");
+        if (response.status !== 404) throw lastError;
+        continue;
+      }
+      const data = await response.json();
+      const keyframes = (data.keyframes || [])
+        .map((frame) => ({ ...frame, video_id: canonicalId, validation: "canonical" }))
+        .sort((left, right) => Number(left.pts_time_s) - Number(right.pts_time_s));
+      if (!keyframes.length) throw new Error(`No indexed keyframes were found for ${canonicalId}.`);
+      return {
+        videoId: data.video_id || canonicalId,
+        fps: Number(data.fps) || deriveTimelineFps(keyframes),
+        keyframes,
+      };
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      lastError = error;
+      if (!String(error.message || "").includes("404")) break;
+    }
+  }
+  throw lastError || new Error(`Timeline unavailable for ${canonicalId}.`);
+}
+
+async function loadStandaloneVideo(requestedVideoId) {
+  const videoId = normalizeRequestedVideoId(requestedVideoId);
+  if (!videoId) {
+    showToast("Use a dataset video ID such as L25_V060.", "error");
+    return;
+  }
+  el.videoIdInput.value = videoId;
+  setSubmissionContext("video", videoId);
+  standaloneScopedAbortController?.abort();
+  standaloneScopedAbortController = null;
+  standaloneScopedRequestId += 1;
+  watchLoadAbortController?.abort();
+  watchLoadAbortController = new AbortController();
+  const requestId = ++watchLoadRequestId;
+  state.watch.videoId = "";
+  state.watch.fps = null;
+  state.watch.keyframes = [];
+  state.watch.nearest = null;
+  state.watch.searchResults = [];
+  updateWatchMapping(0);
+  el.standaloneVideoSearchResults.replaceChildren();
+  el.standaloneVideoSearchResults.classList.add("hidden");
+  el.btnStandaloneVideoSearch.disabled = true;
+  el.standaloneVideoSource.textContent = "Loading canonical timeline…";
+  el.standaloneVideoSource.classList.remove("ready", "error");
+  el.standaloneVideoArea.classList.remove("hidden");
+  el.btnSubmitWatchFrame.disabled = true;
+  standaloneVideoController.deactivate();
+  try {
+    const timeline = await fetchVideoTimeline(videoId, watchLoadAbortController.signal);
+    if (requestId !== watchLoadRequestId) return;
+    state.watch.videoId = timeline.videoId;
+    state.watch.fps = timeline.fps;
+    state.watch.keyframes = timeline.keyframes;
+    state.watch.nearest = nearestKeyframe(timeline.keyframes, 0);
+    const firstFrame = timeline.keyframes[0];
+    standaloneVideoController.setFrame(toVideoFrame(firstFrame));
+    updateWatchMapping(Number(firstFrame.pts_time_s) || 0);
+    await standaloneVideoController.preload(toVideoFrame(firstFrame));
+    if (requestId !== watchLoadRequestId) return;
+    await standaloneVideoController.activate();
+    if (requestId !== watchLoadRequestId) return;
+    el.standaloneVideoSource.textContent = `${timeline.videoId} · ${timeline.keyframes.length} indexed keyframes`;
+    el.btnStandaloneVideoSearch.disabled = false;
+    showToast(`Loaded ${timeline.videoId}.`, "success");
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== watchLoadRequestId) return;
+    console.error(error);
+    el.standaloneVideoSource.textContent = error.message;
+    el.standaloneVideoSource.classList.add("error");
+    showToast(error.message, "error");
+  }
+}
+
+function updateWatchMapping(playbackSeconds) {
+  const seconds = Number(playbackSeconds);
+  el.watchPlaybackTime.textContent = Number.isFinite(seconds) ? `${seconds.toFixed(1)}s` : "—";
+  const estimated = estimateRawFrame(seconds, state.watch.fps);
+  el.watchEstimatedFrame.textContent = estimated === null ? "—" : String(estimated);
+  const match = nearestKeyframe(state.watch.keyframes, seconds);
+  state.watch.nearest = match;
+  if (!match) {
+    el.watchKeyframeN.textContent = "—";
+    el.watchFrameIdx.textContent = "—";
+    el.watchKeyframeTime.textContent = "—";
+    el.watchMappingDelta.textContent = "—";
+    updateWatchSubmitButton();
+    return;
+  }
+  el.watchKeyframeN.textContent = `#${match.frame.keyframe_n}`;
+  el.watchFrameIdx.textContent = String(match.frame.frame_idx);
+  el.watchKeyframeTime.textContent = `${Number(match.frame.pts_time_s).toFixed(3)}s`;
+  const sign = match.deltaSeconds > 0 ? "+" : "";
+  el.watchMappingDelta.textContent = `${sign}${match.deltaSeconds.toFixed(3)}s`;
+  const poster = document.getElementById("standalone-video-poster");
+  if (poster && poster.getAttribute("src") !== getImageUrl(match.frame)) poster.setAttribute("src", getImageUrl(match.frame));
+  el.btnWatchPrevKeyframe.disabled = match.index <= 0;
+  el.btnWatchNextKeyframe.disabled = match.index >= state.watch.keyframes.length - 1;
+  updateWatchSubmitButton();
+}
+
+function updateWatchSubmitButton() {
+  if (!el.btnSubmitWatchFrame) return;
+  const frame = state.watch.nearest?.frame;
+  el.btnSubmitWatchFrame.disabled = !frame;
+  const selected = frame ? submissionStore.hasFrame(frame) : false;
+  el.btnSubmitWatchFrame.classList.toggle("in-submit", selected);
+  el.btnSubmitWatchFrame.textContent = selected ? "✓ Added to submission" : "+ Add nearest indexed frame";
+}
+
+function seekWatchNeighbor(direction) {
+  const match = state.watch.nearest;
+  if (!match) return;
+  const next = state.watch.keyframes[match.index + direction];
+  if (!next) return;
+  standaloneVideoController.seekTo(Number(next.pts_time_s));
+  updateWatchMapping(Number(next.pts_time_s));
+}
+
+function directParsedQuery(query) {
+  return {
+    task_type: "KIS",
+    language: "en",
+    original_query: query,
+    global_scene_en: query,
+    objects_en: [query],
+    speech_vi: "",
+    ocr_keywords: [],
+    is_temporal_trake: false,
+    trake_events: [],
+    vqa_question: "",
+  };
+}
+
+async function parseScopedQuery(query, engine, signal = undefined) {
+  if (engine === "direct") return directParsedQuery(query);
+  const response = await fetch("/api/parse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      task_type: "KIS",
+      engine,
+      allow_qwen_fallback: false,
+    }),
+    signal,
+  });
+  if (!response.ok) throw await responseError(response, "Scoped query parse failed");
+  return (await response.json()).parsed_query;
+}
+
+async function searchVideoWithText(videoId, query, engine = "direct", topK = 50, signal = undefined) {
+  const canonicalId = normalizeRequestedVideoId(videoId);
+  if (!canonicalId) throw new Error("The active frame has no valid dataset video ID.");
+  if (!String(query || "").trim()) throw new Error("Enter a visual description to search inside this video.");
+  const parsedQuery = await parseScopedQuery(String(query).trim(), engine, signal);
+  const response = await fetch(`/api/video/${encodeURIComponent(canonicalId)}/search/siglip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parsed_query: parsedQuery, top_k: topK }),
+    signal,
+  });
+  if (!response.ok) throw await responseError(response, "Inside-video search failed");
+  return response.json();
+}
+
+async function runStandaloneVideoSearch() {
+  const query = el.standaloneVideoQuery.value.trim();
+  if (!state.watch.videoId || !query) {
+    showToast("Load a video and enter a visual description first.", "error");
+    return;
+  }
+  el.btnStandaloneVideoSearch.disabled = true;
+  standaloneScopedAbortController?.abort();
+  standaloneScopedAbortController = new AbortController();
+  const requestId = ++standaloneScopedRequestId;
+  el.standaloneVideoSearchResults.classList.remove("hidden");
+  el.standaloneVideoSearchResults.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">⏳</div><div class="empty-title">Searching ${escapeHtml(state.watch.videoId)}</div></div>`;
+  try {
+    const data = await searchVideoWithText(
+      state.watch.videoId,
+      query,
+      "direct",
+      100,
+      standaloneScopedAbortController.signal,
+    );
+    if (requestId !== standaloneScopedRequestId) return;
+    state.watch.searchResults = data.modality_result?.results || [];
+    el.standaloneVideoSearchResults.replaceChildren();
+    renderStandardCards(state.watch.searchResults, el.standaloneVideoSearchResults, "siglip", ++resultsRenderId);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.standaloneVideoSearchResults.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Search failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === standaloneScopedRequestId) el.btnStandaloneVideoSearch.disabled = false;
+  }
+}
+
+async function runInspectorVideoSearch() {
+  const item = state.activeInspectorItem;
+  if (!item) return;
+  const query = el.inspectorVideoQuery.value.trim();
+  el.btnInspectorVideoSearch.disabled = true;
+  inspectorScopedAbortController?.abort();
+  inspectorScopedAbortController = new AbortController();
+  const requestId = ++inspectorScopedRequestId;
+  el.inspectorLocalResults.classList.remove("hidden");
+  el.inspectorLocalResults.innerHTML = `<div class="inspector-local-status">Searching ${escapeHtml(item.video_id)}…</div>`;
+  try {
+    const data = await searchVideoWithText(
+      item.video_id,
+      query,
+      el.inspectorParserEngine.value,
+      30,
+      inspectorScopedAbortController.signal,
+    );
+    if (requestId !== inspectorScopedRequestId || state.activeInspectorItem?.video_id !== item.video_id) return;
+    state.inspectorLocalResults = data.modality_result?.results || [];
+    renderInspectorLocalResults(state.inspectorLocalResults);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.inspectorLocalResults.innerHTML = `<div class="inspector-local-status error">${escapeHtml(error.message)}</div>`;
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === inspectorScopedRequestId) el.btnInspectorVideoSearch.disabled = false;
+  }
+}
+
+function renderInspectorLocalResults(results) {
+  el.inspectorLocalResults.replaceChildren();
+  results.slice(0, 20).forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = "inspector-local-result";
+    row.innerHTML = `
+      <button type="button" class="inspector-local-open"><strong>#${item.rank || index + 1}</strong><span>frame ${item.frame_idx} · ${Number(item.pts_time_s || 0).toFixed(1)}s</span><em>${Number(item.score || 0).toFixed(4)}</em></button>
+      <button type="button" class="inspector-local-add" aria-label="Add frame ${item.frame_idx} to submission">+</button>`;
+    row.querySelector(".inspector-local-open").addEventListener("click", () => void openStandardInspector(item, true));
+    row.querySelector(".inspector-local-add").addEventListener("click", () => addFrameToSubmission(item, { source: "video-scoped-siglip" }));
+    el.inspectorLocalResults.appendChild(row);
+  });
+  if (!results.length) el.inspectorLocalResults.innerHTML = `<div class="inspector-local-status">No frames returned.</div>`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -607,6 +1930,23 @@ function renderModalityResults() {
   el.resultsGrid.innerHTML = "";
   const limit = parseInt(el.selectTopK.value) || 20;
   updateModalityQuerySummary();
+
+  if (state.temporalIntersection) {
+    renderTemporalIntersection(limit, renderId);
+    return;
+  }
+
+  if (state.discoveryCascade) {
+    renderDiscoveryCascade(limit, renderId);
+    return;
+  }
+
+  if (state.drilldown) {
+    renderVideoDrilldown(limit, renderId);
+    return;
+  }
+
+  el.resultsHeading.textContent = "🎯 RAW MODALITY RESULTS";
 
   if (!Object.keys(state.modalityResults).length) {
     state.searchResults = [];
@@ -650,6 +1990,246 @@ function renderModalityResults() {
   renderStandardCards(list, el.resultsGrid, state.activeModality, renderId);
 }
 
+function getAllCascadeCandidates(cascades) {
+  const pools = cascades.map((cascade) => cascade.results || []);
+  const maxLength = pools.reduce((maximum, results) => Math.max(maximum, results.length), 0);
+  const seen = new Set();
+  const candidates = [];
+  for (let index = 0; index < maxLength; index += 1) {
+    pools.forEach((results) => {
+      const item = results[index];
+      if (!item) return;
+      const key = `${item.video_id}:${item.frame_idx}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      candidates.push(item);
+    });
+  }
+  return candidates;
+}
+
+function mergeUniqueCandidates(...candidateLists) {
+  const seen = new Set();
+  const merged = [];
+  candidateLists.forEach((list) => {
+    (list || []).forEach((item) => {
+      const key = `${item.video_id}:${item.frame_idx}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(item);
+    });
+  });
+  return merged;
+}
+
+function renderTemporalIntersection(limit, renderId) {
+  const data = state.temporalIntersection.data;
+  const sequences = (data.sequences || []).slice(0, limit);
+  const allSequenceFrames = (data.sequences || [])
+    .flatMap((sequence) => sequence.matched_events || []);
+  state.searchResults = mergeUniqueCandidates(allSequenceFrames, getAllSearchCandidates());
+  el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
+  el.resultsCount.textContent = `${sequences.length} shown of ${data.ordered_sequence_count || 0} ordered video sequences`;
+
+  const overview = document.createElement("section");
+  overview.className = "temporal-overview-section";
+  const eventTrace = (data.event_pools || [])
+    .map((event) => `E${event.order}: ${escapeHtml(event.query || "")}`)
+    .join(" → ");
+  overview.innerHTML = `
+    <div class="video-drilldown-header">
+      <div>
+        <div class="video-drilldown-eyebrow">Same-video intersection · strictly increasing timestamps</div>
+        <div class="video-drilldown-title">Ordered sequence search using SigLIP only</div>
+        <div class="video-drilldown-query">${eventTrace}</div>
+      </div>
+      <button type="button" class="btn-back-pools">← Back to four raw pools</button>
+    </div>
+    <div class="video-drilldown-audit">
+      <span>${data.event_count} independent event pools</span>
+      <span>Top ${data.top_k_per_event} frames/event</span>
+      <span>${data.paths_per_video || 1} path${Number(data.paths_per_video || 1) === 1 ? "" : "s"}/video</span>
+      <span>${data.sequence_reservoir_count ?? data.ordered_sequence_count ?? 0}/${data.sequence_reservoir_size ?? data.top_k_sequences} sequence reservoir</span>
+      <span>${data.intersection_video_count || 0} common videos</span>
+      <span>shared-scene anchor ${data.anchor_query_applied ? "ON" : "OFF"}</span>
+      <span>max consecutive gap ${data.max_gap_seconds}s</span>
+      <span>cross-modal fusion OFF</span>
+      <span>score = (anchor + weakest event) / 2</span>
+      <span>reranking OFF</span>
+    </div>`;
+  overview.querySelector(".btn-back-pools").addEventListener("click", exitTemporalIntersection);
+  el.resultsGrid.appendChild(overview);
+
+  if (sequences.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-placeholder temporal-empty-state";
+    empty.innerHTML = `<div class="empty-icon">∅</div><div class="empty-title">No ordered intersection</div><div class="empty-desc">The event searches returned individual frames, but no common video contained every event in the requested timestamp order. Edit the event scene_en queries or increase the maximum gap.</div>`;
+    el.resultsGrid.appendChild(empty);
+    return;
+  }
+
+  sequences.forEach((sequence) => {
+    const section = document.createElement("section");
+    section.className = "temporal-sequence-section";
+    const gaps = (sequence.gaps_seconds || []).map((gap) => `${Number(gap).toFixed(1)}s`).join(" · ");
+    section.innerHTML = `
+      <div class="temporal-sequence-header">
+        <div>
+          <div class="video-drilldown-eyebrow">Sequence #${sequence.rank}</div>
+          <div class="temporal-sequence-title">${escapeHtml(sequence.video_id)}</div>
+        </div>
+        <div class="temporal-sequence-metrics">
+          <span title="Primary sequence score: arithmetic mean of shared-scene anchor cosine and weakest event cosine">sequence ${Number(sequence.sequence_score || 0).toFixed(4)}</span>
+          ${data.anchor_query_applied ? `<span title="Primary discovery rank: raw SigLIP cosine for the shared global scene">anchor cosine ${Number(sequence.context_anchor_score || 0).toFixed(4)}</span>` : ""}
+          <span title="Primary sequence rank: the weakest event-level raw SigLIP cosine">min cosine ${Number(sequence.minimum_event_score || 0).toFixed(4)}</span>
+          <span title="Secondary sequence rank: arithmetic mean of event-level raw SigLIP cosines">mean cosine ${Number(sequence.mean_event_score || 0).toFixed(4)}</span>
+          <span>span ${Number(sequence.span_seconds || 0).toFixed(1)}s</span>
+          <span>gaps ${escapeHtml(gaps || "-")}</span>
+          <span>global rank sum ${sequence.global_rank_sum}</span>
+        </div>
+        <button type="button" class="btn-add-sequence">+ Add whole sequence</button>
+      </div>`;
+    section.querySelector(".btn-add-sequence").addEventListener("click", () => {
+      submissionStore.setMode("TRAKE");
+      submissionStore.addSequence(sequence.matched_events || [], { source: "ordered-sequence" });
+      showToast(`Added ${sequence.matched_events?.length || 0} ordered events from ${sequence.video_id}.`, "success");
+    });
+
+    const eventGrid = document.createElement("div");
+    eventGrid.className = "temporal-event-grid";
+    (sequence.matched_events || []).forEach((match, matchIndex) => {
+      const event = document.createElement("article");
+      event.className = "temporal-event-step";
+      event.innerHTML = `
+        <div class="temporal-event-header">
+          <span class="temporal-event-number">E${match.event_order}</span>
+          <div>
+            <div class="temporal-event-description">${escapeHtml(match.event_description || `Event ${match.event_order}`)}</div>
+            <div class="temporal-event-query">${escapeHtml(match.event_query || "")}</div>
+          </div>
+        </div>`;
+      const cardGrid = document.createElement("div");
+      cardGrid.className = "temporal-event-card";
+      renderStandardCards([match], cardGrid, "siglip", renderId);
+      event.appendChild(cardGrid);
+      eventGrid.appendChild(event);
+
+      if (matchIndex < sequence.matched_events.length - 1) {
+        const arrow = document.createElement("div");
+        arrow.className = "temporal-event-arrow";
+        arrow.setAttribute("aria-hidden", "true");
+        arrow.textContent = "→";
+        eventGrid.appendChild(arrow);
+      }
+    });
+    section.appendChild(eventGrid);
+    el.resultsGrid.appendChild(section);
+  });
+}
+
+function renderDiscoveryCascade(limit, renderId) {
+  const data = state.discoveryCascade.data;
+  const cascades = data.cascades || [];
+  const totalShown = cascades.reduce(
+    (total, cascade) => total + Math.min(cascade.results?.length || 0, limit),
+    0,
+  );
+  state.searchResults = getAllCascadeCandidates(cascades);
+  el.resultsHeading.textContent = "🧭 EXPLICIT DISCOVERY CASCADE";
+  el.resultsCount.textContent = `${totalShown} shown across ${cascades.length} independent object cascades`;
+
+  const overview = document.createElement("section");
+  overview.className = "cascade-overview-section";
+  overview.innerHTML = `
+    <div class="video-drilldown-header">
+      <div>
+        <div class="video-drilldown-eyebrow">Explicit cross-modal gating · scores never added</div>
+        <div class="video-drilldown-title">DAM discovers videos; raw SigLIP cosine ranks frames</div>
+        <div class="video-drilldown-query">Each objects_en entry is searched independently. Top ${data.dam_top_frames_per_object} raw DAM frames are deduplicated into video scopes; Top ${data.siglip_top_frames_per_video} SigLIP frames from each video are merged by unchanged cosine.</div>
+      </div>
+      <button type="button" class="btn-back-pools">← Back to four raw pools</button>
+    </div>
+    <div class="video-drilldown-audit">
+      <span>${data.object_query_count} object cascades</span>
+      <span>${data.unique_candidate_video_count} unique videos</span>
+      <span>${data.unique_evaluated_frames} video frames evaluated</span>
+      <span>DAM score excluded from final rank</span>
+      <span>no score fusion</span>
+      <span>no learned reranker</span>
+    </div>`;
+  overview.querySelector(".btn-back-pools").addEventListener("click", exitDiscoveryCascade);
+  el.resultsGrid.appendChild(overview);
+
+  cascades.forEach((cascade, cascadeIndex) => {
+    const section = document.createElement("section");
+    section.className = "modality-pool-section cascade-pool-section";
+    const list = (cascade.results || []).slice(0, limit);
+    const videoTrace = (cascade.candidate_videos || [])
+      .map((candidate) => `${candidate.video_id} DAM#${candidate.dam_raw_frame_rank}`)
+      .join(" · ");
+    section.innerHTML = `
+      <div class="modality-pool-header">
+        <div>
+          <div class="modality-pool-title">Object ${cascadeIndex + 1}: ${escapeHtml(cascade.object_query)}</div>
+          <div class="modality-pool-meta">${cascade.dam_frames_considered} DAM frames → ${cascade.candidate_video_count} videos → ${cascade.siglip_frames_per_video} scoped SigLIP frames/video</div>
+        </div>
+        <span class="count-badge">${list.length} shown of ${cascade.result_count} · final rank: raw cosine</span>
+      </div>
+      <div class="cascade-video-trace" title="Candidate videos and their best raw DAM frame ranks">${escapeHtml(videoTrace)}</div>`;
+    const grid = document.createElement("div");
+    grid.className = "modality-pool-grid";
+    if (list.length === 0) {
+      grid.innerHTML = `<div class="pool-status-message">No scoped SigLIP frames returned for this object.</div>`;
+    } else {
+      renderStandardCards(list, grid, "cascade", renderId);
+    }
+    section.appendChild(grid);
+    el.resultsGrid.appendChild(section);
+  });
+}
+
+function renderVideoDrilldown(limit, renderId) {
+  const drilldown = state.drilldown;
+  const pool = drilldown.pool;
+  const list = (pool.results || []).slice(0, limit);
+  const sourceRank = Number.isFinite(Number(drilldown.sourceRank))
+    ? `raw rank #${drilldown.sourceRank}`
+    : "selected result";
+  state.searchResults = pool.results || [];
+  el.resultsHeading.textContent = "🔎 VIDEO-SCOPED SIGLIP";
+  el.resultsCount.textContent = `${list.length} of ${pool.result_count} SigLIP results inside ${drilldown.videoId}`;
+
+  const section = document.createElement("section");
+  section.className = "video-drilldown-section";
+  section.innerHTML = `
+    <div class="video-drilldown-header">
+      <div>
+        <div class="video-drilldown-eyebrow">Manual drill-down from ${escapeHtml(String(drilldown.sourceModality).toUpperCase())} ${escapeHtml(sourceRank)}</div>
+        <div class="video-drilldown-title">SigLIP cosine restricted to video ${escapeHtml(drilldown.videoId)}</div>
+        <div class="video-drilldown-query">${escapeHtml(formatPoolQuery(pool))}</div>
+      </div>
+      <button type="button" class="btn-back-pools">← Back to four original pools</button>
+    </div>
+    <div class="video-drilldown-audit">
+      <span>${drilldown.evaluatedFrames} frames evaluated</span>
+      <span>raw cosine only</span>
+      <span>no fusion</span>
+      <span>no reranking</span>
+      <span>source score not reused</span>
+    </div>`;
+  section.querySelector(".btn-back-pools").addEventListener("click", exitVideoDrilldown);
+
+  const grid = document.createElement("div");
+  grid.className = "modality-pool-grid";
+  if (pool.status !== "ok" || list.length === 0) {
+    grid.innerHTML = `<div class="pool-status-message">${escapeHtml(pool.reason || "No frames returned in this video.")}</div>`;
+  } else {
+    renderStandardCards(list, grid, "siglip", renderId);
+  }
+  section.appendChild(grid);
+  el.resultsGrid.appendChild(section);
+}
+
 function renderPoolSection(pool, limit, renderId) {
   const section = document.createElement("section");
   section.className = "modality-pool-section";
@@ -675,6 +2255,9 @@ function renderPoolSection(pool, limit, renderId) {
 }
 
 function resultEvidence(item, modality) {
+  if (modality === "cascade") {
+    return `Video via DAM raw rank #${item.dam_discovery_rank} at frame ${item.dam_discovery_frame_idx} · SigLIP rank #${item.video_scope_rank} inside ${item.video_id}`;
+  }
   if (modality === "asr") return item.transcript || item.asr_transcript || "No speech text";
   if (modality === "ocr") {
     const matches = (item.matched_keywords || []).join(", ");
@@ -682,7 +2265,11 @@ function resultEvidence(item, modality) {
   }
   if (modality === "dam") {
     const subjects = (item.subject_scores || [])
-      .map((entry) => `${entry.subject}: ${Number(entry.cosine).toFixed(4)}`)
+      .map((entry) => {
+        const status = entry.matched === false ? "unmatched" : "matched";
+        const region = entry.best_region ? ` → ${entry.best_region}` : "";
+        return `${entry.subject}: ${Number(entry.cosine).toFixed(4)} ${status}${region}`;
+      })
       .join(" · ");
     return subjects || item.dam_summary || "No DAM evidence";
   }
@@ -708,8 +2295,10 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
     card.className = "candidate-card";
     card.dataset.index = idx;
     card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-label", `Open ${item.video_id}, frame ${item.frame_idx}, rank ${rank}`);
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-label", `${item.video_id}, frame ${item.frame_idx}, rank ${rank}`);
+
+    const canDrillDown = !state.drilldown;
 
     card.innerHTML = `
       <div class="card-media">
@@ -729,7 +2318,10 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
         <div class="card-tags-row">
           <span class="pill-tag active">${escapeHtml(scoreType)}</span>
           <span class="pill-tag">raw rank #${rank}</span>
+          ${modality === "cascade" ? `<span class="pill-tag">DAM gate #${item.dam_discovery_rank}</span><span class="pill-tag">video SigLIP #${item.video_scope_rank}</span>` : ""}
         </div>
+        <button type="button" class="btn-add-submission-card">+ Add to submission</button>
+        ${canDrillDown ? `<button type="button" class="btn-video-drilldown">Search inside this video</button>` : ""}
       </div>`;
 
     const image = card.querySelector("img");
@@ -738,8 +2330,26 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
       image.parentElement.classList.add("img-fallback");
     }, { once: true });
     const openCard = () => void openStandardInspector(item);
+    const addButton = card.querySelector(".btn-add-submission-card");
+    addButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      addFrameToSubmission(item, { source: modality, eventOrder: item.event_order });
+    });
+    addButton.addEventListener("keydown", (event) => event.stopPropagation());
+    const drilldownButton = card.querySelector(".btn-video-drilldown");
+    if (drilldownButton) {
+      drilldownButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void openStandardInspector(item).then(() => {
+          el.inspectorVideoQuery.value = String(state.parsedQuery?.global_scene_en || "");
+          el.inspectorVideoQuery.focus();
+        });
+      });
+      drilldownButton.addEventListener("keydown", (event) => event.stopPropagation());
+    }
     card.addEventListener("click", openCard);
     card.addEventListener("keydown", (event) => {
+      if (isInteractiveTarget(event.target)) return;
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         openCard();
@@ -790,7 +2400,14 @@ function setInspectorMediaMode(mode) {
 // KIS frame inspector
 async function openStandardInspector(item, preserveMediaMode = false) {
   if (el.modal.classList.contains("hidden")) lastInspectorFocus = document.activeElement;
+  const videoChanged = state.activeInspectorItem?.video_id !== item.video_id;
   state.activeInspectorItem = item;
+  if (videoChanged) {
+    state.inspectorLocalResults = [];
+    el.inspectorLocalResults.replaceChildren();
+    el.inspectorLocalResults.classList.add("hidden");
+    el.inspectorVideoQuery.value = "";
+  }
   if (!preserveMediaMode) setInspectorMediaMode("keyframe");
   el.modal.classList.remove("hidden");
   setBackgroundInert(el.modal, true);
@@ -1053,7 +2670,17 @@ function createFilmstripItem(kf, currentKeyframeN) {
   const label = document.createElement("span");
   label.className = "filmstrip-lbl";
   label.textContent = String(kf.keyframe_n).padStart(3, "0");
-  item.append(image, label);
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.className = "filmstrip-add";
+  addButton.textContent = "+";
+  addButton.title = "Add this frame to submission";
+  addButton.setAttribute("aria-label", `Add keyframe ${kf.keyframe_n} to submission`);
+  addButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    addFrameToSubmission(kf, { source: "filmstrip" });
+  });
+  item.append(image, label, addButton);
 
   item.addEventListener("click", () => selectFilmstripKeyframe(kf));
   item.addEventListener("keydown", (event) => {
@@ -1089,6 +2716,8 @@ function navigateFilmstrip(step) {
 }
 
 function closeInspector() {
+  inspectorScopedAbortController?.abort();
+  inspectorScopedRequestId += 1;
   inspectorAbortController?.abort();
   filmstripAbortController?.abort();
   inspectorRequestId += 1;
@@ -1111,30 +2740,29 @@ function closeInspector() {
 function toggleCurrentInSubmission() {
   if (!state.activeInspectorItem) return;
   const item = state.activeInspectorItem;
-  const subStr = item.submission_string || `${item.video_id}, ${item.frame_idx}`;
-
-  if (state.selectedSubmission === subStr) {
-    clearSubmissionSelection();
+  const snapshot = submissionStore.getSnapshot();
+  const draft = currentSubmissionDraft(snapshot);
+  const eventOrder = snapshot.mode === "TRAKE" ? draft.activeEvent : null;
+  if (submissionStore.hasFrame(item, snapshot.mode, eventOrder)) {
+    submissionStore.removeFrame(snapshot.mode === "TRAKE" ? eventOrder : frameIdentity(item));
+    showToast(`Removed ${item.video_id}, ${item.frame_idx} from the draft.`);
   } else {
-    state.selectedSubmission = subStr;
-    state.selectedSubmissionItem = item;
-    el.submissionInput.value = subStr;
-    showToast(`Added ${subStr} to submission!`);
+    addFrameToSubmission(item, { source: item.retrieval_modality || "inspector", eventOrder });
   }
-
   updateInspectorSubmitBtn();
 }
 
 function updateInspectorSubmitBtn() {
   if (!state.activeInspectorItem) return;
   const item = state.activeInspectorItem;
-  const subStr = item.submission_string || `${item.video_id}, ${item.frame_idx}`;
-  const isSelected = state.selectedSubmission === subStr;
+  const snapshot = submissionStore.getSnapshot();
+  const eventOrder = snapshot.mode === "TRAKE" ? currentSubmissionDraft(snapshot).activeEvent : null;
+  const isSelected = submissionStore.hasFrame(item, snapshot.mode, eventOrder);
 
   el.btnToggleInSubmission.classList.toggle("in-submit", isSelected);
   el.btnToggleInSubmission.innerHTML = isSelected
-    ? "<span>✓ In submission</span>"
-    : "<span>+ Add to submission</span>";
+    ? `<span>✓ In ${snapshot.mode === "TRAKE" ? `E${eventOrder}` : "submission"}</span>`
+    : `<span>+ Add to ${snapshot.mode === "TRAKE" ? `E${eventOrder}` : "submission"}</span>`;
 }
 
 function copySubmissionToClipboard() {
@@ -1172,22 +2800,23 @@ function escapeHtml(str) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 100-Candidate Submission CSV Exporter
+// Official BTC headerless submission CSV exporter (maximum 100 rows)
 // ──────────────────────────────────────────────────────────────────────────────
 function openExportModal() {
-  if (!state.searchResults || state.searchResults.length === 0) {
-    showToast("Please run a search query first.", "error");
-    return;
-  }
-  if (!state.selectedSubmissionItem) {
-    showToast("Select the keyframe you want as Row 1 before exporting.", "error");
+  if (submissionItemCount() === 0) {
+    showToast("Add at least one human-selected frame before preparing a submission.", "error");
     return;
   }
   lastExportFocus = document.activeElement;
-  updateExportPreview();
+  const title = document.getElementById("export-modal-title");
+  if (title) title.textContent = state.taskType === "TRAKE"
+    ? "📥 Review TRAKE 100-Row Sequence CSV"
+    : `📥 Review ${state.taskType === "VQA" ? "Q&A" : state.taskType} 100-Row Submission CSV`;
   el.exportModal.classList.remove("hidden");
   setBackgroundInert(el.exportModal, true);
-  requestAnimationFrame(() => el.exportQueryId.focus());
+  el.exportQueryId.value = currentSubmissionDraft().queryId || "1";
+  void updateExportPreview();
+  requestAnimationFrame(() => el.exportQueryId.focus({ preventScroll: true }));
 }
 
 function closeExportModal() {
@@ -1197,21 +2826,239 @@ function closeExportModal() {
   lastExportFocus = null;
 }
 
-function updateExportPreview() {
+async function updateExportPreview() {
+  exportReviewAbortController?.abort();
+  exportReviewAbortController = null;
   const qId = el.exportQueryId ? el.exportQueryId.value.trim() || "1" : "1";
+  submissionStore.setQueryId(qId);
   if (el.exportQueryId) {
     el.exportQueryId.setCustomValidity(isValidQueryId(qId)
       ? ""
       : "Use only letters, numbers, underscores, and hyphens.");
   }
-  const rows = generateValidatedSubmissionRows(qId);
-  if (rows.length > 0 && el.exportRow1Preview) {
-    el.exportRow1Preview.textContent = `${rows[0]} · ${rows.length}/100 verified rows ready`;
+  const requestId = ++exportPrepareRequestId;
+  preparedExport = null;
+  el.exportRow1Preview.textContent = "Preparing canonical rows…";
+  el.exportCsvPreview.value = "";
+  el.exportSchemaWarning.textContent = "";
+  el.btnDownloadCsvAction.disabled = true;
+  if (!isValidQueryId(qId)) return;
+  let prepared;
+  try {
+    prepared = await prepareSubmission(qId);
+  } catch (error) {
+    if (requestId !== exportPrepareRequestId) return;
+    preparedExport = null;
+    el.exportRow1Preview.textContent = "Submission preparation failed";
+    el.exportSchemaWarning.textContent = error.message;
+    el.btnDownloadCsvAction.disabled = true;
+    el.btnRevalidateCsv.disabled = true;
+    showToast(error.message, "error");
+    return;
   }
+  if (requestId !== exportPrepareRequestId) return;
+  preparedExport = prepared;
+  const csvContent = previewCsvContent(prepared);
+  const rowCount = preparedCsvRowCount(prepared, csvContent);
+  el.exportCsvPreview.value = csvContent;
+  csvReviewDirty = false;
+  el.btnRevalidateCsv.disabled = true;
+  const verification = prepared.server_verified ? "server-validated" : "client fallback · not server-verified";
+  const expected = state.taskType === "TRAKE" ? "100 complete ordered sequences" : "100 rows";
+  el.exportRow1Preview.textContent = `${rowCount} row${rowCount === 1 ? "" : "s"} · ${verification} · target: ${expected} (1–100 accepted)`;
+  const messages = [...(prepared.warnings || []), ...(prepared.errors || [])];
+  messages.unshift(submissionSchemaDefaults[state.taskType]);
+  el.exportSchemaWarning.textContent = messages.join(" · ");
   if (el.btnDownloadCsvAction) {
-    el.btnDownloadCsvAction.disabled = rows.length !== 100 || !isValidQueryId(qId);
+    const downloadable = canDownloadPreparedSubmission(prepared);
+    el.btnDownloadCsvAction.disabled = !downloadable;
     const label = el.btnDownloadCsvAction.querySelector("span");
-    if (label) label.textContent = rows.length === 100 ? "⚡ Download CSV (100 Rows)" : `Need ${100 - rows.length} more verified rows`;
+    if (label) label.textContent = downloadable
+      ? `⚡ Download CSV (${rowCount} Rows)`
+      : `Waiting for a server-validated ${state.taskType === "TRAKE" ? "sequence " : ""}CSV`;
+  }
+}
+
+function serverOfficialCsvContent(prepared) {
+  return prepared?.server_verified === true && typeof prepared?.official_csv?.content === "string"
+    ? prepared.official_csv.content
+    : "";
+}
+
+function previewCsvContent(prepared) {
+  const officialContent = serverOfficialCsvContent(prepared);
+  if (officialContent) return officialContent;
+  const lines = serializeOfficialSubmissionRows(prepared?.rows || [], state.taskType);
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+function preparedCsvRowCount(prepared, content = "") {
+  const declared = Number(prepared?.official_csv?.row_count ?? prepared?.row_count);
+  if (Number.isInteger(declared) && declared >= 0) return declared;
+  try {
+    return parseCsvRecords(content).length;
+  } catch {
+    return 0;
+  }
+}
+
+function canDownloadPreparedSubmission(prepared) {
+  const content = serverOfficialCsvContent(prepared);
+  const rowCount = preparedCsvRowCount(prepared, content);
+  return Boolean(
+    content
+    && rowCount >= 1
+    && rowCount <= 100
+    && !(prepared?.errors || []).length
+    && prepared?.official_csv?.valid === true
+    && prepared?.valid_for_download === true,
+  );
+}
+
+function parseCsvRecords(text) {
+  const records = [];
+  let record = [];
+  let field = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') quoted = false;
+      else field += character;
+      continue;
+    }
+    if (character === '"' && field === "") quoted = true;
+    else if (character === ",") {
+      record.push(field.trim());
+      field = "";
+    } else if (character === "\n" || character === "\r") {
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      record.push(field.trim());
+      field = "";
+      if (record.some((value) => value !== "")) records.push(record);
+      record = [];
+    } else field += character;
+  }
+  if (field || record.length) {
+    record.push(field.trim());
+    if (record.some((value) => value !== "")) records.push(record);
+  }
+  if (quoted) throw new Error("CSV contains an unclosed quoted field.");
+  return records;
+}
+
+function editedCsvPrepareRequest(records, queryId) {
+  const mode = state.taskType;
+  if (records.length < 1 || records.length > 100) {
+    throw new Error(`${mode === "VQA" ? "Q&A" : mode} CSV must contain between 1 and 100 data rows.`);
+  }
+  if (mode === "TRAKE") {
+    const configuredEventCount = currentSubmissionDraft().events?.length || 0;
+    const eventCount = configuredEventCount || Math.max(0, (records[0]?.length || 0) - 1);
+    if (eventCount < 2) throw new Error("TRAKE needs at least two event frame columns.");
+    const manualSequences = records.map((record, rowIndex) => {
+      if (record.length !== eventCount + 1) {
+        throw new Error(`TRAKE row ${rowIndex + 1} must contain video_id plus exactly ${eventCount} event frame indexes.`);
+      }
+      const videoId = normalizeRequestedVideoId(record[0]);
+      if (!videoId) throw new Error(`TRAKE row ${rowIndex + 1} has an invalid video ID.`);
+      const events = record.slice(1).map((value, index) => {
+        const frameIdx = Number(value);
+        if (!Number.isInteger(frameIdx) || frameIdx < 0) throw new Error(`TRAKE row ${rowIndex + 1}, E${index + 1} has an invalid frame index.`);
+        return { event_order: index + 1, video_id: videoId, frame_idx: frameIdx };
+      });
+      return { video_id: videoId, events };
+    });
+    return {
+      task_type: "TRAKE",
+      mode: "review",
+      query_id: queryId,
+      target_rows: records.length,
+      event_count: eventCount,
+      manual_selections: [],
+      candidate_reservoir: [],
+      manual_sequences: manualSequences,
+      candidate_sequences: [],
+    };
+  }
+  const manualSelections = records.map((record, rowIndex) => {
+    const requiredColumns = mode === "VQA" ? 3 : 2;
+    if (record.length !== requiredColumns) throw new Error(`Row ${rowIndex + 1} must have ${requiredColumns} columns for ${mode}.`);
+    const videoId = normalizeRequestedVideoId(record[0]);
+    const frameIdx = Number(record[1]);
+    if (!videoId || !Number.isInteger(frameIdx) || frameIdx < 0) throw new Error(`Row ${rowIndex + 1} has an invalid video or frame index.`);
+    return { video_id: videoId, frame_idx: frameIdx };
+  });
+  const answer = mode === "VQA" ? records[0][2] : undefined;
+  if (mode === "VQA" && (!answer || records.some((record) => record[2] !== answer))) {
+    throw new Error("Q&A requires one non-empty human answer shared by every row.");
+  }
+  if (mode === "VQA" && Array.from(answer).length > 100) throw new Error("Q&A answer cannot exceed 100 characters.");
+  return {
+    task_type: mode,
+    mode: "review",
+    query_id: queryId,
+    target_rows: records.length,
+    manual_selections: manualSelections,
+    candidate_reservoir: [],
+    ...(mode === "VQA" ? { vqa_answer: answer } : {}),
+  };
+}
+
+async function revalidateEditedCsv() {
+  const queryId = el.exportQueryId.value.trim() || "1";
+  const requestId = ++exportPrepareRequestId;
+  const reviewGeneration = csvReviewGeneration;
+  const reviewMode = state.taskType;
+  const reviewContext = submissionStore.getSnapshot().contextKey;
+  exportReviewAbortController?.abort();
+  exportReviewAbortController = new AbortController();
+  const reviewController = exportReviewAbortController;
+  const isCurrentReview = () => requestId === exportPrepareRequestId
+    && reviewGeneration === csvReviewGeneration
+    && reviewMode === state.taskType
+    && reviewContext === submissionStore.getSnapshot().contextKey
+    && queryId === (el.exportQueryId.value.trim() || "1")
+    && csvReviewDirty;
+  el.btnRevalidateCsv.disabled = true;
+  el.exportSchemaWarning.textContent = "Revalidating every edited row against the canonical index…";
+  try {
+    const records = parseCsvRecords(el.exportCsvPreview.value);
+    const request = editedCsvPrepareRequest(records, queryId);
+    const response = await fetch("/api/submission/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal: reviewController.signal,
+    });
+    if (!response.ok) throw await responseError(response, "CSV revalidation failed");
+    const prepared = await response.json();
+    if (!isCurrentReview()) return;
+    preparedExport = { ...prepared, server_verified: true };
+    if (!canDownloadPreparedSubmission(preparedExport)) {
+      throw new Error((prepared.errors || []).join(" · ") || "The server did not return a valid official CSV payload.");
+    }
+    const csvContent = serverOfficialCsvContent(preparedExport);
+    const rowCount = preparedCsvRowCount(preparedExport, csvContent);
+    el.exportCsvPreview.value = csvContent;
+    csvReviewDirty = false;
+    el.btnDownloadCsvAction.disabled = false;
+    el.exportRow1Preview.textContent = `${rowCount} row${rowCount === 1 ? "" : "s"} · server-validated after manual editing`;
+    el.exportSchemaWarning.textContent = (prepared.warnings || []).join(" · ");
+    showToast("Edited CSV rows passed canonical server validation.", "success");
+  } catch (error) {
+    if (error.name === "AbortError" || !isCurrentReview()) return;
+    preparedExport = null;
+    csvReviewDirty = true;
+    el.btnDownloadCsvAction.disabled = true;
+    el.btnRevalidateCsv.disabled = false;
+    el.exportSchemaWarning.textContent = error.message;
+    showToast(error.message, "error");
+  } finally {
+    if (exportReviewAbortController === reviewController) exportReviewAbortController = null;
   }
 }
 
@@ -1219,17 +3066,179 @@ function isValidQueryId(queryId) {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(queryId);
 }
 
-function csvCell(value) {
-  const text = String(value ?? "");
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+function activeCandidateReservoir() {
+  let candidates = [];
+  if (state.activeWorkspace === "image") {
+    candidates = state.imageResults;
+  } else if (state.activeWorkspace === "video") {
+    candidates = state.watch.searchResults;
+  } else if (state.temporalIntersection) {
+    candidates = [
+      ...(state.temporalIntersection.data.sequences || []),
+      ...(state.temporalIntersection.data.reserve_sequences || []),
+    ].flatMap((sequence) => sequence.matched_events || []);
+  } else if (state.discoveryCascade) {
+    candidates = getAllCascadeCandidates(state.discoveryCascade.data.cascades || []);
+  } else if (state.drilldown) {
+    candidates = state.drilldown.pool?.results || [];
+  } else if (state.activeModality === "all") {
+    // Explicit round-robin across visible raw pools; scores remain incomparable and unfused.
+    candidates = state.searchResults;
+  } else {
+    candidates = state.modalityResults[state.activeModality]?.results || [];
+  }
+  const contextKey = submissionStore.getSnapshot().contextKey;
+  const scopedBackfill = state.exportBackfillByContext[contextKey] || [];
+  return mergeUniqueCandidates(candidates, scopedBackfill);
 }
 
-function generateValidatedSubmissionRows(queryId) {
-  if (!isValidQueryId(queryId) || !state.selectedSubmissionItem) return [];
-  const selected = state.selectedSubmissionItem;
+function compactFrame(item) {
+  return {
+    video_id: item.video_id,
+    frame_idx: Number(item.frame_idx),
+    keyframe_n: Number(item.keyframe_n) || null,
+    pts_time_s: Number.isFinite(Number(item.pts_time_s)) ? Number(item.pts_time_s) : null,
+    source: item.source || item.retrieval_modality || "candidate",
+  };
+}
+
+function normalizeTrakeSequence(sequence, eventCount) {
+  const sourceEvents = sequence?.events || sequence?.matched_events || [];
+  if (!Number.isInteger(eventCount) || eventCount < 1 || sourceEvents.length !== eventCount) return null;
+  const events = sourceEvents
+    .map((item, index) => ({ event_order: Number(item.event_order) || index + 1, ...compactFrame(item) }))
+    .sort((left, right) => left.event_order - right.event_order);
+  if (events.some((event, index) => (
+    event.event_order !== index + 1
+    || !Number.isInteger(event.frame_idx)
+    || event.frame_idx < 0
+  ))) return null;
+  const videoId = normalizeRequestedVideoId(sequence.video_id || events[0]?.video_id);
+  if (!videoId || events.some((event) => normalizeRequestedVideoId(event.video_id || videoId) !== videoId)) return null;
+  if (events.some((event, index) => index > 0 && event.frame_idx <= events[index - 1].frame_idx)) return null;
+  return {
+    video_id: videoId,
+    events: events.map((event) => ({ ...event, video_id: videoId })),
+  };
+}
+
+function trakeSequenceIdentity(sequence) {
+  return `${sequence.video_id}:${sequence.events.map((event) => event.frame_idx).join(":")}`;
+}
+
+function orderedCandidateSequences(eventCount, excluded = new Set()) {
+  const rawSequences = [
+    ...(state.temporalIntersection?.data?.sequences || []),
+    ...(state.temporalIntersection?.data?.reserve_sequences || []),
+  ];
+  const seen = new Set(excluded);
+  return rawSequences.flatMap((sequence) => {
+    const normalized = normalizeTrakeSequence(sequence, eventCount);
+    if (!normalized) return [];
+    const identity = trakeSequenceIdentity(normalized);
+    if (seen.has(identity)) return [];
+    seen.add(identity);
+    return [normalized];
+  }).slice(0, 500);
+}
+
+function buildSubmissionPrepareRequest(queryId) {
+  const snapshot = submissionStore.getSnapshot();
+  const draft = currentSubmissionDraft(snapshot);
+  const request = {
+    task_type: snapshot.mode,
+    mode: "exact_100",
+    query_id: queryId,
+    target_rows: 100,
+    manual_selections: snapshot.mode === "TRAKE" ? [] : (draft.items || []).map(compactFrame),
+    candidate_reservoir: activeCandidateReservoir().map(compactFrame),
+  };
+  if (snapshot.mode === "VQA") request.vqa_answer = draft.answer || "";
+  if (snapshot.mode === "TRAKE") {
+    const ordered = orderedTrakeFrames(draft);
+    const eventCount = draft.events?.length || ordered.length;
+    request.event_count = eventCount;
+    const manualSequence = normalizeTrakeSequence({
+      video_id: ordered[0]?.item.video_id || "",
+      events: ordered.map(({ order, item }) => ({ event_order: order, ...compactFrame(item) })),
+    }, eventCount);
+    if (!manualSequence) {
+      throw new Error(`Complete all ${eventCount || "requested"} TRAKE events in one video with strictly increasing frame indexes before preparing the CSV.`);
+    }
+    request.manual_sequences = [manualSequence];
+    request.candidate_sequences = orderedCandidateSequences(
+      eventCount,
+      new Set([trakeSequenceIdentity(manualSequence)]),
+    );
+  }
+  return request;
+}
+
+async function prepareSubmission(queryId) {
+  const contextKey = submissionStore.getSnapshot().contextKey;
+  const request = buildSubmissionPrepareRequest(queryId);
+  let response;
+  try {
+    response = await fetch("/api/submission/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+  } catch (error) {
+    console.warn("Server submission preparation is unreachable; preview only:", error);
+    if (request.task_type !== "TRAKE") {
+      await ensureClientBackfill(request.manual_selections, request.candidate_reservoir, 100, contextKey);
+    }
+    return prepareSubmissionClientFallback(queryId);
+  }
+  if (response.ok) {
+    const data = await response.json();
+    return { ...data, server_verified: true };
+  }
+  if (![404, 501].includes(response.status)) {
+    throw await responseError(response, "Submission preparation failed");
+  }
+  if (request.task_type !== "TRAKE") {
+    await ensureClientBackfill(request.manual_selections, request.candidate_reservoir, 100, contextKey);
+  }
+  return prepareSubmissionClientFallback(queryId);
+}
+
+async function ensureClientBackfill(manualSelections, candidates, target, contextKey) {
+  const seeds = mergeUniqueCandidates(manualSelections, candidates).slice(0, 8);
+  const seenVideos = new Set();
+  const backfill = [];
+  for (const seed of seeds) {
+    if (backfill.length >= target) break;
+    if (!seed?.video_id || seenVideos.has(seed.video_id)) continue;
+    seenVideos.add(seed.video_id);
+    try {
+      const timeline = await fetchVideoTimeline(seed.video_id);
+      const seedTime = Number(seed.pts_time_s);
+      const ordered = [...timeline.keyframes].sort((left, right) => {
+        if (Number.isFinite(seedTime)) {
+          const delta = Math.abs(Number(left.pts_time_s) - seedTime) - Math.abs(Number(right.pts_time_s) - seedTime);
+          if (delta) return delta;
+        }
+        return Number(left.keyframe_n) - Number(right.keyframe_n);
+      });
+      backfill.push(...ordered.map((frame) => ({ ...frame, source: "canonical-neighbour", validation: "canonical" })));
+    } catch {
+      // Other shortlisted videos can still provide a safe client-side fallback.
+    }
+  }
+  state.exportBackfillByContext[contextKey] = mergeUniqueCandidates(
+    state.exportBackfillByContext[contextKey] || [],
+    backfill,
+  );
+}
+
+function prepareSubmissionClientFallback(queryId) {
+  const snapshot = submissionStore.getSnapshot();
+  const draft = currentSubmissionDraft(snapshot);
+  if (snapshot.mode === "TRAKE") return prepareTrakeClientFallback(queryId, draft);
   const rows = [];
   const seen = new Set();
-
   const addCandidate = (candidate) => {
     if (!candidate?.video_id || !Number.isInteger(Number(candidate.frame_idx)) || rows.length >= 100) return;
     const frameIndex = Number(candidate.frame_idx);
@@ -1237,27 +3246,62 @@ function generateValidatedSubmissionRows(queryId) {
     const key = `${candidate.video_id}:${frameIndex}`;
     if (seen.has(key)) return;
     seen.add(key);
-    rows.push([queryId, candidate.video_id, frameIndex].map(csvCell).join(","));
+    rows.push({
+      video_id: candidate.video_id,
+      frame_idx: frameIndex,
+      answer: snapshot.mode === "VQA" ? draft.answer || "" : undefined,
+    });
   };
+  (draft.items || []).forEach(addCandidate);
+  activeCandidateReservoir().forEach(addCandidate);
+  const answerMissing = snapshot.mode === "VQA" && !String(draft.answer || "").trim();
+  return {
+    ok: false,
+    task_type: snapshot.mode,
+    query_id: queryId,
+    row_count: rows.length,
+    complete: false,
+    missing_rows: Math.max(0, 100 - rows.length),
+    rows,
+    warnings: ["Server preparation endpoint unavailable; rows are canonical client candidates but are not server-verified."],
+    errors: [
+      "Download is disabled until /api/submission/prepare validates every row.",
+      ...(answerMissing ? ["A human Q&A answer is required."] : []),
+    ],
+    server_verified: false,
+  };
+}
 
-  // Row 1 is always the explicit human selection, never the last inspected frame.
-  addCandidate(selected);
-
-  // Prefer real temporal neighbours only when canonical keyframe metadata is loaded.
-  if (state.activeVideoKeyframes[0]?.video_id === selected.video_id) {
-    const selectedIndex = state.activeVideoKeyframes.findIndex((keyframe) => (
-      keyframe.frame_idx === selected.frame_idx || keyframe.keyframe_n === selected.keyframe_n
-    ));
-    if (selectedIndex >= 0) {
-      [-1, 1, -2, 2, -3, 3, -4, 4].forEach((offset) => {
-        const neighbour = state.activeVideoKeyframes[selectedIndex + offset];
-        if (neighbour) addCandidate(neighbour);
-      });
-    }
+function prepareTrakeClientFallback(queryId, draft) {
+  const ordered = orderedTrakeFrames(draft);
+  const expected = draft.events?.length || ordered.length;
+  const manualSequence = normalizeTrakeSequence({
+    video_id: ordered[0]?.item.video_id || "",
+    events: ordered.map(({ order, item }) => ({ event_order: order, ...compactFrame(item) })),
+  }, expected);
+  const sequences = [];
+  const seen = new Set();
+  if (manualSequence) {
+    sequences.push(manualSequence);
+    seen.add(trakeSequenceIdentity(manualSequence));
   }
-
-  state.searchResults.forEach(addCandidate);
-  return rows;
+  sequences.push(...orderedCandidateSequences(expected, seen));
+  const rows = sequences.slice(0, 100);
+  return {
+    ok: false,
+    task_type: "TRAKE",
+    query_id: queryId,
+    row_count: rows.length,
+    complete: false,
+    missing_rows: Math.max(0, 100 - rows.length),
+    rows,
+    warnings: ["Preview contains only complete ordered sequences returned by the current search; no rows were fabricated."],
+    errors: [
+      "Download is disabled until /api/submission/prepare validates the complete ordered sequence rows.",
+      ...(!manualSequence ? [`Select all ${expected} event frames from one video in strictly increasing frame order.`] : []),
+    ],
+    server_verified: false,
+  };
 }
 
 function executeDownload100Csv() {
@@ -1267,27 +3311,25 @@ function executeDownload100Csv() {
     el.exportQueryId.focus();
     return;
   }
-  const rows = generateValidatedSubmissionRows(qId);
-  
-  if (rows.length !== 100) {
-    showToast(`Only ${rows.length} verified unique candidates are available; no fabricated rows were exported.`, "error");
+  if (!canDownloadPreparedSubmission(preparedExport)) {
+    showToast("Prepare a server-validated official CSV before downloading.", "error");
     return;
   }
-
-  const csvContent = rows.join("\n") + "\n";
+  const csvContent = serverOfficialCsvContent(preparedExport);
+  const rowCount = preparedCsvRowCount(preparedExport, csvContent);
   const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   
   const link = document.createElement("a");
   link.setAttribute("href", url);
-  link.setAttribute("download", `submission_query_${qId}_${state.taskType.toLowerCase()}.csv`);
+  link.setAttribute("download", submissionFilename(qId, state.taskType));
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 
   closeExportModal();
-  showToast(`📥 Exported ${rows.length} verified submission rows for Query ${qId}.`, "success");
+  showToast(`📥 Exported ${rowCount} official submission rows for ${qId}.`, "success");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
