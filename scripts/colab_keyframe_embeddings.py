@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
 import sys
@@ -28,6 +29,14 @@ import numpy as np
 DEFAULT_FOLDER_IDS = (
     "1ZjLlGH0Igq70wrAELVIU4kLIWSFUAN4B",
     "1nxum5Qp5_iCQIqud11I8u8ACKE8OOsv5",
+)
+DEFAULT_DATA_ROOT_IDS = (
+    "1ZZpoqN-gehvKO9jUG45Gr3wFIcIcbAta",
+    "1_8Y2PWseN5Max2Lwi43_DW_ulo-T-NzE",
+)
+DEFAULT_MAP_FOLDER_IDS = (
+    "1t-BCtvBPpvG4T0-wKNWFmuHEA0_uXOzN",
+    "1xdP7xe9KfneAAlSo_yCPXgE8u0jksvSs",
 )
 DEFAULT_METACLIP2_ID = "facebook/metaclip-2-worldwide-huge-quickgelu"
 DEFAULT_BEIT3_CHECKPOINT = (
@@ -88,6 +97,170 @@ def list_drive_archives(service: Any, folder_ids: Sequence[str]) -> list[dict[st
         duplicates = sorted({name for name in names if names.count(name) > 1}, key=natural_key)
         raise RuntimeError(f"Duplicate ZIP names across Drive folders: {duplicates[:10]}")
     return sorted(archives, key=lambda item: natural_key(item["name"]))
+
+
+def resolve_data_roots(
+    service: Any,
+    root_folder_ids: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Resolve keyframes_zips and map-keyframes children from each data root."""
+    keyframe_folder_ids: list[str] = []
+    map_folder_ids: list[str] = []
+    for root_id in root_folder_ids:
+        response = (
+            service.files()
+            .list(
+                q=f"'{root_id}' in parents and trashed = false",
+                fields="files(id,name,mimeType)",
+                pageSize=1000,
+                spaces="drive",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute(num_retries=5)
+        )
+        children = {
+            item["name"]: item
+            for item in response.get("files", [])
+            if item.get("mimeType") == "application/vnd.google-apps.folder"
+        }
+        missing = {"keyframes_zips", "map-keyframes"} - set(children)
+        if missing:
+            raise RuntimeError(f"Data root {root_id} is missing folders: {sorted(missing)}")
+        keyframe_folder_ids.append(children["keyframes_zips"]["id"])
+        map_folder_ids.append(children["map-keyframes"]["id"])
+    return keyframe_folder_ids, map_folder_ids
+
+
+def load_drive_keyframe_maps(
+    service: Any,
+    folder_ids: Sequence[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Load and validate all organizer map CSVs directly from shared Drive."""
+    files: list[dict[str, Any]] = []
+    for folder_id in folder_ids:
+        page_token: str | None = None
+        while True:
+            response = (
+                service.files()
+                .list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    fields="nextPageToken,files(id,name,size,mimeType,md5Checksum)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    spaces="drive",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute(num_retries=5)
+            )
+            for item in response.get("files", []):
+                if item.get("name", "").lower().endswith(".csv"):
+                    item["source_folder_id"] = folder_id
+                    files.append(item)
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+    maps: dict[str, list[dict[str, Any]]] = {}
+    for item in sorted(files, key=lambda value: natural_key(value["name"])):
+        video_id = Path(item["name"]).stem.upper()
+        if video_id in maps:
+            raise RuntimeError(f"Duplicate map CSV for {video_id}")
+        payload = (
+            service.files()
+            .get_media(fileId=item["id"], supportsAllDrives=True)
+            .execute(num_retries=5)
+        )
+        text = payload.decode("utf-8-sig")
+        rows = []
+        for row in csv.DictReader(io.StringIO(text)):
+            rows.append(
+                {
+                    "keyframe_n": int(row["n"]),
+                    "pts_time_s": float(row["pts_time"]),
+                    "fps": float(row["fps"]),
+                    "frame_idx": int(row["frame_idx"]),
+                }
+            )
+        numbers = [row["keyframe_n"] for row in rows]
+        frame_indices = [row["frame_idx"] for row in rows]
+        timestamps = [row["pts_time_s"] for row in rows]
+        if not rows or numbers != sorted(set(numbers)):
+            raise RuntimeError(f"Invalid keyframe sequence in {item['name']}")
+        if frame_indices != sorted(frame_indices) or timestamps != sorted(timestamps):
+            raise RuntimeError(f"Non-monotonic map rows in {item['name']}")
+        if any(row["fps"] <= 0 for row in rows):
+            raise RuntimeError(f"Non-positive FPS in {item['name']}")
+        maps[video_id] = rows
+    return maps
+
+
+def load_cached_keyframe_maps(
+    service: Any,
+    folder_ids: Sequence[str],
+    output_dir: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Cache the small organizer CSV snapshot on persistent output storage."""
+    cache_path = output_dir / "keyframe_maps_snapshot.json"
+    if cache_path.exists():
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if payload.get("source_map_folder_ids") == list(folder_ids):
+            maps = payload.get("maps")
+            if isinstance(maps, dict) and maps:
+                print(f"Using cached keyframe maps: {cache_path}")
+                return {video_id.upper(): rows for video_id, rows in maps.items()}
+
+    maps = load_drive_keyframe_maps(service, folder_ids)
+    atomic_json(
+        cache_path,
+        {
+            "source_map_folder_ids": list(folder_ids),
+            "video_count": len(maps),
+            "maps": maps,
+        },
+    )
+    return maps
+
+
+def validate_archive_map_pairs(
+    archives: Sequence[dict[str, Any]],
+    keyframe_maps: dict[str, list[dict[str, Any]]],
+) -> None:
+    archive_ids = {Path(item["name"]).stem.upper() for item in archives}
+    map_ids = set(keyframe_maps)
+    if archive_ids != map_ids:
+        missing_maps = sorted(archive_ids - map_ids, key=natural_key)
+        missing_archives = sorted(map_ids - archive_ids, key=natural_key)
+        raise RuntimeError(
+            "Drive keyframes/map-keyframes pairing failed: "
+            f"ZIPs without CSV={missing_maps[:10]}, CSVs without ZIP={missing_archives[:10]}"
+        )
+    print(f"Verified exact Drive pairing: {len(archive_ids)} ZIPs + {len(map_ids)} map CSVs")
+
+
+def ensure_embedding_identity(path: Path, identity: dict[str, Any]) -> None:
+    """Lock output to one model/corpus while accepting the legacy child-folder identity."""
+    if not path.exists():
+        atomic_json(path, identity)
+        return
+    existing = json.loads(path.read_text(encoding="utf-8"))
+    scalar_fields = ("model_family", "model_id", "dtype", "l2_normalized")
+    compatible = all(existing.get(field) == identity.get(field) for field in scalar_fields)
+    compatible = compatible and set(existing.get("source_drive_folder_ids", [])) == set(
+        identity["source_drive_folder_ids"]
+    )
+    for field in ("source_data_root_folder_ids", "source_map_folder_ids"):
+        if field in existing:
+            compatible = compatible and set(existing[field]) == set(identity[field])
+    if not compatible:
+        raise RuntimeError(
+            f"Output directory belongs to a different embedding run: {existing}. "
+            "Choose a new --output-dir."
+        )
+    if existing != identity:
+        atomic_json(path, identity)
+        print("Upgraded legacy embedding identity with data-root/map folder IDs")
 
 
 def safe_extract(archive_path: Path, destination: Path) -> int:
@@ -412,15 +585,34 @@ def save_jsonl_atomic(path: Path, records: Sequence[dict[str, Any]]) -> None:
     temporary.replace(path)
 
 
-def build_video_metadata(video_id: str, paths: Sequence[Path]) -> list[dict[str, Any]]:
+def build_video_metadata(
+    video_id: str,
+    paths: Sequence[Path],
+    map_rows: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    map_by_number = {int(row["keyframe_n"]): row for row in map_rows}
+    image_numbers = [keyframe_number(path, index) for index, path in enumerate(paths, start=1)]
+    map_numbers = [int(row["keyframe_n"]) for row in map_rows]
+    if image_numbers != map_numbers:
+        raise RuntimeError(
+            f"Image/map mismatch for {video_id}: {len(image_numbers)} images versus "
+            f"{len(map_numbers)} map rows; image sample={image_numbers[:5]}, "
+            f"map sample={map_numbers[:5]}"
+        )
+
     records = []
-    for local_index, path in enumerate(paths, start=1):
-        number = keyframe_number(path, local_index)
+    for vector_row, (path, number) in enumerate(zip(paths, image_numbers, strict=True)):
+        mapping = map_by_number[number]
+        frame_idx = int(mapping["frame_idx"])
         records.append(
             {
                 "video_id": video_id,
                 "keyframe_n": number,
-                "vector_row": local_index - 1,
+                "frame_idx": frame_idx,
+                "pts_time_s": float(mapping["pts_time_s"]),
+                "fps": float(mapping["fps"]),
+                "frame_uid": f"{video_id}:{frame_idx}",
+                "vector_row": vector_row,
                 "vector_shard": f"shards/{video_id}.f16.npy",
                 "image_relpath": f"keyframes/{video_id}/{path.name}",
                 "filename": path.name,
@@ -434,7 +626,11 @@ def build_video_metadata(video_id: str, paths: Sequence[Path]) -> list[dict[str,
     return records
 
 
-def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] | None:
+def completed_stream_shard(
+    output_dir: Path,
+    video_id: str,
+    map_rows: Sequence[dict[str, Any]],
+) -> tuple[int, int] | None:
     shard_path = output_dir / "shards" / f"{video_id}.f16.npy"
     metadata_path = output_dir / "video_metadata" / f"{video_id}.jsonl"
     if not shard_path.exists() or not metadata_path.exists():
@@ -451,10 +647,26 @@ def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] |
     )
     if not valid:
         raise RuntimeError(f"Invalid existing streaming shard for {video_id}")
+    map_by_number = {int(row["keyframe_n"]): row for row in map_rows}
+    record_numbers = [int(record.get("keyframe_n", -1)) for record in records]
+    map_numbers = [int(row["keyframe_n"]) for row in map_rows]
+    if record_numbers != map_numbers:
+        raise RuntimeError(
+            f"Existing shard/map mismatch for {video_id}: "
+            f"{len(record_numbers)} vector rows versus {len(map_numbers)} map rows"
+        )
+
     migrated = False
     for vector_row, record in enumerate(records):
         if record.get("video_id") != video_id or "keyframe_n" not in record:
             raise RuntimeError(f"Invalid mapping record for {video_id} row {vector_row}")
+        mapping = map_by_number[int(record["keyframe_n"])]
+        expected_mapping = {
+            "frame_idx": int(mapping["frame_idx"]),
+            "pts_time_s": float(mapping["pts_time_s"]),
+            "fps": float(mapping["fps"]),
+            "frame_uid": f"{video_id}:{int(mapping['frame_idx'])}",
+        }
         expected_shard = f"shards/{video_id}.f16.npy"
         if record.get("vector_row") != vector_row:
             record["vector_row"] = vector_row
@@ -462,6 +674,10 @@ def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] |
         if record.get("vector_shard") != expected_shard:
             record["vector_shard"] = expected_shard
             migrated = True
+        for field, expected_value in expected_mapping.items():
+            if record.get(field) != expected_value:
+                record[field] = expected_value
+                migrated = True
     if migrated:
         save_jsonl_atomic(metadata_path, records)
     return int(shard.shape[1]), metadata_rows
@@ -470,6 +686,7 @@ def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] |
 def stream_drive_archives(
     service: Any,
     archives: Sequence[dict[str, Any]],
+    keyframe_maps: dict[str, list[dict[str, Any]]],
     embedder: Any,
     output_dir: Path,
     work_dir: Path,
@@ -490,9 +707,11 @@ def stream_drive_archives(
         video_id = Path(item["name"]).stem.upper()
         if not VIDEO_ID_RE.fullmatch(video_id):
             raise RuntimeError(f"Unexpected Drive ZIP name: {item['name']}")
+        if video_id not in keyframe_maps:
+            raise RuntimeError(f"No map-keyframes CSV found for {video_id}")
         video_ids.append(video_id)
 
-        completed = completed_stream_shard(output_dir, video_id)
+        completed = completed_stream_shard(output_dir, video_id, keyframe_maps[video_id])
         if completed is not None:
             shard_dim, row_count = completed
             if embedding_dim and shard_dim != embedding_dim:
@@ -528,7 +747,7 @@ def stream_drive_archives(
                 num_workers,
                 device,
             )
-            records = build_video_metadata(video_id, paths)
+            records = build_video_metadata(video_id, paths, keyframe_maps[video_id])
             save_jsonl_atomic(
                 output_dir / "video_metadata" / f"{video_id}.jsonl",
                 records,
@@ -578,6 +797,7 @@ def merge_stream_outputs(
                     global_row = offset + local_index
                     record["row_id"] = global_row
                     record["global_vector_row"] = global_row
+                    record["point_id"] = global_row + 1
                     destination.write(json.dumps(record, ensure_ascii=False) + "\n")
             offset += rows
     matrix.flush()
@@ -593,8 +813,13 @@ def export_keyframe_index_csv(metadata_path: Path, output_dir: Path) -> Path:
     temporary = index_path.with_suffix(index_path.suffix + ".tmp")
     fieldnames = [
         "global_vector_row",
+        "point_id",
         "video_id",
         "keyframe_n",
+        "frame_idx",
+        "pts_time_s",
+        "fps",
+        "frame_uid",
         "vector_shard",
         "vector_row",
         "filename",
@@ -717,6 +942,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("metaclip2", "beit3"), required=True)
     parser.add_argument("--folder-id", action="append", dest="folder_ids")
+    parser.add_argument(
+        "--data-root-folder-id",
+        action="append",
+        dest="data_root_folder_ids",
+        help="Shared Drive data root containing keyframes_zips and map-keyframes.",
+    )
+    parser.add_argument("--map-folder-id", action="append", dest="map_folder_ids")
     parser.add_argument("--data-dir", default="/content/aic_keyframes")
     parser.add_argument("--zip-cache-dir", default="/content/aic_zip_cache")
     parser.add_argument("--output-dir", required=True)
@@ -752,7 +984,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("batch-size must be positive and num-workers must be non-negative")
     data_dir = Path(args.data_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
-    folder_ids = tuple(args.folder_ids or DEFAULT_FOLDER_IDS)
+    data_root_folder_ids = tuple(args.data_root_folder_ids or ())
+    folder_ids = tuple(args.folder_ids or ())
+    map_folder_ids = tuple(args.map_folder_ids or ())
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -765,7 +999,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         credentials, _ = google.auth.default()
         service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        archives = list_drive_archives(service, folder_ids)
+        if data_root_folder_ids:
+            if folder_ids or map_folder_ids:
+                raise ValueError(
+                    "Use --data-root-folder-id by itself; child keyframe/map folders "
+                    "are discovered automatically."
+                )
+            resolved_keyframes, resolved_maps = resolve_data_roots(
+                service, data_root_folder_ids
+            )
+            folder_ids = tuple(resolved_keyframes)
+            map_folder_ids = tuple(resolved_maps)
+        else:
+            folder_ids = folder_ids or DEFAULT_FOLDER_IDS
+            map_folder_ids = map_folder_ids or DEFAULT_MAP_FOLDER_IDS
+
+        all_archives = list_drive_archives(service, folder_ids)
+        keyframe_maps = load_cached_keyframe_maps(service, map_folder_ids, output_dir)
+        validate_archive_map_pairs(all_archives, keyframe_maps)
+        archives = all_archives
         if args.max_zips is not None:
             archives = archives[: args.max_zips]
         archive_counts = Counter(item["source_folder_id"] for item in archives)
@@ -784,19 +1036,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else args.beit3_checkpoint_url
                 ),
                 "source_drive_folder_ids": list(folder_ids),
+                "source_data_root_folder_ids": list(data_root_folder_ids),
+                "source_map_folder_ids": list(map_folder_ids),
                 "dtype": "float16",
                 "l2_normalized": True,
             }
             identity_path = output_dir / "embedding_identity.json"
-            if identity_path.exists():
-                existing_identity = json.loads(identity_path.read_text(encoding="utf-8"))
-                if existing_identity != identity:
-                    raise RuntimeError(
-                        "Output directory belongs to a different embedding run: "
-                        f"{existing_identity}. Choose a new --output-dir."
-                    )
-            else:
-                atomic_json(identity_path, identity)
+            ensure_embedding_identity(identity_path, identity)
 
             if not torch.cuda.is_available():
                 raise RuntimeError("A CUDA GPU is required; choose an A100 runtime in Colab")
@@ -813,6 +1059,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             video_ids, embedding_dim, image_count = stream_drive_archives(
                 service,
                 archives,
+                keyframe_maps,
                 embedder,
                 output_dir,
                 data_dir,
@@ -848,10 +1095,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise RuntimeError("Final streaming matrix/metadata verification failed")
             index_path = export_keyframe_index_csv(metadata_path, output_dir)
             run_manifest = {
-                "schema_version": "aic26.keyframe_embeddings.v1",
+                "schema_version": "aic26.keyframe_embeddings.v2",
                 "model_family": args.model,
                 "model_id": identity["model_id"],
                 "source_drive_folder_ids": list(folder_ids),
+                "source_data_root_folder_ids": list(data_root_folder_ids),
+                "source_map_folder_ids": list(map_folder_ids),
                 "source_mode": "shared_drive_zip_streaming",
                 "video_count": video_count,
                 "keyframe_count": total,
@@ -862,6 +1111,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "matrix_file": matrix_path.name,
                 "metadata_file": metadata_path.name,
                 "keyframe_index_file": index_path.name,
+                "keyframe_maps_file": "keyframe_maps_snapshot.json",
+                "mapping_source": "map-keyframes CSV (n, pts_time, fps, frame_idx)",
                 "elapsed_seconds": round(time.time() - started, 3),
                 "gpu": torch.cuda.get_device_name(0),
             }
@@ -877,6 +1128,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             Path(args.zip_cache_dir),
             keep_zips=args.keep_zips,
         )
+    elif data_root_folder_ids:
+        raise ValueError("--skip-download cannot resolve --data-root-folder-id without Drive API")
+    else:
+        folder_ids = folder_ids or DEFAULT_FOLDER_IDS
+        map_folder_ids = map_folder_ids or DEFAULT_MAP_FOLDER_IDS
 
     grouped_paths = discover_keyframes(data_dir)
     video_count = len(grouped_paths)
@@ -904,19 +1160,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.metaclip2_model_id if args.model == "metaclip2" else args.beit3_checkpoint_url
         ),
         "source_drive_folder_ids": list(folder_ids),
+        "source_data_root_folder_ids": list(data_root_folder_ids),
+        "source_map_folder_ids": list(map_folder_ids),
         "dtype": "float16",
         "l2_normalized": True,
     }
     identity_path = output_dir / "embedding_identity.json"
-    if identity_path.exists():
-        existing_identity = json.loads(identity_path.read_text(encoding="utf-8"))
-        if existing_identity != identity:
-            raise RuntimeError(
-                f"Output directory belongs to a different embedding run: {existing_identity}. "
-                "Choose a new --output-dir."
-            )
-    else:
-        atomic_json(identity_path, identity)
+    ensure_embedding_identity(identity_path, identity)
 
     if not torch.cuda.is_available():
         raise RuntimeError("A CUDA GPU is required; choose an A100 runtime in Colab")
@@ -957,6 +1207,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.metaclip2_model_id if args.model == "metaclip2" else args.beit3_checkpoint_url
         ),
         "source_drive_folder_ids": list(folder_ids),
+        "source_data_root_folder_ids": list(data_root_folder_ids),
+        "source_map_folder_ids": list(map_folder_ids),
         "video_count": video_count,
         "keyframe_count": total,
         "embedding_dimension": embedding_dim,
