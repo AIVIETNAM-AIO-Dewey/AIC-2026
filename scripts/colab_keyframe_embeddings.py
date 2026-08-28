@@ -1,0 +1,646 @@
+"""Colab A100 pipeline for downloading and embedding AIC keyframes.
+
+The two Colab notebooks in ``notebooks/`` call this module with either the
+MetaCLIP 2 worldwide encoder or the official BEiT-3 COCO retrieval encoder.
+Drive files are downloaded one ZIP at a time, safely extracted, and removed so
+the 31 GB compressed corpus does not occupy disk alongside the extracted data.
+Embeddings are committed per video before a final, deterministic merge.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+import types
+import zipfile
+from collections import Counter, abc, defaultdict
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+
+
+DEFAULT_FOLDER_IDS = (
+    "1ZjLlGH0Igq70wrAELVIU4kLIWSFUAN4B",
+    "1nxum5Qp5_iCQIqud11I8u8ACKE8OOsv5",
+)
+DEFAULT_METACLIP2_ID = "facebook/metaclip-2-worldwide-huge-quickgelu"
+DEFAULT_BEIT3_CHECKPOINT = (
+    "https://github.com/addf400/files/releases/download/beit3/"
+    "beit3_base_patch16_384_coco_retrieval.pth"
+)
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+VIDEO_ID_RE = re.compile(r"L\d+_V\d+", re.IGNORECASE)
+
+
+def natural_key(value: str) -> tuple[Any, ...]:
+    """Return a stable human/numeric ordering key."""
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", value)
+    )
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def list_drive_archives(service: Any, folder_ids: Sequence[str]) -> list[dict[str, Any]]:
+    """Page through all ZIP children of the supplied shared Drive folders."""
+    archives: list[dict[str, Any]] = []
+    for folder_id in folder_ids:
+        page_token: str | None = None
+        while True:
+            response = (
+                service.files()
+                .list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    fields="nextPageToken,files(id,name,size,mimeType,md5Checksum)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    spaces="drive",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute(num_retries=5)
+            )
+            for item in response.get("files", []):
+                if item.get("name", "").lower().endswith(".zip"):
+                    item["source_folder_id"] = folder_id
+                    archives.append(item)
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+    ids = [item["id"] for item in archives]
+    names = [item["name"] for item in archives]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError("Drive listing contains duplicate file IDs")
+    if len(names) != len(set(names)):
+        duplicates = sorted({name for name in names if names.count(name) > 1}, key=natural_key)
+        raise RuntimeError(f"Duplicate ZIP names across Drive folders: {duplicates[:10]}")
+    return sorted(archives, key=lambda item: natural_key(item["name"]))
+
+
+def safe_extract(archive_path: Path, destination: Path) -> int:
+    """Extract a ZIP while rejecting absolute paths and path traversal."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    extracted_files = 0
+    with zipfile.ZipFile(archive_path) as archive:
+        bad = archive.testzip()
+        if bad is not None:
+            raise RuntimeError(f"Corrupt member {bad!r} in {archive_path.name}")
+        for member in archive.infolist():
+            member_path = (destination / member.filename).resolve()
+            try:
+                member_path.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe ZIP member {member.filename!r}") from exc
+            archive.extract(member, destination)
+            if not member.is_dir():
+                extracted_files += 1
+    return extracted_files
+
+
+def download_and_extract_archives(
+    service: Any,
+    archives: Sequence[dict[str, Any]],
+    data_dir: Path,
+    zip_cache_dir: Path,
+    keep_zips: bool = False,
+) -> None:
+    """Download each Drive archive, verify its size, extract it, and checkpoint."""
+    from googleapiclient.http import MediaIoBaseDownload
+    from tqdm.auto import tqdm
+
+    marker_dir = data_dir / ".drive_extract_complete"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    zip_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for item in tqdm(archives, desc="Drive ZIPs", unit="zip"):
+        marker = marker_dir / f"{item['id']}.json"
+        if marker.exists():
+            continue
+
+        zip_path = zip_cache_dir / item["name"]
+        partial_path = zip_path.with_suffix(zip_path.suffix + ".part")
+        expected_size = int(item.get("size") or 0)
+        if not zip_path.exists() or (expected_size and zip_path.stat().st_size != expected_size):
+            partial_path.unlink(missing_ok=True)
+            request = service.files().get_media(fileId=item["id"], supportsAllDrives=True)
+            with partial_path.open("wb") as handle:
+                downloader = MediaIoBaseDownload(handle, request, chunksize=64 * 1024 * 1024)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk(num_retries=5)
+            if expected_size and partial_path.stat().st_size != expected_size:
+                raise RuntimeError(
+                    f"Size mismatch for {item['name']}: "
+                    f"{partial_path.stat().st_size} != {expected_size}"
+                )
+            partial_path.replace(zip_path)
+
+        # Always isolate one archive per video.  This supports both ZIP layouts:
+        # images directly at archive root and images under an Lxx_Vxxx folder.
+        archive_destination = data_dir / Path(item["name"]).stem
+        extracted_files = safe_extract(zip_path, archive_destination)
+        atomic_json(
+            marker,
+            {
+                "drive_file_id": item["id"],
+                "name": item["name"],
+                "size": expected_size,
+                "md5_checksum": item.get("md5Checksum"),
+                "extracted_files": extracted_files,
+                "destination": archive_destination.relative_to(data_dir).as_posix(),
+            },
+        )
+        if not keep_zips:
+            zip_path.unlink(missing_ok=True)
+
+
+def infer_video_id(path: Path) -> str:
+    for part in reversed(path.parts):
+        match = VIDEO_ID_RE.fullmatch(part)
+        if match:
+            return match.group(0).upper()
+    match = VIDEO_ID_RE.search(path.as_posix())
+    if match:
+        return match.group(0).upper()
+    raise ValueError(f"Cannot infer video ID from {path}")
+
+
+def discover_keyframes(data_dir: Path) -> dict[str, list[Path]]:
+    grouped: dict[str, list[Path]] = defaultdict(list)
+    for path in data_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            grouped[infer_video_id(path)].append(path)
+    return {
+        video_id: sorted(paths, key=lambda path: natural_key(path.as_posix()))
+        for video_id, paths in sorted(grouped.items(), key=lambda pair: natural_key(pair[0]))
+    }
+
+
+def keyframe_number(path: Path, fallback: int) -> int:
+    numbers = re.findall(r"\d+", path.stem)
+    return int(numbers[-1]) if numbers else fallback
+
+
+def collate_image_batch(batch: Sequence[tuple[str, Any]]) -> tuple[list[str], list[Any]]:
+    paths, images = zip(*batch)
+    return list(paths), list(images)
+
+
+class KeyframeDataset:
+    def __init__(self, paths: Sequence[Path]):
+        self.paths = list(paths)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, index: int) -> tuple[str, Any]:
+        from PIL import Image, ImageOps
+
+        path = self.paths[index]
+        try:
+            with Image.open(path) as image:
+                image = ImageOps.exif_transpose(image).convert("RGB")
+                image.load()
+                return str(path), image
+        except Exception as exc:
+            raise RuntimeError(f"Cannot decode keyframe {path}") from exc
+
+
+def unwrap_pooler_output(value: Any) -> Any:
+    """Support both older and newer Transformers feature return types."""
+    if hasattr(value, "pooler_output"):
+        return value.pooler_output
+    if hasattr(value, "image_embeds"):
+        return value.image_embeds
+    return value
+
+
+class MetaClip2Embedder:
+    def __init__(self, model_id: str, device: str):
+        import torch
+        from transformers import AutoModel, AutoProcessor
+
+        self.torch = torch
+        self.device = device
+        self.model_id = model_id
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.model = AutoModel.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            low_cpu_mem_usage=True,
+        ).to(device)
+        self.model.eval()
+
+    @property
+    def preprocessing(self) -> dict[str, Any]:
+        return {"source": "Hugging Face AutoProcessor", "model_id": self.model_id}
+
+    def encode(self, images: Sequence[Any]) -> np.ndarray:
+        torch = self.torch
+        inputs = self.processor(images=list(images), return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(self.device, non_blocking=True)
+        if self.device == "cuda":
+            pixel_values = pixel_values.half()
+        with torch.inference_mode(), torch.autocast(
+            device_type=self.device,
+            dtype=torch.float16,
+            enabled=self.device == "cuda",
+        ):
+            outputs = self.model.get_image_features(pixel_values=pixel_values)
+            features = unwrap_pooler_output(outputs)
+            features = torch.nn.functional.normalize(features.float(), p=2, dim=-1)
+        return features.cpu().numpy().astype(np.float16, copy=False)
+
+
+def download_http_resumable(url: str, destination: Path) -> None:
+    import requests
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_suffix(destination.suffix + ".part")
+    existing = partial.stat().st_size if partial.exists() else 0
+    headers = {"Range": f"bytes={existing}-"} if existing else {}
+    with requests.get(
+        url,
+        headers=headers,
+        stream=True,
+        timeout=60,
+        allow_redirects=True,
+    ) as response:
+        if existing and response.status_code == 200:
+            partial.unlink(missing_ok=True)
+            existing = 0
+        response.raise_for_status()
+        mode = "ab" if existing and response.status_code == 206 else "wb"
+        with partial.open(mode) as handle:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+    partial.replace(destination)
+
+
+class BEiT3Embedder:
+    def __init__(self, repo_dir: Path, checkpoint_url: str, checkpoint_dir: Path, device: str):
+        import torch
+        import torch.nn as nn
+        from torchvision import transforms
+        from torchvision.transforms import InterpolationMode
+
+        beit3_dir = repo_dir / "beit3" if (repo_dir / "beit3").is_dir() else repo_dir
+        if not (beit3_dir / "modeling_finetune.py").exists():
+            raise FileNotFoundError(f"BEiT-3 source not found under {beit3_dir}")
+
+        # timm 0.4.x and the original training utilities predate torch 2.x.
+        # These compatibility symbols were containers/constants, not tensor
+        # implementations, so a narrow shim is sufficient for inference.
+        torch_six_shim = types.ModuleType("torch._six")
+        torch_six_shim.container_abcs = abc
+        torch_six_shim.inf = float("inf")
+        torch_six_shim.string_classes = (str,)
+        sys.modules.setdefault("torch._six", torch_six_shim)
+
+        # modeling_finetune only needs these symbols for inference.  The shim
+        # avoids importing unrelated legacy training dependencies.
+        utils_shim = types.ModuleType("utils")
+        utils_shim.get_rank = lambda: 0
+        utils_shim.get_world_size = lambda: 1
+
+        class ClipLoss(nn.Module):
+            def forward(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError(
+                    "ClipLoss is training-only and unavailable in this inference notebook"
+                )
+
+        utils_shim.ClipLoss = ClipLoss
+        sys.modules["utils"] = utils_shim
+        sys.path.insert(0, str(beit3_dir))
+        from modeling_finetune import beit3_base_patch16_384_retrieval
+
+        checkpoint_path = checkpoint_dir / Path(checkpoint_url).name
+        if not checkpoint_path.exists():
+            download_http_resumable(checkpoint_url, checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("model", checkpoint)
+        model = beit3_base_patch16_384_retrieval()
+        incompatible = model.load_state_dict(state_dict, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise RuntimeError(f"BEiT-3 checkpoint mismatch: {incompatible}")
+
+        self.torch = torch
+        self.device = device
+        self.checkpoint_url = checkpoint_url
+        self.model = model.to(device).eval()
+        if device == "cuda":
+            self.model.half()
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((384, 384), interpolation=InterpolationMode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+            ]
+        )
+
+    @property
+    def preprocessing(self) -> dict[str, Any]:
+        return {
+            "resize": [384, 384],
+            "interpolation": "bicubic",
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.5, 0.5, 0.5],
+            "checkpoint": self.checkpoint_url,
+        }
+
+    def encode(self, images: Sequence[Any]) -> np.ndarray:
+        torch = self.torch
+        batch = torch.stack([self.transform(image) for image in images]).to(
+            self.device, non_blocking=True
+        )
+        if self.device == "cuda":
+            batch = batch.half()
+        with torch.inference_mode(), torch.autocast(
+            device_type=self.device,
+            dtype=torch.float16,
+            enabled=self.device == "cuda",
+        ):
+            vision_features, _ = self.model(image=batch, only_infer=True)
+            vision_features = torch.nn.functional.normalize(vision_features.float(), p=2, dim=-1)
+        return vision_features.cpu().numpy().astype(np.float16, copy=False)
+
+
+def create_embedder(args: argparse.Namespace, device: str) -> Any:
+    if args.model == "metaclip2":
+        return MetaClip2Embedder(args.metaclip2_model_id, device)
+    return BEiT3Embedder(
+        Path(args.beit3_repo_dir),
+        args.beit3_checkpoint_url,
+        Path(args.checkpoint_dir),
+        device,
+    )
+
+
+def save_array_atomic(path: Path, array: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        np.save(handle, array)
+    temporary.replace(path)
+
+
+def embed_video_shards(
+    grouped_paths: dict[str, list[Path]],
+    embedder: Any,
+    output_dir: Path,
+    batch_size: int,
+    num_workers: int,
+    device: str,
+) -> int:
+    import torch
+    from torch.utils.data import DataLoader
+    from tqdm.auto import tqdm
+
+    shard_dir = output_dir / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    embedding_dim = 0
+    for video_id, paths in tqdm(grouped_paths.items(), desc="Videos", unit="video"):
+        shard_path = shard_dir / f"{video_id}.f16.npy"
+        if shard_path.exists():
+            existing = np.load(shard_path, mmap_mode="r")
+            valid_existing = (
+                existing.ndim == 2
+                and existing.shape[0] == len(paths)
+                and existing.dtype == np.float16
+            )
+            if valid_existing:
+                embedding_dim = int(existing.shape[1])
+                continue
+            raise RuntimeError(f"Invalid existing shard; remove or repair it: {shard_path}")
+
+        loader = DataLoader(
+            KeyframeDataset(paths),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_image_batch,
+            persistent_workers=num_workers > 0,
+        )
+        batches: list[np.ndarray] = []
+        observed_paths: list[str] = []
+        for batch_paths, images in loader:
+            batches.append(embedder.encode(images))
+            observed_paths.extend(batch_paths)
+        if observed_paths != [str(path) for path in paths]:
+            raise RuntimeError(f"DataLoader changed keyframe order for {video_id}")
+        vectors = np.concatenate(batches, axis=0)
+        if vectors.shape[0] != len(paths) or not np.isfinite(vectors).all():
+            raise RuntimeError(f"Invalid vectors generated for {video_id}: {vectors.shape}")
+        norms = np.linalg.norm(vectors.astype(np.float32), axis=1)
+        if not np.allclose(norms, 1.0, atol=2e-3):
+            raise RuntimeError(f"Non-normalized vectors generated for {video_id}")
+        embedding_dim = int(vectors.shape[1])
+        save_array_atomic(shard_path, vectors)
+        del vectors, batches
+        if device == "cuda":
+            torch.cuda.empty_cache()
+    return embedding_dim
+
+
+def merge_outputs(
+    grouped_paths: dict[str, list[Path]],
+    output_dir: Path,
+    data_dir: Path,
+    embedding_dim: int,
+) -> tuple[Path, Path, int]:
+    total = sum(len(paths) for paths in grouped_paths.values())
+    matrix_path = output_dir / "keyframes_visual_vectors.f16.npy"
+    metadata_path = output_dir / "keyframes_metadata.jsonl"
+    temporary_matrix = matrix_path.with_suffix(matrix_path.suffix + ".tmp")
+    temporary_metadata = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    matrix = np.lib.format.open_memmap(
+        temporary_matrix,
+        mode="w+",
+        dtype=np.float16,
+        shape=(total, embedding_dim),
+    )
+    offset = 0
+    with temporary_metadata.open("w", encoding="utf-8") as metadata_file:
+        for video_id, paths in grouped_paths.items():
+            shard = np.load(output_dir / "shards" / f"{video_id}.f16.npy", mmap_mode="r")
+            matrix[offset : offset + len(paths)] = shard
+            for local_index, path in enumerate(paths, start=1):
+                record = {
+                    "row_id": offset + local_index - 1,
+                    "video_id": video_id,
+                    "keyframe_n": keyframe_number(path, local_index),
+                    "image_relpath": path.relative_to(data_dir).as_posix(),
+                    "filename": path.name,
+                }
+                metadata_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            offset += len(paths)
+    matrix.flush()
+    del matrix
+    temporary_matrix.replace(matrix_path)
+    temporary_metadata.replace(metadata_path)
+    return matrix_path, metadata_path, total
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", choices=("metaclip2", "beit3"), required=True)
+    parser.add_argument("--folder-id", action="append", dest="folder_ids")
+    parser.add_argument("--data-dir", default="/content/aic_keyframes")
+    parser.add_argument("--zip-cache-dir", default="/content/aic_zip_cache")
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--checkpoint-dir", default="/content/model_checkpoints")
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--max-zips", type=int)
+    parser.add_argument("--keep-zips", action="store_true")
+    parser.add_argument("--skip-download", action="store_true")
+    parser.add_argument("--expected-videos", type=int, default=873)
+    parser.add_argument("--expected-images", type=int, default=177321)
+    parser.add_argument("--allow-count-mismatch", action="store_true")
+    parser.add_argument("--metaclip2-model-id", default=DEFAULT_METACLIP2_ID)
+    parser.add_argument("--beit3-repo-dir", default="/content/unilm")
+    parser.add_argument("--beit3-checkpoint-url", default=DEFAULT_BEIT3_CHECKPOINT)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    import torch
+
+    args = parse_args(argv)
+    if args.batch_size <= 0 or args.num_workers < 0:
+        raise ValueError("batch-size must be positive and num-workers must be non-negative")
+    data_dir = Path(args.data_dir).resolve()
+    output_dir = Path(args.output_dir).resolve()
+    folder_ids = tuple(args.folder_ids or DEFAULT_FOLDER_IDS)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not args.skip_download:
+        import google.auth
+        from googleapiclient.discovery import build
+
+        credentials, _ = google.auth.default()
+        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        archives = list_drive_archives(service, folder_ids)
+        if args.max_zips is not None:
+            archives = archives[: args.max_zips]
+        archive_counts = Counter(item["source_folder_id"] for item in archives)
+        print("Drive folders selected:")
+        for folder_id in folder_ids:
+            print(f"  - {folder_id}: {archive_counts[folder_id]} ZIPs")
+        compressed_gib = sum(int(item.get("size") or 0) for item in archives) / 1024**3
+        print(f"Drive manifest: {len(archives)} ZIPs, {compressed_gib:.2f} GiB compressed")
+        atomic_json(output_dir / "drive_archives_manifest.json", archives)
+        download_and_extract_archives(
+            service,
+            archives,
+            data_dir,
+            Path(args.zip_cache_dir),
+            keep_zips=args.keep_zips,
+        )
+
+    grouped_paths = discover_keyframes(data_dir)
+    video_count = len(grouped_paths)
+    image_count = sum(len(paths) for paths in grouped_paths.values())
+    print(f"Discovered {image_count:,} keyframes across {video_count:,} videos")
+    count_mismatch = video_count != args.expected_videos or image_count != args.expected_images
+    if not args.allow_count_mismatch and args.max_zips is None and count_mismatch:
+        raise RuntimeError(
+            "Corpus count mismatch: "
+            f"got {video_count} videos/{image_count} images; expected "
+            f"{args.expected_videos}/{args.expected_images}. "
+            "Use --allow-count-mismatch only after checking the Drive manifest."
+        )
+    if image_count == 0:
+        raise RuntimeError(f"No keyframe images found under {data_dir}")
+
+    identity = {
+        "model_family": args.model,
+        "model_id": (
+            args.metaclip2_model_id if args.model == "metaclip2" else args.beit3_checkpoint_url
+        ),
+        "source_drive_folder_ids": list(folder_ids),
+        "dtype": "float16",
+        "l2_normalized": True,
+    }
+    identity_path = output_dir / "embedding_identity.json"
+    if identity_path.exists():
+        existing_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        if existing_identity != identity:
+            raise RuntimeError(
+                f"Output directory belongs to a different embedding run: {existing_identity}. "
+                "Choose a new --output-dir."
+            )
+    else:
+        atomic_json(identity_path, identity)
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("A CUDA GPU is required; choose an A100 runtime in Colab")
+    device = "cuda"
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    print(
+        f"GPU: {torch.cuda.get_device_name(0)} "
+        f"({torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GiB)"
+    )
+
+    started = time.time()
+    embedder = create_embedder(args, device)
+    embedding_dim = embed_video_shards(
+        grouped_paths,
+        embedder,
+        output_dir,
+        args.batch_size,
+        args.num_workers,
+        device,
+    )
+    matrix_path, metadata_path, total = merge_outputs(
+        grouped_paths,
+        output_dir,
+        data_dir,
+        embedding_dim,
+    )
+    matrix = np.load(matrix_path, mmap_mode="r")
+    metadata_lines = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
+    if matrix.shape != (total, embedding_dim) or metadata_lines != total:
+        raise RuntimeError("Final matrix/metadata verification failed")
+
+    run_manifest = {
+        "schema_version": "aic26.keyframe_embeddings.v1",
+        "model_family": args.model,
+        "model_id": (
+            args.metaclip2_model_id if args.model == "metaclip2" else args.beit3_checkpoint_url
+        ),
+        "source_drive_folder_ids": list(folder_ids),
+        "video_count": video_count,
+        "keyframe_count": total,
+        "embedding_dimension": embedding_dim,
+        "dtype": "float16",
+        "l2_normalized": True,
+        "preprocessing": embedder.preprocessing,
+        "matrix_file": matrix_path.name,
+        "metadata_file": metadata_path.name,
+        "elapsed_seconds": round(time.time() - started, 3),
+        "gpu": torch.cuda.get_device_name(0),
+    }
+    atomic_json(output_dir / "run_manifest.json", run_manifest)
+    print(json.dumps(run_manifest, ensure_ascii=False, indent=2))
+    print(f"Done: {matrix_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
