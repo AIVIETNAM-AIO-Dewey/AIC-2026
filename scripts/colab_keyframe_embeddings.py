@@ -422,7 +422,7 @@ class MetaClip2Embedder:
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModel.from_pretrained(
             model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
             low_cpu_mem_usage=True,
         ).to(device)
         self.model.eval()
