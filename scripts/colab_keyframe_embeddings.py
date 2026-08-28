@@ -13,6 +13,7 @@ import argparse
 import csv
 import io
 import json
+import logging
 import re
 import sys
 import tempfile
@@ -137,6 +138,8 @@ def load_drive_keyframe_maps(
     folder_ids: Sequence[str],
 ) -> dict[str, list[dict[str, Any]]]:
     """Load and validate all organizer map CSVs directly from shared Drive."""
+    from tqdm.auto import tqdm
+
     files: list[dict[str, Any]] = []
     for folder_id in folder_ids:
         page_token: str | None = None
@@ -163,7 +166,9 @@ def load_drive_keyframe_maps(
                 break
 
     maps: dict[str, list[dict[str, Any]]] = {}
-    for item in sorted(files, key=lambda value: natural_key(value["name"])):
+    ordered_files = sorted(files, key=lambda value: natural_key(value["name"]))
+    print(f"Reading {len(ordered_files)} map-keyframes CSVs from shared Drive")
+    for item in tqdm(ordered_files, desc="Drive keyframe maps", unit="csv"):
         video_id = Path(item["name"]).stem.upper()
         if video_id in maps:
             raise RuntimeError(f"Duplicate map CSV for {video_id}")
@@ -1004,6 +1009,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             credentials,
             http=httplib2.Http(timeout=300),
         )
+        # New google-auth versions pass a redundant per-request refresh timeout.
+        # httplib2 ignores it and logs a warning even though the socket-level
+        # timeout above is active, so silence only that transport logger.
+        logging.getLogger("google_auth_httplib2").setLevel(logging.ERROR)
         service = build(
             "drive",
             "v3",
