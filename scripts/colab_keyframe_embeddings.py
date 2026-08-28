@@ -511,6 +511,10 @@ class BEiT3Embedder:
         utils_shim.get_world_size = lambda: 1
 
         class ClipLoss(nn.Module):
+            def __init__(self, *args: Any, **kwargs: Any):
+                del args, kwargs
+                super().__init__()
+
             def forward(self, *args: Any, **kwargs: Any) -> Any:
                 raise RuntimeError(
                     "ClipLoss is training-only and unavailable in this inference notebook"
