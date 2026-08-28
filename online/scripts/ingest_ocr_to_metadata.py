@@ -50,7 +50,7 @@ def ingest_ocr(
     for sf in shard_files:
         sf_name = os.path.basename(sf)
         sf_count = 0
-        with open(sf, "r", encoding="utf-8") as f:
+        with open(sf, encoding="utf-8") as f:
             for line in f:
                 try:
                     data = json.loads(line)
@@ -66,7 +66,7 @@ def ingest_ocr(
         logger.info(f"  Loaded {sf_count:,} text records from {sf_name}")
 
     t1 = time.perf_counter()
-    logger.info(f"⚡ Ingested {len(ocr_map):,} total OCR frame texts in {(t1-t0)*1000:.1f}ms")
+    logger.info(f"⚡ Ingested {len(ocr_map):,} total OCR frame texts in {(t1 - t0) * 1000:.1f}ms")
 
     # 3. Create Backup if requested
     if backup:
@@ -81,7 +81,10 @@ def ingest_ocr(
     matched_kf = 0
 
     t2 = time.perf_counter()
-    with open(metadata_file, "r", encoding="utf-8") as fin, open(temp_file, "w", encoding="utf-8") as fout:
+    with (
+        open(metadata_file, encoding="utf-8") as fin,
+        open(temp_file, "w", encoding="utf-8") as fout,
+    ):
         for line in fin:
             total_kf += 1
             meta = json.loads(line)
@@ -102,7 +105,7 @@ def ingest_ocr(
     t3 = time.perf_counter()
 
     logger.info(
-        f"✅ Merge complete in {(t3-t2)*1000:.1f}ms!\n"
+        f"✅ Merge complete in {(t3 - t2) * 1000:.1f}ms!\n"
         f"   Total Keyframes in Index: {total_kf:,}\n"
         f"   Keyframes with OCR Text: {matched_kf:,} ({matched_kf / max(1, total_kf) * 100:.1f}%)\n"
         f"   Updated File: {metadata_file}"
@@ -110,8 +113,14 @@ def ingest_ocr(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ingest OCR shards into unified keyframes metadata")
-    parser.add_argument("--ocr-dir", default="/Users/khoale/Downloads/OCR", help="Directory containing OCR shard-*.jsonl")
+    parser = argparse.ArgumentParser(
+        description="Ingest OCR shards into unified keyframes metadata"
+    )
+    parser.add_argument(
+        "--ocr-dir",
+        default="/Users/khoale/Downloads/OCR",
+        help="Directory containing OCR shard-*.jsonl",
+    )
     parser.add_argument(
         "--unified-index-dir",
         default="/Users/khoale/Downloads/AIC_HCM/unified_index",

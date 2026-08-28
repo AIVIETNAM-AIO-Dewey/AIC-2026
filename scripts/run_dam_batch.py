@@ -26,20 +26,56 @@ logger = logging.getLogger("dam_batch_runner")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/offline/object_description.yaml")
-    parser.add_argument("--keyframes-root", type=Path, required=True, help="Root directory containing keyframe images (aic-26-video)")
-    parser.add_argument("--objects-root", type=Path, required=True, help="Root directory containing object bounding boxes")
-    parser.add_argument("--map-keyframes-root", type=Path, required=True, help="Root directory containing map-keyframes CSVs")
-    parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
-    parser.add_argument("--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache"))
+    parser.add_argument(
+        "--config", type=Path, default=REPO_ROOT / "configs/offline/object_description.yaml"
+    )
+    parser.add_argument(
+        "--keyframes-root",
+        type=Path,
+        required=True,
+        help="Root directory containing keyframe images (aic-26-video)",
+    )
+    parser.add_argument(
+        "--objects-root",
+        type=Path,
+        required=True,
+        help="Root directory containing object bounding boxes",
+    )
+    parser.add_argument(
+        "--map-keyframes-root",
+        type=Path,
+        required=True,
+        help="Root directory containing map-keyframes CSVs",
+    )
+    parser.add_argument(
+        "--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts")
+    )
+    parser.add_argument(
+        "--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache")
+    )
     parser.add_argument("--device", default="cuda", help="Execution device (cuda or auto)")
-    parser.add_argument("--worker-id", type=int, default=0, help="0-indexed worker ID (0 to num_workers-1)")
+    parser.add_argument(
+        "--worker-id", type=int, default=0, help="0-indexed worker ID (0 to num_workers-1)"
+    )
     parser.add_argument("--num-workers", type=int, default=8, help="Total number of workers")
-    parser.add_argument("--rclone-dest", help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/dam_descriptions/)")
-    parser.add_argument("--master-video-list", type=Path, default=REPO_ROOT / "configs/master_video_list.txt")
-    parser.add_argument("--limit", type=int, help="Optional frame limit per video for smoke testing")
-    parser.add_argument("--dry-run", action="store_true", help="Validate assignments and input paths without running models")
-    parser.add_argument("--no-resume", action="store_true", help="Force re-running already completed videos")
+    parser.add_argument(
+        "--rclone-dest",
+        help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/dam_descriptions/)",
+    )
+    parser.add_argument(
+        "--master-video-list", type=Path, default=REPO_ROOT / "configs/master_video_list.txt"
+    )
+    parser.add_argument(
+        "--limit", type=int, help="Optional frame limit per video for smoke testing"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate assignments and input paths without running models",
+    )
+    parser.add_argument(
+        "--no-resume", action="store_true", help="Force re-running already completed videos"
+    )
     return parser
 
 
@@ -50,7 +86,7 @@ def load_master_video_list(list_path: Path, objects_root: Path) -> list[str]:
             vids = [line.strip() for line in fp if line.strip() and not line.startswith("#")]
         if vids:
             return sorted(set(vids))
-    
+
     # Fallback to scanning objects_root
     logger.info("Master list file not found at %s, discovering from %s", list_path, objects_root)
     discovered = []
@@ -66,6 +102,7 @@ def load_master_video_list(list_path: Path, objects_root: Path) -> list[str]:
 
 class PathResolver:
     """Fast, safe path resolution engine for custom dataset folder hierarchies."""
+
     def __init__(self, keyframes_root: Path, objects_root: Path, map_keyframes_root: Path) -> None:
         self.keyframes_root = keyframes_root.expanduser().resolve()
         self.objects_root = objects_root.expanduser().resolve()
@@ -124,7 +161,12 @@ class PathResolver:
             self.keyframes_root / f"Keyframes_{batch}" / "keyframes" / video_id,
             self.keyframes_root / f"Keyframes_{batch}" / video_id,
             self.keyframes_root / "Keyframes" / f"Keyframes_{batch}" / "keyframes" / video_id,
-            self.keyframes_root / "Keyframes" / "Keyframes" / f"Keyframes_{batch}" / "keyframes" / video_id,
+            self.keyframes_root
+            / "Keyframes"
+            / "Keyframes"
+            / f"Keyframes_{batch}"
+            / "keyframes"
+            / video_id,
             self.keyframes_root / "keyframes" / video_id,
             self.keyframes_root / video_id,
         ]
@@ -137,7 +179,9 @@ class PathResolver:
         if video_id in index and index[video_id].is_dir():
             return index[video_id]
 
-        raise FileNotFoundError(f"Keyframe directory for {video_id} not found under {self.keyframes_root}")
+        raise FileNotFoundError(
+            f"Keyframe directory for {video_id} not found under {self.keyframes_root}"
+        )
 
     def resolve_objects_dir(self, video_id: str) -> Path:
         candidates = [
@@ -153,7 +197,9 @@ class PathResolver:
         if video_id in index and index[video_id].is_dir():
             return index[video_id]
 
-        raise FileNotFoundError(f"Objects directory for {video_id} not found under {self.objects_root}")
+        raise FileNotFoundError(
+            f"Objects directory for {video_id} not found under {self.objects_root}"
+        )
 
     def resolve_map_csv(self, video_id: str) -> Path:
         candidates = [
@@ -202,15 +248,24 @@ def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -
     base_cmd = ["rclone", "copyto", str(local_path), dest_url + local_path.name]
     if config_path:
         base_cmd.extend(["--config", config_path])
-    base_cmd.extend([
-        "--retries", "5",
-        "--retries-sleep", "3s",
-        "--low-level-retries", "10",
-        "--timeout", "5m",
-        "--contimeout", "60s",
-        "--drive-chunk-size", "64M",
-        "--tpslimit", "5",
-    ])
+    base_cmd.extend(
+        [
+            "--retries",
+            "5",
+            "--retries-sleep",
+            "3s",
+            "--low-level-retries",
+            "10",
+            "--timeout",
+            "5m",
+            "--contimeout",
+            "60s",
+            "--drive-chunk-size",
+            "64M",
+            "--tpslimit",
+            "5",
+        ]
+    )
 
     backoff_delays = [5, 10, 20, 30, 60]
     for attempt in range(1, max_retries + 1):
@@ -235,9 +290,20 @@ def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 5) -
                     err_out[:300] if err_out else "No output",
                 )
         except subprocess.TimeoutExpired:
-            logger.warning("  [RCLONE] Attempt %d/%d timed out (300s) for %s", attempt, max_retries, local_path.name)
+            logger.warning(
+                "  [RCLONE] Attempt %d/%d timed out (300s) for %s",
+                attempt,
+                max_retries,
+                local_path.name,
+            )
         except Exception as exc:
-            logger.warning("  [RCLONE] Attempt %d/%d exception for %s: %s", attempt, max_retries, local_path.name, exc)
+            logger.warning(
+                "  [RCLONE] Attempt %d/%d exception for %s: %s",
+                attempt,
+                max_retries,
+                local_path.name,
+                exc,
+            )
 
         if attempt < max_retries:
             delay = backoff_delays[min(attempt - 1, len(backoff_delays) - 1)]
@@ -255,14 +321,22 @@ def rclone_sync_dir(local_dir: Path, rclone_dest: str) -> bool:
     cmd = ["rclone", "copy", str(local_dir), rclone_dest]
     if config_path:
         cmd.extend(["--config", config_path])
-    cmd.extend([
-        "--retries", "5",
-        "--retries-sleep", "3s",
-        "--low-level-retries", "10",
-        "--timeout", "5m",
-        "--contimeout", "60s",
-        "--tpslimit", "5",
-    ])
+    cmd.extend(
+        [
+            "--retries",
+            "5",
+            "--retries-sleep",
+            "3s",
+            "--low-level-retries",
+            "10",
+            "--timeout",
+            "5m",
+            "--contimeout",
+            "60s",
+            "--tpslimit",
+            "5",
+        ]
+    )
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         return res.returncode == 0
@@ -278,6 +352,7 @@ def is_video_completed(description_artifact: Path, description_manifest: Path) -
         return False
     try:
         import json
+
         with description_manifest.open("r", encoding="utf-8") as fp:
             manifest_data = json.load(fp)
             return manifest_data.get("status") == "completed"
@@ -289,7 +364,9 @@ def run_pipeline_step(cmd: list[str], step_name: str) -> None:
     """Execute a single pipeline CLI step synchronously with immediate log flushing."""
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if res.returncode != 0:
-        logger.error("Pipeline failure in %s (exit code %d):\n%s", step_name, res.returncode, res.stdout)
+        logger.error(
+            "Pipeline failure in %s (exit code %d):\n%s", step_name, res.returncode, res.stdout
+        )
         raise RuntimeError(f"Step {step_name} failed with exit code {res.returncode}")
     # Print the last meaningful line of output
     lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
@@ -299,7 +376,7 @@ def run_pipeline_step(cmd: list[str], step_name: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    
+
     if args.worker_id < 0 or args.worker_id >= args.num_workers:
         raise ValueError(f"worker_id must be within [0, {args.num_workers - 1}]")
 
@@ -311,10 +388,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # 1. Load Master Video List and Partition
     all_videos = load_master_video_list(args.master_video_list, args.objects_root)
-    assigned_videos = all_videos[args.worker_id::args.num_workers]
+    assigned_videos = all_videos[args.worker_id :: args.num_workers]
 
     print("=" * 80)
-    print(f" 🛰️  KAGGLE DAM DISTRIBUTED WORKER INITIALIZATION")
+    print(" 🛰️  KAGGLE DAM DISTRIBUTED WORKER INITIALIZATION")
     print("=" * 80)
     print(f" Worker Index:         {args.worker_id} / {args.num_workers}")
     print(f" Total Corpus Videos:  {len(all_videos)}")
@@ -330,7 +407,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f" Frame Limit:          {args.limit} (Smoke Mode)")
     print("-" * 80)
     print(f" Assigned Videos ({len(assigned_videos)}):")
-    print(f"   {assigned_videos[:10]} ... {assigned_videos[-5:] if len(assigned_videos) > 10 else ''}")
+    print(
+        f"   {assigned_videos[:10]} ... {assigned_videos[-5:] if len(assigned_videos) > 10 else ''}"
+    )
     print("=" * 80)
     sys.stdout.flush()
 
@@ -342,14 +421,22 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.dry_run:
-        logger.info("🔍 DRY-RUN: Verifying paths for all %d assigned videos...", len(assigned_videos))
+        logger.info(
+            "🔍 DRY-RUN: Verifying paths for all %d assigned videos...", len(assigned_videos)
+        )
         missing_count = 0
-        from aic2026.object_description import load_organizer_detections, filter_detections, FilterConfig
         import yaml
+
+        from aic2026.object_description import (
+            FilterConfig,
+            filter_detections,
+            load_organizer_detections,
+        )
+
         cfg_dict: dict[str, Any] = {}
         if args.config and args.config.exists():
             try:
-                with open(args.config, "r", encoding="utf-8") as cf:
+                with open(args.config, encoding="utf-8") as cf:
                     cfg_dict = yaml.safe_load(cf) or {}
             except Exception:
                 pass
@@ -372,14 +459,32 @@ def main(argv: list[str] | None = None) -> int:
                         raw_dets = load_organizer_detections(sample_json)
                         filtered = filter_detections(raw_dets, sample_config)
                         labels = [d.class_entity for d in filtered]
-                        logger.info("  🎯 Sample Box Filter Test (%s/%s): %d raw boxes -> %d distinct objects: %s", vid, sample_json.name, len(raw_dets), len(filtered), labels)
+                        logger.info(
+                            "  🎯 Sample Box Filter Test (%s/%s): %d raw boxes -> %d distinct objects: %s",
+                            vid,
+                            sample_json.name,
+                            len(raw_dets),
+                            len(filtered),
+                            labels,
+                        )
                 if idx <= 5 or idx == len(assigned_videos):
-                    logger.info("  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s", idx, len(assigned_videos), vid, f_dir.name, o_dir.name, m_csv.name)
+                    logger.info(
+                        "  [%d/%d] %s -> Frames: %s | Objects: %s | Map: %s",
+                        idx,
+                        len(assigned_videos),
+                        vid,
+                        f_dir.name,
+                        o_dir.name,
+                        m_csv.name,
+                    )
             except FileNotFoundError as error:
                 logger.error("  ❌ Missing path for %s: %s", vid, error)
                 missing_count += 1
         if missing_count == 0:
-            logger.info("✅ DRY-RUN SUCCESS: All %d assigned videos have valid verified paths!", len(assigned_videos))
+            logger.info(
+                "✅ DRY-RUN SUCCESS: All %d assigned videos have valid verified paths!",
+                len(assigned_videos),
+            )
             return 0
         else:
             logger.error("❌ DRY-RUN FAILED: %d videos have missing source paths.", missing_count)
@@ -394,9 +499,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             t_res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
             if t_res.returncode == 0:
-                logger.info("📡 Rclone destination %s verified reachable and writable!", args.rclone_dest)
+                logger.info(
+                    "📡 Rclone destination %s verified reachable and writable!", args.rclone_dest
+                )
             else:
-                logger.warning("⚠️ Rclone destination check warning (code %d): %s", t_res.returncode, t_res.stderr.strip()[:200])
+                logger.warning(
+                    "⚠️ Rclone destination check warning (code %d): %s",
+                    t_res.returncode,
+                    t_res.stderr.strip()[:200],
+                )
         except Exception as exc:
             logger.warning("⚠️ Rclone destination check exception: %s", exc)
 
@@ -426,13 +537,22 @@ def main(argv: list[str] | None = None) -> int:
                         if fname.endswith(".jsonl"):
                             remote_completed_videos.add(fname[:-6])
                     if remote_completed_videos:
-                        logger.info("📡 Pre-fetched %d completed videos from Google Drive destination!", len(remote_completed_videos))
+                        logger.info(
+                            "📡 Pre-fetched %d completed videos from Google Drive destination!",
+                            len(remote_completed_videos),
+                        )
                     break
                 else:
-                    logger.warning("Remote pre-fetch attempt %d/3 warning (code %d). Retrying in 5s...", attempt, res.returncode)
+                    logger.warning(
+                        "Remote pre-fetch attempt %d/3 warning (code %d). Retrying in 5s...",
+                        attempt,
+                        res.returncode,
+                    )
                     time.sleep(5)
             except Exception as exc:
-                logger.warning("Remote pre-fetch attempt %d/3 exception: %s. Retrying in 5s...", attempt, exc)
+                logger.warning(
+                    "Remote pre-fetch attempt %d/3 exception: %s. Retrying in 5s...", attempt, exc
+                )
                 time.sleep(5)
 
     for idx, video_id in enumerate(assigned_videos, start=1):
@@ -443,11 +563,15 @@ def main(argv: list[str] | None = None) -> int:
         # Artifact target paths
         frame_manifest = output_root / "frame_manifests" / f"{video_id}.jsonl"
         mask_artifact = output_root / "object_description" / "masks" / f"{video_id}.jsonl"
-        description_artifact = output_root / "object_description" / "descriptions" / f"{video_id}.jsonl"
+        description_artifact = (
+            output_root / "object_description" / "descriptions" / f"{video_id}.jsonl"
+        )
         description_manifest = description_artifact.with_suffix(".manifest.json")
 
         # Check if already completed (Resume from local SSD or Google Drive)
-        is_done = video_id in remote_completed_videos or is_video_completed(description_artifact, description_manifest)
+        is_done = video_id in remote_completed_videos or is_video_completed(
+            description_artifact, description_manifest
+        )
         if not args.no_resume and not is_done and not remote_completed_videos and args.rclone_dest:
             # Fallback direct check for this specific video if global pre-fetch was empty
             config_path = find_rclone_config()
@@ -486,14 +610,22 @@ def main(argv: list[str] | None = None) -> int:
             [
                 sys.executable,
                 str(REPO_ROOT / "scripts/build_frame_manifest.py"),
-                "--config", str(args.config),
-                "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
-                "--output-root", str(output_root),
-                "--cache-root", str(cache_root),
-                "--map-csv", str(map_csv),
-                "--frames-dir", str(frames_dir),
-                "--output", str(frame_manifest),
+                "--config",
+                str(args.config),
+                "--video-id",
+                video_id,
+                "--data-root",
+                str(resolver.keyframes_root),
+                "--output-root",
+                str(output_root),
+                "--cache-root",
+                str(cache_root),
+                "--map-csv",
+                str(map_csv),
+                "--frames-dir",
+                str(frames_dir),
+                "--output",
+                str(frame_manifest),
                 *resume_args,
                 *limit_args,
             ],
@@ -505,15 +637,24 @@ def main(argv: list[str] | None = None) -> int:
             [
                 sys.executable,
                 str(REPO_ROOT / "scripts/prepare_object_masks.py"),
-                "--config", str(args.config),
-                "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
-                "--output-root", str(output_root),
-                "--cache-root", str(cache_root),
-                "--frame-manifest", str(frame_manifest),
-                "--objects-dir", str(objects_dir),
-                "--output", str(mask_artifact),
-                "--device", args.device,
+                "--config",
+                str(args.config),
+                "--video-id",
+                video_id,
+                "--data-root",
+                str(resolver.keyframes_root),
+                "--output-root",
+                str(output_root),
+                "--cache-root",
+                str(cache_root),
+                "--frame-manifest",
+                str(frame_manifest),
+                "--objects-dir",
+                str(objects_dir),
+                "--output",
+                str(mask_artifact),
+                "--device",
+                args.device,
                 *resume_args,
                 *limit_args,
             ],
@@ -525,14 +666,22 @@ def main(argv: list[str] | None = None) -> int:
             [
                 sys.executable,
                 str(REPO_ROOT / "scripts/run_dam_descriptions.py"),
-                "--config", str(args.config),
-                "--video-id", video_id,
-                "--data-root", str(resolver.keyframes_root),
-                "--output-root", str(output_root),
-                "--cache-root", str(cache_root),
-                "--mask-artifact", str(mask_artifact),
-                "--output", str(description_artifact),
-                "--device", args.device,
+                "--config",
+                str(args.config),
+                "--video-id",
+                video_id,
+                "--data-root",
+                str(resolver.keyframes_root),
+                "--output-root",
+                str(output_root),
+                "--cache-root",
+                str(cache_root),
+                "--mask-artifact",
+                str(mask_artifact),
+                "--output",
+                str(description_artifact),
+                "--device",
+                args.device,
                 *resume_args,
                 *limit_args,
             ],
@@ -544,7 +693,9 @@ def main(argv: list[str] | None = None) -> int:
             ok1 = rclone_sync_file(description_artifact, args.rclone_dest)
             ok2 = rclone_sync_file(description_manifest, args.rclone_dest)
             if not (ok1 and ok2):
-                logger.warning("  [RCLONE] Direct single-file upload failed; executing directory sync fallback...")
+                logger.warning(
+                    "  [RCLONE] Direct single-file upload failed; executing directory sync fallback..."
+                )
                 rclone_sync_dir(description_artifact.parent, args.rclone_dest)
 
         elapsed_vid = time.time() - video_start_time
@@ -567,7 +718,13 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
 
     logger.info("=" * 80)
-    logger.info("🎉 WORKER %d BATCH COMPLETE! Processed: %d, Skipped: %d, Total: %d", args.worker_id, completed_in_run, skipped_count, total_assigned)
+    logger.info(
+        "🎉 WORKER %d BATCH COMPLETE! Processed: %d, Skipped: %d, Total: %d",
+        args.worker_id,
+        completed_in_run,
+        skipped_count,
+        total_assigned,
+    )
     logger.info("=" * 80)
     return 0
 

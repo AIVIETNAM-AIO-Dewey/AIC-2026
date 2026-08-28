@@ -6,14 +6,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-import pytest
-from scripts.run_dam_batch import load_master_video_list, PathResolver, is_video_completed
+from scripts.run_dam_batch import PathResolver, load_master_video_list  # noqa: E402
 
 
 def test_master_video_list_sharding():
     list_path = REPO_ROOT / "configs/master_video_list.txt"
     assert list_path.exists(), "master_video_list.txt must exist"
-    
+
     all_videos = load_master_video_list(list_path, objects_root=REPO_ROOT / "data")
     assert len(all_videos) == 873, f"Expected 873 videos, got {len(all_videos)}"
     assert len(set(all_videos)) == 873, "Master list contains duplicates"
@@ -22,7 +21,9 @@ def test_master_video_list_sharding():
     worker_slices = []
     for worker_id in range(num_workers):
         assigned = all_videos[worker_id::num_workers]
-        assert len(assigned) in (109, 110), f"Worker {worker_id} workload {len(assigned)} outside [109, 110]"
+        assert len(assigned) in (109, 110), (
+            f"Worker {worker_id} workload {len(assigned)} outside [109, 110]"
+        )
         worker_slices.append(set(assigned))
 
     # Verify 0 overlap between any two workers

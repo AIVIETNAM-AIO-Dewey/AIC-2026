@@ -39,7 +39,9 @@ def read_frame_map(path: Path) -> list[FrameMapRow]:
                 # The true frame index in digital video is round(pts_time * fps).
                 # Resolve float floor truncation (e.g. 0.999 -> 0 instead of 1) to guarantee unique, strictly increasing frame indices.
                 exact_frame_idx = round(pts_time_s * fps)
-                resolved_frame_idx = exact_frame_idx if abs(exact_frame_idx - raw_frame_idx) <= 1 else raw_frame_idx
+                resolved_frame_idx = (
+                    exact_frame_idx if abs(exact_frame_idx - raw_frame_idx) <= 1 else raw_frame_idx
+                )
                 row = FrameMapRow(
                     keyframe_n=int(raw["n"]),
                     pts_time_s=pts_time_s,

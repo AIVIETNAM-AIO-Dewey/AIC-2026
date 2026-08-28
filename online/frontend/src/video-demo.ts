@@ -114,6 +114,10 @@ function requireElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
+function optionalElement<T extends HTMLElement>(id: string): T | null {
+  return document.getElementById(id) as T | null;
+}
+
 const elements = {
   modal: requireElement<HTMLDivElement>("inspector-modal"),
   resultsGrid: requireElement<HTMLDivElement>("results-grid"),
@@ -123,9 +127,7 @@ const elements = {
   jsonEditor: requireElement<HTMLTextAreaElement>("json-editor"),
   runButton: requireElement<HTMLButtonElement>("btn-run-query"),
   runLabel: requireElement<HTMLSpanElement>("btn-run-label"),
-  executeJsonButton: requireElement<HTMLButtonElement>("btn-execute-json"),
-  reFuseButton: requireElement<HTMLButtonElement>("btn-re-fuse"),
-  reRankButton: requireElement<HTMLButtonElement>("btn-re-rank"),
+  executeJsonButton: optionalElement<HTMLButtonElement>("btn-execute-json"),
   timingBadge: requireElement<HTMLSpanElement>("timing-badge"),
   sessionBadge: requireElement<HTMLSpanElement>("session-badge"),
   image: requireElement<HTMLImageElement>("inspector-img"),
@@ -193,9 +195,6 @@ function toVideoFrame(frame: DemoFrame): VideoFrameMapping {
 }
 
 const videoController = createYouTubeVideoView({
-  onSessionChange: (label) => {
-    elements.sessionBadge.textContent = label;
-  },
   onSourceChange: (label) => {
     elements.videoSource.textContent = label;
   },
@@ -369,12 +368,10 @@ function configureDemoChrome(): void {
   }, null, 2);
   elements.jsonEditor.readOnly = true;
   elements.runLabel.textContent = "Load Demo Frames";
-  elements.executeJsonButton.classList.add("hidden");
-  elements.reFuseButton.disabled = true;
-  elements.reRankButton.disabled = true;
+  elements.executeJsonButton?.classList.add("hidden");
   elements.timingBadge.textContent = "UI demo · no backend";
   elements.sessionBadge.classList.remove("hidden");
-  elements.sessionBadge.textContent = "Mapping: loading";
+  elements.sessionBadge.textContent = "Demo session · L21_V001";
 }
 
 function bindEvents(): void {

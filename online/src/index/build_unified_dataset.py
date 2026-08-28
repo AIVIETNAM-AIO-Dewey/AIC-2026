@@ -63,7 +63,7 @@ def build_unified_dataset(
     logger.info(f"📖 Reading ASR Metadata from {asr_meta_path}...")
     # Lookup: (video_id, keyframe_n) -> (asr_row_idx, asr_meta_dict)
     asr_lookup: dict[tuple[str, int], tuple[int, dict[str, Any]]] = {}
-    with open(asr_meta_path, "r", encoding="utf-8") as f:
+    with open(asr_meta_path, encoding="utf-8") as f:
         for idx, line in enumerate(f):
             d = json.loads(line)
             asr_lookup[(d["video_id"], d["keyframe_n"])] = (idx, d)
@@ -97,7 +97,7 @@ def build_unified_dataset(
         vis_arr = np.load(scene_npy_file).astype(np.float16)
 
         # Load Keyframe Map CSV
-        with open(csv_file, "r", encoding="utf-8") as f:
+        with open(csv_file, encoding="utf-8") as f:
             reader = list(csv.DictReader(f))
 
         if len(reader) != len(vis_arr):
@@ -165,14 +165,18 @@ def build_unified_dataset(
     final_visual_matrix = np.vstack(all_visual_vectors).astype(np.float16)
     out_vis_path = output_dir / "keyframes_visual_vectors.f16.npy"
     np.save(out_vis_path, final_visual_matrix)
-    logger.info(f"  ✅ Saved Visual Matrix: {final_visual_matrix.shape} ({out_vis_path.stat().st_size / 1024**2:.1f} MB)")
+    logger.info(
+        f"  ✅ Saved Visual Matrix: {final_visual_matrix.shape} ({out_vis_path.stat().st_size / 1024**2:.1f} MB)"
+    )
     del all_visual_vectors, final_visual_matrix
 
     # Speech Matrix (177321, 1024)
     final_speech_matrix = np.vstack(all_speech_vectors).astype(np.float16)
     out_speech_path = output_dir / "keyframes_speech_vectors.f16.npy"
     np.save(out_speech_path, final_speech_matrix)
-    logger.info(f"  ✅ Saved Speech Matrix: {final_speech_matrix.shape} ({out_speech_path.stat().st_size / 1024**2:.1f} MB)")
+    logger.info(
+        f"  ✅ Saved Speech Matrix: {final_speech_matrix.shape} ({out_speech_path.stat().st_size / 1024**2:.1f} MB)"
+    )
     del all_speech_vectors, final_speech_matrix
 
     # Keyframes Metadata JSONL
@@ -180,7 +184,9 @@ def build_unified_dataset(
     with open(out_meta_path, "w", encoding="utf-8") as f:
         for rec in all_keyframes_meta:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    logger.info(f"  ✅ Saved Keyframes Metadata: {len(all_keyframes_meta):,} lines ({out_meta_path.stat().st_size / 1024**2:.1f} MB)")
+    logger.info(
+        f"  ✅ Saved Keyframes Metadata: {len(all_keyframes_meta):,} lines ({out_meta_path.stat().st_size / 1024**2:.1f} MB)"
+    )
 
     # ──────────────────────────────────────────────────────────────────────────
     # STEP 4: Link / Copy DAM Objects Data
@@ -193,6 +199,7 @@ def build_unified_dataset(
     logger.info("\n📦 Linking DAM Object vectors and metadata into unified folder...")
     if not dam_npy_dst.exists():
         import shutil
+
         shutil.copy2(dam_npy_src, dam_npy_dst)
         shutil.copy2(dam_meta_src, dam_meta_dst)
         logger.info("  ✅ Copied DAM vectors & metadata to unified folder.")
@@ -220,8 +227,12 @@ def build_unified_dataset(
     logger.info("\n" + "=" * 80)
     logger.info("🎉 UNIFIED DATASET BUILD COMPLETE!")
     logger.info(f"  • Total Keyframes:      {total_frames:,}")
-    logger.info(f"  • Frames With Speech:   {frames_with_speech:,} ({frames_with_speech/total_frames*100:.1f}%)")
-    logger.info(f"  • Silent Frames:        {silent_frames:,} ({silent_frames/total_frames*100:.1f}%)")
+    logger.info(
+        f"  • Frames With Speech:   {frames_with_speech:,} ({frames_with_speech / total_frames * 100:.1f}%)"
+    )
+    logger.info(
+        f"  • Silent Frames:        {silent_frames:,} ({silent_frames / total_frames * 100:.1f}%)"
+    )
     logger.info(f"  • Total Execution Time: {total_time:.2f}s")
     logger.info(f"  • Output Directory:     {output_dir}")
     logger.info("=" * 80)

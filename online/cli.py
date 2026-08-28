@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import time
 from typing import Any
 
@@ -56,59 +55,71 @@ def _init_engine():
 # Display helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _print_kis_results(results: list[dict[str, Any]], explain_count: int = 1):
-    print(f"\n{'─'*90}")
+    print(f"\n{'─' * 90}")
     print(f"🎯 KIS RESULTS — Top {len(results)} Candidates")
-    print(f"{'─'*90}")
-    print(f"{'Rank':<5} {'Submission String':<30} {'Time(s)':<10} {'S1 Norm':<10} {'CE Score':<10} {'Final':<10} {'Image Path'}")
-    print(f"{'─'*90}")
+    print(f"{'─' * 90}")
+    print(
+        f"{'Rank':<5} {'Submission String':<30} {'Time(s)':<10} {'S1 Norm':<10} {'CE Score':<10} {'Final':<10} {'Image Path'}"
+    )
+    print(f"{'─' * 90}")
     for r in results:
         print(
             f"{r['final_rank']:<5} {r['submission_string']:<30} "
-            f"{r['pts_time_s']:<10.1f} {r['normalized_score']*100:<9.1f}% {r['cross_encoder_score']:<10.4f} "
+            f"{r['pts_time_s']:<10.1f} {r['normalized_score'] * 100:<9.1f}% {r['cross_encoder_score']:<10.4f} "
             f"{r['final_score']:<10.4f} {r['image_relpath']}"
         )
 
     cards_to_show = results[:explain_count]
     for r in cards_to_show:
-        rank_label = f"TOP {r['final_rank']}" if r['final_rank'] == 1 else f"RANK #{r['final_rank']}"
-        print(f"\n{'═'*90}")
+        rank_label = (
+            f"TOP {r['final_rank']}" if r["final_rank"] == 1 else f"RANK #{r['final_rank']}"
+        )
+        print(f"\n{'═' * 90}")
         print(f"🌟 {rank_label} EXPLAINABILITY CARD")
-        print(f"{'═'*90}")
+        print(f"{'═' * 90}")
         print(f"  Video:       {r['video_id']}")
-        print(f"  Frame:       {r['frame_idx']}  ({r['pts_time_s']:.1f}s | Keyframe #{r.get('keyframe_n', 1)})")
+        print(
+            f"  Frame:       {r['frame_idx']}  ({r['pts_time_s']:.1f}s | Keyframe #{r.get('keyframe_n', 1)})"
+        )
         print(f"  Submit:      {r['submission_string']}")
         print(f"  Image:       {r['image_relpath']}")
-        print(f"  Final Score: {r['final_score']:.4f}  (S1: {r['normalized_score']*100:.1f}%  CE: {r['cross_encoder_score']:.4f})")
-        print(f"  Modalities:  {r['active_channels']}/4 channels, synergy {r['synergy_multiplier']}x")
-        
+        print(
+            f"  Final Score: {r['final_score']:.4f}  (S1: {r['normalized_score'] * 100:.1f}%  CE: {r['cross_encoder_score']:.4f})"
+        )
+        print(
+            f"  Modalities:  {r['active_channels']}/4 channels, synergy {r['synergy_multiplier']}x"
+        )
+
         # Full ASR Speech (Priority)
         asr_txt = r.get("asr_transcript", "").strip()
         if asr_txt and asr_txt not in ("[Silent Frame]", ""):
-            print(f"\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     \"{asr_txt}\"")
+            print(f'\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     "{asr_txt}"')
         else:
-            print(f"\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     (No speech / background audio)")
-            
+            print("\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     (No speech / background audio)")
+
         # Full DAM Visual Description
         dam_txt = r.get("dam_summary", "").strip()
         if dam_txt:
-            print(f"\n  🖼️ FULL DAM VISUAL DESCRIPTION:\n     \"{dam_txt}\"")
-            
+            print(f'\n  🖼️ FULL DAM VISUAL DESCRIPTION:\n     "{dam_txt}"')
+
         if r.get("matched_boxes"):
-            print(f"\n  📦 MATCHED OBJECT BOUNDING BOXES:")
+            print("\n  📦 MATCHED OBJECT BOUNDING BOXES:")
             for b in r["matched_boxes"]:
-                print(f"     - [{b.get('class_entity', 'Object')}] (Sim: {b.get('score', 0.0):.3f}, BBox: {b.get('bbox', [])}): \"{b.get('caption', '')}\"")
-        print(f"{'═'*90}")
+                print(
+                    f'     - [{b.get("class_entity", "Object")}] (Sim: {b.get("score", 0.0):.3f}, BBox: {b.get("bbox", [])}): "{b.get("caption", "")}"'
+                )
+        print(f"{'═' * 90}")
     print()
 
 
 def _print_vqa_results(results: list[dict[str, Any]], explain_count: int = 10):
-    print(f"\n{'─'*90}")
+    print(f"\n{'─' * 90}")
     print(f"❓ VQA RESULTS — Top {len(results)} Candidates")
-    print(f"{'─'*90}")
+    print(f"{'─' * 90}")
     print(f"{'Rank':<5} {'Submission String':<50} {'CE Score':<10} {'Final':<10} {'Image Path'}")
-    print(f"{'─'*90}")
+    print(f"{'─' * 90}")
     for r in results:
-        sub = r['submission_string']
+        sub = r["submission_string"]
         if len(sub) > 48:
             sub = sub[:45] + "..."
         print(
@@ -118,50 +129,61 @@ def _print_vqa_results(results: list[dict[str, Any]], explain_count: int = 10):
 
     cards_to_show = results[:explain_count]
     for r in cards_to_show:
-        rank_label = f"TOP {r['final_rank']}" if r['final_rank'] == 1 else f"RANK #{r['final_rank']}"
-        print(f"\n{'═'*90}")
+        rank_label = (
+            f"TOP {r['final_rank']}" if r["final_rank"] == 1 else f"RANK #{r['final_rank']}"
+        )
+        print(f"\n{'═' * 90}")
         print(f"🌟 {rank_label} EXPLAINABILITY CARD (VQA EVIDENCE)")
-        print(f"{'═'*90}")
-        print(f"  Extracted Answer: \"{r.get('vqa_answer', 'N/A')}\"")
+        print(f"{'═' * 90}")
+        print(f'  Extracted Answer: "{r.get("vqa_answer", "N/A")}"')
         print(f"  Video:            {r['video_id']}")
-        print(f"  Frame:            {r['frame_idx']}  ({r['pts_time_s']:.1f}s | Keyframe #{r.get('keyframe_n', 1)})")
+        print(
+            f"  Frame:            {r['frame_idx']}  ({r['pts_time_s']:.1f}s | Keyframe #{r.get('keyframe_n', 1)})"
+        )
         print(f"  Submit:           {r['submission_string']}")
         print(f"  Image:            {r['image_relpath']}")
         print(f"  Final Score:      {r['final_score']:.4f}")
-        
+
         # Full ASR Speech
         asr_txt = r.get("asr_transcript", "").strip()
         if asr_txt and asr_txt not in ("[Silent Frame]", ""):
-            print(f"\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     \"{asr_txt}\"")
+            print(f'\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     "{asr_txt}"')
         else:
-            print(f"\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     (No speech / background audio)")
-            
+            print("\n  🎙️ FULL ASR SPEECH TRANSCRIPT:\n     (No speech / background audio)")
+
         # Full DAM Visual Description
         dam_txt = r.get("dam_summary", "").strip()
         if dam_txt:
-            print(f"\n  🖼️ FULL DAM VISUAL DESCRIPTION:\n     \"{dam_txt}\"")
-            
+            print(f'\n  🖼️ FULL DAM VISUAL DESCRIPTION:\n     "{dam_txt}"')
+
         if r.get("matched_boxes"):
-            print(f"\n  📦 MATCHED OBJECT BOUNDING BOXES:")
+            print("\n  📦 MATCHED OBJECT BOUNDING BOXES:")
             for b in r["matched_boxes"]:
-                print(f"     - [{b.get('class_entity', 'Object')}] (Sim: {b.get('score', 0.0):.3f}, BBox: {b.get('bbox', [])}): \"{b.get('caption', '')}\"")
-        print(f"{'═'*90}")
+                print(
+                    f'     - [{b.get("class_entity", "Object")}] (Sim: {b.get("score", 0.0):.3f}, BBox: {b.get("bbox", [])}): "{b.get("caption", "")}"'
+                )
+        print(f"{'═' * 90}")
     print()
 
 
 def _print_trake_results(sequences: list[dict[str, Any]], explain_count: int = 1):
-    print(f"\n{'─'*95}")
+    print(f"\n{'─' * 95}")
     print(f"⏱️ TRAKE RESULTS — Top {len(sequences)} Monotonic Sequences (DP + Narrative Reranked)")
-    print(f"{'─'*95}")
-    print(f"{'Rank':<5} {'Submission String':<45} {'Final':<9} {'DP':<8} {'Narrative':<11} {'Mono?'}")
-    print(f"{'─'*95}")
+    print(f"{'─' * 95}")
+    print(
+        f"{'Rank':<5} {'Submission String':<45} {'Final':<9} {'DP':<8} {'Narrative':<11} {'Mono?'}"
+    )
+    print(f"{'─' * 95}")
     for s in sequences:
         times = s["timestamps"]
         is_mono = all(times[i] < times[i + 1] for i in range(len(times) - 1))
         f_score = s.get("final_score", s.get("sequence_score", 0.0))
         dp_sc = s.get("dp_score", s.get("sequence_score", 0.0))
         narr_sc = s.get("narrative_score", dp_sc)
-        img_paths = " -> ".join(f"keyframes/{s['video_id']}/{ev.get('keyframe_n', 1):03d}.jpg" for ev in s.get("event_dossiers", []))
+        img_paths = " -> ".join(
+            f"keyframes/{s['video_id']}/{ev.get('keyframe_n', 1):03d}.jpg"
+            for ev in s.get("event_dossiers", [])
+        )
         print(
             f"{s['rank']:<5} {s['submission_string']:<45} "
             f"{f_score:<9.4f} {dp_sc:<8.4f} {narr_sc:<11.4f} {'✅' if is_mono else '❌'}"
@@ -171,26 +193,30 @@ def _print_trake_results(sequences: list[dict[str, Any]], explain_count: int = 1
 
     cards_to_show = sequences[:explain_count]
     for top in cards_to_show:
-        rank_lbl = f"TOP {top['rank']}" if top['rank'] == 1 else f"RANK #{top['rank']}"
-        print(f"\n{'═'*95}")
+        rank_lbl = f"TOP {top['rank']}" if top["rank"] == 1 else f"RANK #{top['rank']}"
+        print(f"\n{'═' * 95}")
         print(f"🌟 {rank_lbl} TRAKE EXPLAINABILITY CARD")
-        print(f"{'═'*95}")
+        print(f"{'═' * 95}")
         print(f"  Video:             {top['video_id']}")
         print(f"  Submit:            {top['submission_string']}")
-        print(f"  Final Score:       {top.get('final_score', top.get('sequence_score', 0.0)):.4f}  (DP: {top.get('dp_score', top.get('sequence_score', 0.0)):.4f} | Narrative: {top.get('narrative_score', 0.0):.4f})")
+        print(
+            f"  Final Score:       {top.get('final_score', top.get('sequence_score', 0.0)):.4f}  (DP: {top.get('dp_score', top.get('sequence_score', 0.0)):.4f} | Narrative: {top.get('narrative_score', 0.0):.4f})"
+        )
         if top.get("narrative_reasoning"):
-            print(f"  Narrative Judge:   \"{top['narrative_reasoning']}\"")
+            print(f'  Narrative Judge:   "{top["narrative_reasoning"]}"')
         if top.get("audio_span"):
-            print(f"\n  🎙️ MACRO-SPAN AUDIO TRANSCRIPT ({min(top['timestamps']):.1f}s → {max(top['timestamps']):.1f}s):\n     \"{top['audio_span']}\"")
-        
-        print(f"\n  🎬 CHRONOLOGICAL EVENT FRAMES:")
+            print(
+                f'\n  🎙️ MACRO-SPAN AUDIO TRANSCRIPT ({min(top["timestamps"]):.1f}s → {max(top["timestamps"]):.1f}s):\n     "{top["audio_span"]}"'
+            )
+
+        print("\n  🎬 CHRONOLOGICAL EVENT FRAMES:")
         for ev in top.get("event_dossiers", []):
             print(
                 f"     - Event E{ev['event_idx']}: Frame {ev['frame_idx']} "
                 f"({ev['pts_time_s']:.1f}s | #{ev.get('keyframe_n', 1):03d}.jpg)  "
                 f"(vis_sim={ev.get('score_vis', 0.0):.3f})"
             )
-        print(f"{'═'*95}")
+        print(f"{'═' * 95}")
     print()
 
 
@@ -206,7 +232,7 @@ def run_query(query: str, task: str, top_k: int = 10, explain_all: bool = False)
         return
 
     t0 = time.perf_counter()
-    print(f"\n🔍 Query: \"{query}\"")
+    print(f'\n🔍 Query: "{query}"')
     print(f"📋 Task:  {task}")
 
     # Phase 1: Parse
@@ -340,10 +366,19 @@ def interactive_loop():
 
 def main():
     ap = argparse.ArgumentParser(description="AIC Online Retrieval Engine CLI")
-    ap.add_argument("--query", "-q", type=str, default=None, help="Query text (runs once and exits)")
-    ap.add_argument("--task", "-t", type=str, default="KIS", choices=["KIS", "VQA", "TRAKE"], help="Task type")
+    ap.add_argument(
+        "--query", "-q", type=str, default=None, help="Query text (runs once and exits)"
+    )
+    ap.add_argument(
+        "--task", "-t", type=str, default="KIS", choices=["KIS", "VQA", "TRAKE"], help="Task type"
+    )
     ap.add_argument("--top", "-k", type=int, default=10, help="Number of results")
-    ap.add_argument("--explain-all", "-e", action="store_true", help="Print full explainability cards for all top results")
+    ap.add_argument(
+        "--explain-all",
+        "-e",
+        action="store_true",
+        help="Print full explainability cards for all top results",
+    )
     args = ap.parse_args()
 
     if args.query:

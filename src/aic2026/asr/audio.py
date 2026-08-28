@@ -59,14 +59,20 @@ def extract_audio_pcm(
     cmd = [
         "ffmpeg",
         "-hide_banner",
-        "-loglevel", "error",
-        "-i", str(video_path),
-        "-vn",                  # discard video stream
-        "-acodec", "pcm_s16le",  # 16-bit signed little-endian PCM
-        "-ar", str(sample_rate),
-        "-ac", "1",             # mono
-        "-f", "wav",
-        "pipe:1",               # write to stdout
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-vn",  # discard video stream
+        "-acodec",
+        "pcm_s16le",  # 16-bit signed little-endian PCM
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",  # mono
+        "-f",
+        "wav",
+        "pipe:1",  # write to stdout
     ]
 
     logger.debug("Running ffmpeg: %s", " ".join(cmd))
@@ -79,9 +85,7 @@ def extract_audio_pcm(
         )
     except subprocess.CalledProcessError as exc:
         stderr_text = exc.stderr.decode("utf-8", errors="replace").strip()
-        raise AudioExtractionError(
-            f"ffmpeg failed for {video_path.name}: {stderr_text}"
-        ) from exc
+        raise AudioExtractionError(f"ffmpeg failed for {video_path.name}: {stderr_text}") from exc
 
     raw_bytes = result.stdout
     if len(raw_bytes) <= _WAV_HEADER_SIZE:

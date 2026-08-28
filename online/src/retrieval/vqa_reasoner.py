@@ -11,7 +11,8 @@ import logging
 import os
 import re
 import urllib.request
-from typing import Any, Optional
+from typing import Any
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,18 +40,22 @@ class VQAReasoner:
         if GEMINI_API_KEY:
             try:
                 from google import genai
+
                 self._gemini_client = genai.Client(api_key=GEMINI_API_KEY)
                 logger.info(f"Initialized VQA Gemini Client with {self.gemini_model_id}")
             except Exception as e:
                 logger.warning(f"Failed to initialize VQA Gemini Client: {e}")
 
-    def _answer_with_qwen(self, prompt: str) -> Optional[str]:
+    def _answer_with_qwen(self, prompt: str) -> str | None:
         """Local extractive VQA using Ollama Qwen."""
         try:
             payload = {
                 "model": self.qwen_model_id,
                 "messages": [
-                    {"role": "system", "content": "You are an official AI Challenge extractive judge. Extract only a concise 1-5 word answer."},
+                    {
+                        "role": "system",
+                        "content": "You are an official AI Challenge extractive judge. Extract only a concise 1-5 word answer.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 "stream": False,
@@ -75,7 +80,7 @@ class VQAReasoner:
         self,
         question: str,
         evidence_dossier: dict[str, Any],
-        raw_query: Optional[str] = None,
+        raw_query: str | None = None,
     ) -> str:
         """Extract a concise answer (1-5 words, <= 100 chars) from the evidence frame dossier."""
         video_id = evidence_dossier.get("video_id", "")
@@ -85,14 +90,16 @@ class VQAReasoner:
         ocr_text = evidence_dossier.get("ocr_text", "")
         matched_boxes = evidence_dossier.get("matched_boxes", [])
 
-        box_descriptions = "; ".join([f"{b.get('class_entity')}: {b.get('caption')}" for b in matched_boxes])
+        box_descriptions = "; ".join(
+            [f"{b.get('class_entity')}: {b.get('caption')}" for b in matched_boxes]
+        )
 
         context_text = f"""
 Video ID: {video_id} (Timestamp: {pts_time:.1f}s)
 DAM Visual Entities & Descriptions: {dam_summary} | {box_descriptions}
 Spoken Speech Transcript (ASR): {asr_transcript}
 On-Screen Text (OCR): {ocr_text}
-Original Query / Context: {raw_query or ''}
+Original Query / Context: {raw_query or ""}
 Question to Answer: {question}
 """
 

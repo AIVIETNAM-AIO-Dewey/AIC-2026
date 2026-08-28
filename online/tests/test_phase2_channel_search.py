@@ -79,34 +79,51 @@ def run_channel_searches(
     return results, latencies
 
 
-def print_tables_for_query(query_title: str, results: dict[str, list[dict[str, Any]]], latencies: dict[str, float]):
-    print(f"\n{'='*95}")
+def print_tables_for_query(
+    query_title: str, results: dict[str, list[dict[str, Any]]], latencies: dict[str, float]
+):
+    print(f"\n{'=' * 95}")
     print(f"📊 PHASE 2 RESULTS: {query_title}")
-    print(f"{'='*95}")
+    print(f"{'=' * 95}")
 
     # ── Table 1: SigLIP ──
     lat_vis = latencies.get("visual", 0.0)
     print(f"\n### 🖼️ Table 1: SigLIP-2 Visual Search Results (Top 10) — [Latency: {lat_vis:.1f}ms]")
     if results["visual"]:
-        print("| Rank | Video ID | Frame Index | Time (s) | Cosine Sim | SigLIP Prob | Image Path (AIC Relative) |")
+        print(
+            "| Rank | Video ID | Frame Index | Time (s) | Cosine Sim | SigLIP Prob | Image Path (AIC Relative) |"
+        )
         print("|:---:|:---:|:---:|:---:|:---:|:---:|:---|")
         for r in results["visual"]:
-            prob_pct = f"{r.get('prob', 0.0)*100.0:.1f}%"
+            prob_pct = f"{r.get('prob', 0.0) * 100.0:.1f}%"
             kf_str = f"{r['keyframe_n']:03d}.jpg"
             rel_path = f"keyframes/{r['video_id']}/{kf_str}"
-            print(f"| {r['rank']} | `{r['video_id']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | `{r['score']}` | **{prob_pct}** | `{rel_path}` |")
+            print(
+                f"| {r['rank']} | `{r['video_id']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | `{r['score']}` | **{prob_pct}** | `{rel_path}` |"
+            )
     else:
         print("*(No visual sub-query provided)*")
 
     # ── Table 2: DAM ──
     lat_dam = latencies.get("dam", 0.0)
-    print(f"\n### 🔍 Table 2: DAM Multi-Subject Composite Search Results (Top 10) — [Latency: {lat_dam:.1f}ms]")
+    print(
+        f"\n### 🔍 Table 2: DAM Multi-Subject Composite Search Results (Top 10) — [Latency: {lat_dam:.1f}ms]"
+    )
     if results["dam"]:
-        print("| Rank | Video ID | Frame Index | Subjects Matched | Composite Score | Best Matched Description & BBox |")
+        print(
+            "| Rank | Video ID | Frame Index | Subjects Matched | Composite Score | Best Matched Description & BBox |"
+        )
         print("|:---:|:---:|:---:|:---:|:---:|:---|")
         for r in results["dam"]:
-            boxes_str = "; ".join([f"**{b['class_entity']}** (*\"{b['caption'][:55]}...\"*, Sim: `{b['score']}`)" for b in r['matched_boxes']])
-            print(f"| {r['rank']} | `{r['video_id']}` | `{r['frame_idx']}` | {r['subjects_matched']} | **{r['composite_score']}** | {boxes_str} |")
+            boxes_str = "; ".join(
+                [
+                    f'**{b["class_entity"]}** (*"{b["caption"][:55]}..."*, Sim: `{b["score"]}`)'
+                    for b in r["matched_boxes"]
+                ]
+            )
+            print(
+                f"| {r['rank']} | `{r['video_id']}` | `{r['frame_idx']}` | {r['subjects_matched']} | **{r['composite_score']}** | {boxes_str} |"
+            )
     else:
         print("*(No object sub-query provided)*")
 
@@ -114,16 +131,22 @@ def print_tables_for_query(query_title: str, results: dict[str, list[dict[str, A
     lat_aud = latencies.get("audio", 0.0)
     print(f"\n### 🎙️ Table 3: Audio ASR Speech Search Results (Top 10) — [Latency: {lat_aud:.1f}ms]")
     if results["audio"]:
-        print("| Rank | Video ID | Frame Index | Time (s) | Cosine Sim | Spoken Transcript Snippet |")
+        print(
+            "| Rank | Video ID | Frame Index | Time (s) | Cosine Sim | Spoken Transcript Snippet |"
+        )
         print("|:---:|:---:|:---:|:---:|:---:|:---|")
         for r in results["audio"]:
-            print(f"| {r['rank']} | `{r['video_id']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | **{r['score']}** | *\"{r['transcript']}\"* |")
+            print(
+                f'| {r["rank"]} | `{r["video_id"]}` | `{r["frame_idx"]}` | {r["pts_time_s"]}s | **{r["score"]}** | *"{r["transcript"]}"* |'
+            )
     else:
         print("*(No spoken audio sub-query or silent scene)*")
 
     # ── Table 4: OCR ──
     lat_ocr = latencies.get("ocr", 0.0)
-    print(f"\n### 📝 Table 4: On-Screen Text (OCR) Search Results (Top 10) — [Latency: {lat_ocr:.1f}ms]")
+    print(
+        f"\n### 📝 Table 4: On-Screen Text (OCR) Search Results (Top 10) — [Latency: {lat_ocr:.1f}ms]"
+    )
     if results["ocr"]:
         print("| Rank | Video ID | Frame Index | Matched Text |")
         print("|:---:|:---:|:---:|:---|")
@@ -139,15 +162,25 @@ def main():
     parser = QueryParser(gemini_model_id="gemini-3.6-flash", qwen_model_id="qwen2.5:1.5b")
 
     queries = [
-        ("Test 1 (VQA)", "VQA", "Đoạn video về một người phụ nữ dạy nấu ăn cho những người khác. Trong đoạn video có thể thấy một người đang cầm công thức món ăn với nguyên liệu chính là 200g thịt nạc xay. Hỏi tiêu đề của công thức nấu ăn (tên món ăn) này là gì?"),
-        ("Test 2 (KIS)", "KIS", "Tìm một đoạn video đua xe đạp, góc quay từ flycam trên cao, một vận động viên mặc áo xanh dương, trắng đang vượt ba vận động viên khác và lên vị trí dẫn đầu. Biết sau đó vận động viên này dẫn đầu suốt đoạn đường còn lại đến đích."),
+        (
+            "Test 1 (VQA)",
+            "VQA",
+            "Đoạn video về một người phụ nữ dạy nấu ăn cho những người khác. Trong đoạn video có thể thấy một người đang cầm công thức món ăn với nguyên liệu chính là 200g thịt nạc xay. Hỏi tiêu đề của công thức nấu ăn (tên món ăn) này là gì?",
+        ),
+        (
+            "Test 2 (KIS)",
+            "KIS",
+            "Tìm một đoạn video đua xe đạp, góc quay từ flycam trên cao, một vận động viên mặc áo xanh dương, trắng đang vượt ba vận động viên khác và lên vị trí dẫn đầu. Biết sau đó vận động viên này dẫn đầu suốt đoạn đường còn lại đến đích.",
+        ),
     ]
 
     for title, task, raw_q in queries:
         # 1. Gemini query evaluation
         parsed_gemini = parser.parse(raw_q, task_type=task, engine="gemini")
         res_gemini, lat_gemini = run_channel_searches(searcher, registry, parsed_gemini, top_k=10)
-        print_tables_for_query(f"{title} — [GEMINI 3.6 FLASH DECOMPOSITION]", res_gemini, lat_gemini)
+        print_tables_for_query(
+            f"{title} — [GEMINI 3.6 FLASH DECOMPOSITION]", res_gemini, lat_gemini
+        )
 
         # 2. Qwen query evaluation
         parsed_qwen = parser.parse(raw_q, task_type=task, engine="qwen")

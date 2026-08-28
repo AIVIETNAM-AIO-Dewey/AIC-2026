@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 TaskType = Literal["KIS", "TRAKE", "VQA"]
@@ -13,13 +14,17 @@ class TrakeEvent(BaseModel):
 
     order: int = Field(description="Sequence index (1, 2, 3, ...)")
     description: str = Field(description="Original description of this event")
-    scene_en: str = Field(default="", description="Visual setting/camera framing in English for SigLIP")
+    scene_en: str = Field(
+        default="", description="Visual setting/camera framing in English for SigLIP"
+    )
     objects_en: list[str] = Field(
         default_factory=list,
         description="Key objects, tools, actions, ingredients in English for DAM",
     )
     speech_vi: str = Field(default="", description="Spoken speech keywords in Vietnamese for ASR")
-    ocr_keywords: list[str] = Field(default_factory=list, description="On-screen text in Vietnamese for OCR")
+    ocr_keywords: list[str] = Field(
+        default_factory=list, description="On-screen text in Vietnamese for OCR"
+    )
 
 
 class ParsedQuery(BaseModel):
@@ -49,11 +54,17 @@ class ParsedQuery(BaseModel):
     )
 
     # TRAKE Sequential Sub-Events
-    is_temporal_trake: bool = Field(default=False, description="True if query describes chronological events")
-    trake_events: list[TrakeEvent] = Field(default_factory=list, description="Sequential sub-event list for TRAKE")
+    is_temporal_trake: bool = Field(
+        default=False, description="True if query describes chronological events"
+    )
+    trake_events: list[TrakeEvent] = Field(
+        default_factory=list, description="Sequential sub-event list for TRAKE"
+    )
 
     # VQA Question String
-    vqa_question: str = Field(default="", description="The specific question being asked if task is VQA")
+    vqa_question: str = Field(
+        default="", description="The specific question being asked if task is VQA"
+    )
 
     # Dynamic Channel Weights (Sum = 1.0)
     weights: dict[str, float] = Field(
@@ -110,13 +121,13 @@ class SearchResult(BaseModel):
 
     # Speech & Text Evidence
     has_speech: bool = False
-    speech_evidence: Optional[SpeechEvidence] = None
+    speech_evidence: SpeechEvidence | None = None
     ocr_text: str = ""
 
     # Navigation & Reasoning
     adjacent_keyframes: list[int] = Field(default_factory=list)
     trake_matched_frames: list[int] = Field(default_factory=list)
-    vqa_answer: Optional[str] = None
+    vqa_answer: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -124,8 +135,8 @@ class SearchResponse(BaseModel):
 
     task_type: TaskType = "KIS"
     original_query: str = ""
-    parsed_query: Optional[ParsedQuery] = None
+    parsed_query: ParsedQuery | None = None
     execution_time_ms: float = 0.0
     total_candidates_evaluated: int = 0
     results: list[SearchResult] = Field(default_factory=list)
-    vqa_answer: Optional[str] = None
+    vqa_answer: str | None = None

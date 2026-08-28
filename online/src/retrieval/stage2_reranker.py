@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -26,8 +26,8 @@ class Stage2Reranker:
 
     def __init__(
         self,
-        registry: Optional[ModelRegistry] = None,
-        vqa_reasoner: Optional[VQAReasoner] = None,
+        registry: ModelRegistry | None = None,
+        vqa_reasoner: VQAReasoner | None = None,
     ):
         self.registry = registry or ModelRegistry.get_instance()
         self.vqa_reasoner = vqa_reasoner or VQAReasoner()
@@ -43,7 +43,7 @@ class Stage2Reranker:
         top_k_rerank: int = 50,
     ) -> list[dict[str, Any]]:
         """Re-rank Stage 1 candidate pool using BGE-Reranker-v2-m3 Cross-Encoder.
-        
+
         Args:
             parsed_query: Query with text descriptors
             candidates: Candidate pool from Stage 1 (e.g. 300 items)
@@ -54,7 +54,7 @@ class Stage2Reranker:
             return []
 
         user_query = parsed_query.original_query
-        
+
         # Only send top_k_rerank candidates to the heavy cross-encoder
         to_eval = candidates[:top_k_rerank]
         dossiers = []
@@ -67,9 +67,13 @@ class Stage2Reranker:
                 parts.append(f"[Spoken Speech] {c['asr_transcript']}")
             if c.get("ocr_text"):
                 parts.append(f"[Screen Text] {c['ocr_text']}")
-            
+
             # If no text payload, fallback to scene description
-            dossier_text = " ".join(parts) if parts else f"[Scene] Video {c['video_id']} frame {c['frame_idx']}"
+            dossier_text = (
+                " ".join(parts)
+                if parts
+                else f"[Scene] Video {c['video_id']} frame {c['frame_idx']}"
+            )
             dossiers.append(dossier_text)
 
         # Compute Cross-Encoder scores for the top candidates
@@ -106,17 +110,23 @@ class Stage2Reranker:
         top_k_rerank: int = 50,
     ) -> list[dict[str, Any]]:
         """Re-rank candidates and extract concise answer for the Top Evidence Keyframe."""
-        reranked = self.rerank_kis(parsed_query, candidates, final_top_k=final_top_k, top_k_rerank=top_k_rerank)
+        reranked = self.rerank_kis(
+            parsed_query, candidates, final_top_k=final_top_k, top_k_rerank=top_k_rerank
+        )
         if not reranked:
             return []
 
         # Run Extractive Reasoner on Top 1 Evidence Keyframe
         top_frame = reranked[0]
         q_text = parsed_query.vqa_question or parsed_query.original_query
-        vqa_ans = self.vqa_reasoner.answer_question(q_text, top_frame, raw_query=parsed_query.original_query)
+        vqa_ans = self.vqa_reasoner.answer_question(
+            q_text, top_frame, raw_query=parsed_query.original_query
+        )
 
         top_frame["vqa_answer"] = vqa_ans
-        top_frame["submission_string"] = f'{top_frame["video_id"]}, {top_frame["frame_idx"]}, "{vqa_ans}"'
+        top_frame["submission_string"] = (
+            f'{top_frame["video_id"]}, {top_frame["frame_idx"]}, "{vqa_ans}"'
+        )
 
         # Also populate default submission string for others
         for item in reranked[1:]:
@@ -137,7 +147,7 @@ class Stage2Reranker:
         final_top_k: int = 10,
     ) -> list[dict[str, Any]]:
         """Video-Level Timeline Dynamic Programming.
-        
+
         1. Identifies top candidate videos from Stage 1 candidate pools.
         2. Slices all chronological keyframes for each top video.
         3. Computes event-to-frame similarity matrix (M x N).
@@ -154,7 +164,9 @@ class Stage2Reranker:
                 video_scores[cand["video_id"]] += cand.get("stage1_score", 0.0)
 
         effective_top_n = max(top_n_videos, final_top_k, 50)
-        top_videos = sorted(video_scores.items(), key=lambda x: x[1], reverse=True)[:effective_top_n]
+        top_videos = sorted(video_scores.items(), key=lambda x: x[1], reverse=True)[
+            :effective_top_n
+        ]
 
         # 2. Build video-to-keyframes index map
         video_kfs = defaultdict(list)
@@ -167,10 +179,10 @@ class Stage2Reranker:
         valid_sequences = []
 
         # 4. Run DP per candidate video
-        for v_rank, (video_id, agg_score) in enumerate(top_videos):
+        for v_rank, (video_id, _agg_score) in enumerate(top_videos):
             kfs_in_v = sorted(video_kfs[video_id], key=lambda x: x[1]["frame_idx"])
             M = len(kfs_in_v)
-            if M < num_events:
+            if num_events > M:
                 continue
 
             kf_indices = [k[0] for k in kfs_in_v]
@@ -230,7 +242,17 @@ class Stage2Reranker:
                             "pts_time_s": p.get("pts_time_s", 0.0),
                             "keyframe_n": p.get("keyframe_n", 1),
                             "image_relpath": img_path,
-                            "score_vis": round(float(sim_matrix[frames.index(p['frame_idx']) if p['frame_idx'] in frames else 0, i]), 4),
+                            "score_vis": round(
+                                float(
+                                    sim_matrix[
+                                        frames.index(p["frame_idx"])
+                                        if p["frame_idx"] in frames
+                                        else 0,
+                                        i,
+                                    ]
+                                ),
+                                4,
+                            ),
                             "asr_transcript": p.get("asr_transcript", ""),
                         }
                     )
@@ -292,10 +314,12 @@ class Stage2Reranker:
         if not candidate_sequences:
             return []
 
-        logger.info(f"⚡ Reranking {len(candidate_sequences)} TRAKE sequences via Macro-Span Audio Narrative...")
+        logger.info(
+            f"⚡ Reranking {len(candidate_sequences)} TRAKE sequences via Macro-Span Audio Narrative..."
+        )
 
         reranked = []
-        for i, seq in enumerate(candidate_sequences):
+        for _i, seq in enumerate(candidate_sequences):
             vid = seq["video_id"]
             frames = seq.get("matched_frames", [])
             dp_score = float(seq.get("sequence_score", 0.5))
@@ -308,11 +332,17 @@ class Stage2Reranker:
             end_f = max(frames)
 
             # Stage 3: Extract macro-span audio transcript
-            audio_span = searcher.get_video_audio_span(vid, start_f, end_f) if hasattr(searcher, "get_video_audio_span") else ""
+            audio_span = (
+                searcher.get_video_audio_span(vid, start_f, end_f)
+                if hasattr(searcher, "get_video_audio_span")
+                else ""
+            )
 
             # Stage 4: Fast narrative alignment score
             if audio_span:
-                narrative_score, reasoning = self._evaluate_narrative_alignment(event_descriptions, audio_span)
+                narrative_score, reasoning = self._evaluate_narrative_alignment(
+                    event_descriptions, audio_span
+                )
             else:
                 narrative_score = dp_score
                 reasoning = "No dialogue detected in action span"
@@ -334,4 +364,3 @@ class Stage2Reranker:
             s["rank"] = rank
 
         return reranked[:final_top_k]
-

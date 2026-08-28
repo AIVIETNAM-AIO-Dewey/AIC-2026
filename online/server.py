@@ -1,17 +1,9 @@
-"""FastAPI High-Speed GPU Server for AIC Online Retrieval Engine.
+"""FastAPI server for the auditable KIS no-fusion retrieval experiment.
 
-Maintains warm GPU models in memory:
-- SigLIP-2 Text Encoder (768-d)
-- BGE-M3 Dense Text Encoder (1024-d)
-- BGE-Reranker-v2-m3 Cross-Encoder
-- BLAS Memory-Mapped Vector Search Engine (177k keyframes, 435k DAM objects)
-
-Provides low-latency endpoints for:
-1. LLM Query Parsing (Gemini 3.6 / Qwen 2.5 with automatic fallback)
-2. 4-Channel Branch Search & Caching
-3. Instant (< 5ms) CPU-based RRF Re-Fusion upon Weight Adjustment
-4. Precision Stage 2 Cross-Encoder & VQA / TRAKE reasoning
-5. Keyframe metadata, DAM bounding box overlays, and filmstrip navigation
+The server keeps SigLIP-2 and BGE-M3 query encoders warm, searches DAM,
+SigLIP, OCR, and ASR independently, and returns four isolated result pools.
+It intentionally does not initialize or execute fusion, synergy, reranking,
+VQA reasoning, or TRAKE sequence solving.
 """
 
 from __future__ import annotations
@@ -24,22 +16,20 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from online.src.contracts.query import ParsedQuery, TaskType
 from online.src.retrieval.embeddings import ModelRegistry
-from online.src.retrieval.fusion import MultimodalFusionEngine
+from online.src.retrieval.modality_search import IndependentModalitySearch
 from online.src.retrieval.query_parser import QueryParser
-from online.src.retrieval.stage2_reranker import Stage2Reranker
 from online.src.retrieval.vector_search import FastVectorSearchEngine
-from online.src.retrieval.vqa_reasoner import VQAReasoner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("aic_server")
@@ -50,27 +40,24 @@ CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "server_config.yaml"
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Config file not found at {CONFIG_PATH}")
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 config = load_config()
 
 # Global Warm Singletons
-_searcher: Optional[FastVectorSearchEngine] = None
-_registry: Optional[ModelRegistry] = None
-_fusion: Optional[MultimodalFusionEngine] = None
-_reranker: Optional[Stage2Reranker] = None
-_parser: Optional[QueryParser] = None
+_searcher: FastVectorSearchEngine | None = None
+_registry: ModelRegistry | None = None
+_modality_search: IndependentModalitySearch | None = None
+_parser: QueryParser | None = None
 
 # In-memory video ID -> actual directory path map (supports nested keyframes-1, keyframes-2, etc.)
 _video_to_dir_map: dict[str, Path] = {}
-# In-memory Branch Cache: session_id -> { "parsed_query": ..., "branches": dict, "created_at": float }
-_branch_cache: dict[str, dict[str, Any]] = {}
 
 
 def _index_keyframe_directories(root_dir: Path):
-    """Recursively discover and index all video keyframe directories at any nesting depth and casing."""
+    """Index video keyframe directories at any nesting depth and casing."""
     if not root_dir.exists():
         logger.warning(f"Keyframes root directory not found: {root_dir}")
         return
@@ -88,12 +75,16 @@ def _index_keyframe_directories(root_dir: Path):
         logger.warning(f"Error during keyframe directory indexing: {e}")
 
     dt = (time.perf_counter() - t0) * 1000.0
-    logger.info(f"✅ Indexed {len(_video_to_dir_map)} video keyframe folders in {dt:.1f}ms (Supports arbitrary nested folders)")
+    logger.info(
+        "✅ Indexed %d video keyframe folders in %.1fms",
+        len(_video_to_dir_map),
+        dt,
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _searcher, _registry, _fusion, _reranker, _parser
+    global _searcher, _registry, _modality_search, _parser
 
     logger.info("🚀 Starting AIC Retrieval Engine Server...")
     t0 = time.perf_counter()
@@ -103,31 +94,24 @@ async def lifespan(app: FastAPI):
 
     # 2. Load memory-mapped vector search matrices & metadata
     idx_path = config["paths"]["unified_index"]
-    _searcher = FastVectorSearchEngine(unified_index_dir=idx_path)
+    _searcher = FastVectorSearchEngine(
+        unified_index_dir=idx_path,
+        block_rows=config["retrieval"].get("search_block_rows", 32_768),
+    )
 
-    # 3. Warm up GPU embedding & reranker models
+    # 3. Warm only the two query encoders used by the independent pools.
     _registry = ModelRegistry.get_instance(
         siglip_id=config["models"]["siglip"],
+        siglip_revision=config["models"]["siglip_revision"],
         bge_id=config["models"]["bge_m3"],
         reranker_id=config["models"]["bge_reranker"],
     )
     logger.info("⚡ Pre-warming PyTorch GPU models...")
     _registry._load_siglip()
     _registry._load_bge()
-    _registry._load_reranker()
 
-    # 4. Instantiate fusion & reranker engines
-    _fusion = MultimodalFusionEngine(
-        searcher=_searcher,
-        registry=_registry,
-        k_rrf=config["retrieval"].get("k_rrf", 60),
-    )
-    vqa_reasoner = VQAReasoner(
-        gemini_model_id=config["models"].get("gemini_model_id", "gemini-3.6-flash"),
-        qwen_model_id=config["models"].get("qwen_model_id", "qwen2.5:7b"),
-        ollama_url=config["models"].get("qwen_ollama_url", "http://localhost:11434/api/chat"),
-    )
-    _reranker = Stage2Reranker(registry=_registry, vqa_reasoner=vqa_reasoner)
+    # 4. Instantiate the no-fusion modality orchestrator.
+    _modality_search = IndependentModalitySearch(searcher=_searcher, registry=_registry)
 
     # 5. Query parser with Gemini & Ollama Qwen
     _parser = QueryParser(
@@ -159,26 +143,14 @@ app.add_middleware(
 # ──────────────────────────────────────────────────────────────────────────────
 class ParseRequest(BaseModel):
     query: str
-    task_type: Optional[TaskType] = "KIS"
+    task_type: TaskType | None = "KIS"
     engine: str = "gemini"  # "gemini" or "qwen"
 
 
 class SearchRequest(BaseModel):
     parsed_query: ParsedQuery
-    session_id: Optional[str] = None
-    top_k_pool: int = Field(default=300, description="Stage 1 candidate pool size")
-    top_k_rerank: int = Field(default=50, description="Stage 2 cross-encoder evaluated items")
-    final_top_k: int = Field(default=20, description="Final number of top results returned")
-    run_stage2: bool = Field(default=True, description="Whether to run Stage 2 cross-encoder")
-
-
-class CachedReFuseRequest(BaseModel):
-    session_id: str
-    weights: dict[str, float]
-    top_k_pool: int = 300
-    top_k_rerank: int = 50
-    final_top_k: int = 20
-    run_stage2: bool = True
+    session_id: str | None = None
+    top_k: int = Field(default=20, ge=1, le=100, description="Results per modality")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -189,11 +161,17 @@ async def get_client_config():
     """Return paths and default settings for the frontend."""
     return {
         "keyframes_root": config["paths"]["keyframes_root"],
-        "default_weights": config["retrieval"]["default_weights"],
-        "top_k_pool": config["retrieval"]["top_k_pool"],
-        "top_k_rerank": config["retrieval"]["top_k_rerank"],
+        "experiment_mode": "nofusion",
+        "task_types": ["KIS"],
+        "modalities": ["siglip", "dam", "ocr", "asr"],
+        "default_top_k": config["retrieval"]["default_top_k"],
+        "max_top_k": config["retrieval"]["max_top_k"],
+        "fusion_enabled": False,
+        "reranking_enabled": False,
         "gemini_model_id": config["models"].get("gemini_model_id", "gemini-3.6-flash"),
         "qwen_model_id": config["models"].get("qwen_model_id", "qwen2.5:7b"),
+        "siglip_model_id": config["models"]["siglip"],
+        "siglip_revision": config["models"]["siglip_revision"],
     }
 
 
@@ -202,209 +180,48 @@ async def parse_query_endpoint(req: ParseRequest):
     """Parse raw user query using Gemini or local Qwen with graceful fallbacks."""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    if req.task_type != "KIS":
+        raise HTTPException(
+            status_code=400,
+            detail="The no-fusion experiment supports KIS queries only.",
+        )
 
     t0 = time.perf_counter()
     parsed = _parser.parse(req.query, task_type=req.task_type, engine=req.engine)
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
     return {
-        "parsed_query": parsed.model_dump(),
+        # Weights are intentionally omitted: no modality can gate or influence another.
+        "parsed_query": parsed.model_dump(exclude={"weights"}),
         "execution_time_ms": round(dt_ms, 2),
     }
 
 
 @app.post("/api/search")
 async def search_endpoint(req: SearchRequest):
-    """Full multimodal search: embed -> search -> cache branch hits -> fuse -> Stage 2 rerank."""
+    """Return four independently ranked result pools for one KIS query."""
     t0 = time.perf_counter()
     parsed = req.parsed_query
+    if parsed.task_type != "KIS":
+        raise HTTPException(
+            status_code=400,
+            detail="The no-fusion experiment supports KIS queries only.",
+        )
     session_id = req.session_id or parsed.session_id or str(uuid.uuid4())
     parsed.session_id = session_id
-
-    branch_limit = config["retrieval"].get("branch_limit", 500)
-
-    # Branch A: TRAKE Multi-Event Pipeline
-    if parsed.task_type == "TRAKE" and parsed.trake_events:
-        event_queries = []
-        event_pools = []
-        event_branches = []
-        for ev in parsed.trake_events:
-            sub = ParsedQuery(
-                task_type="KIS",
-                original_query=ev.description,
-                global_scene_en=ev.scene_en,
-                objects_en=ev.objects_en,
-                speech_vi=ev.speech_vi,
-                ocr_keywords=ev.ocr_keywords,
-                weights=parsed.weights,
-            )
-            event_queries.append(sub)
-            ev_branches = _fusion.retrieve_branches(sub, branch_limit=branch_limit)
-            event_branches.append(ev_branches)
-            ev_pool = _fusion.fuse_from_branch_hits(
-                vis_hits=ev_branches.get("vis", []),
-                dam_hits=ev_branches.get("dam", []),
-                asr_hits=ev_branches.get("asr", []),
-                ocr_hits=ev_branches.get("ocr", []),
-                weights=parsed.weights,
-                top_k_pool=100,
-            )
-            event_pools.append(ev_pool)
-
-        _branch_cache[session_id] = {
-            "parsed_query": parsed,
-            "branches": event_branches[0] if event_branches else {},
-            "event_branches": event_branches,
-            "event_queries": event_queries,
-            "created_at": time.time(),
-        }
-
-        raw_sequences = _reranker.solve_trake_video_guided_dp(
-            event_queries=event_queries,
-            candidate_pools=event_pools,
-            searcher=_searcher,
-            top_n_videos=max(50, req.final_top_k),
-            final_top_k=req.final_top_k,
-        )
-        event_descs = [ev.description for ev in parsed.trake_events]
-        results = _reranker.rerank_trake_sequences(
-            event_descriptions=event_descs,
-            candidate_sequences=raw_sequences,
-            searcher=_searcher,
-            final_top_k=req.final_top_k,
-        )
-        fused_pool = raw_sequences
-
-    # Branch B: KIS / VQA Standard Single-Query Pipeline
-    else:
-        # 1. Retrieve 4 branches independently
-        branches = _fusion.retrieve_branches(parsed, branch_limit=branch_limit)
-
-        # 2. Store branch hits in memory cache for instant weight adjustment re-runs
-        _branch_cache[session_id] = {
-            "parsed_query": parsed,
-            "branches": branches,
-            "created_at": time.time(),
-        }
-
-        # 3. Fuse branches with Weighted RRF & Synergy
-        fused_pool = _fusion.fuse_from_branch_hits(
-            vis_hits=branches["vis"],
-            dam_hits=branches["dam"],
-            asr_hits=branches["asr"],
-            ocr_hits=branches["ocr"],
-            weights=parsed.weights,
-            top_k_pool=req.top_k_pool,
-        )
-
-        # 4. Optional Stage 2 Reranking
-        results = fused_pool
-        if req.run_stage2:
-            if parsed.task_type == "KIS":
-                results = _reranker.rerank_kis(
-                    parsed,
-                    fused_pool,
-                    final_top_k=req.final_top_k,
-                    top_k_rerank=req.top_k_rerank,
-                )
-            elif parsed.task_type == "VQA":
-                results = _reranker.rerank_vqa(
-                    parsed,
-                    fused_pool,
-                    final_top_k=req.final_top_k,
-                    top_k_rerank=req.top_k_rerank,
-                )
+    if _modality_search is None:
+        raise HTTPException(status_code=503, detail="Search models are not ready yet.")
+    pools = _modality_search.search(parsed, top_k=req.top_k)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     return {
         "session_id": session_id,
-        "task_type": parsed.task_type,
-        "total_fused_candidates": len(fused_pool),
-        "results": results,
-        "execution_time_ms": round(dt_ms, 2),
-    }
-
-
-@app.post("/api/search/cached")
-async def cached_re_fuse_endpoint(req: CachedReFuseRequest):
-    """Instant (< 5ms) CPU-based RRF Re-Fusion using cached branch hits. No re-embedding."""
-    t0 = time.perf_counter()
-    entry = _branch_cache.get(req.session_id)
-    if not entry:
-        raise HTTPException(
-            status_code=404,
-            detail="Session ID not found in branch cache. Please run full search first.",
-        )
-
-    parsed: ParsedQuery = entry["parsed_query"]
-    branches: dict[str, list[dict]] = entry["branches"]
-
-    # 1. Instant Re-fuse on cached branch hits
-    fused_pool = _fusion.fuse_from_branch_hits(
-        vis_hits=branches.get("vis", []),
-        dam_hits=branches.get("dam", []),
-        asr_hits=branches.get("asr", []),
-        ocr_hits=branches.get("ocr", []),
-        weights=req.weights,
-        top_k_pool=req.top_k_pool,
-    )
-
-    # 2. Stage 2 Reranking
-    results = fused_pool
-    if req.run_stage2:
-        if parsed.task_type == "KIS":
-            results = _reranker.rerank_kis(
-                parsed,
-                fused_pool,
-                final_top_k=req.final_top_k,
-                top_k_rerank=req.top_k_rerank,
-            )
-        elif parsed.task_type == "VQA":
-            results = _reranker.rerank_vqa(
-                parsed,
-                fused_pool,
-                final_top_k=req.final_top_k,
-                top_k_rerank=req.top_k_rerank,
-            )
-        elif parsed.task_type == "TRAKE":
-            event_branches = entry.get("event_branches", [])
-            event_queries = entry.get("event_queries", [])
-            if event_branches and event_queries:
-                event_pools = []
-                for ev_b, ev_q in zip(event_branches, event_queries):
-                    ev_pool = _fusion.fuse_from_branch_hits(
-                        vis_hits=ev_b.get("vis", []),
-                        dam_hits=ev_b.get("dam", []),
-                        asr_hits=ev_b.get("asr", []),
-                        ocr_hits=ev_b.get("ocr", []),
-                        weights=req.weights,
-                        top_k_pool=req.top_k_pool,
-                    )
-                    event_pools.append(ev_pool)
-
-                raw_sequences = _reranker.solve_trake_video_guided_dp(
-                    event_queries=event_queries,
-                    candidate_pools=event_pools,
-                    searcher=_searcher,
-                    top_n_videos=max(50, req.final_top_k),
-                    final_top_k=req.final_top_k,
-                )
-                event_descs = [ev.description for ev in parsed.trake_events]
-                results = _reranker.rerank_trake_sequences(
-                    event_descriptions=event_descs,
-                    candidate_sequences=raw_sequences,
-                    searcher=_searcher,
-                    final_top_k=req.final_top_k,
-                )
-            else:
-                results = fused_pool
-
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    return {
-        "session_id": req.session_id,
-        "is_cached": True,
-        "total_fused_candidates": len(fused_pool),
-        "results": results,
+        "task_type": "KIS",
+        "experiment_mode": "nofusion",
+        "fusion_applied": False,
+        "reranking_applied": False,
+        "total_candidates": sum(pool["result_count"] for pool in pools.values()),
+        "modality_results": pools,
         "execution_time_ms": round(dt_ms, 2),
     }
 
@@ -417,7 +234,11 @@ async def get_keyframe_detail(video_id: str, keyframe_n: int):
         raise HTTPException(status_code=404, detail=f"Keyframe {video_id}:{keyframe_n} not found")
 
     dam_objects = _searcher.get_dam_objects_for_frame(video_id, kf["frame_idx"])
-    audio_span = _searcher.get_video_audio_span(video_id, max(0, kf["frame_idx"] - 450), kf["frame_idx"] + 450)
+    audio_span = _searcher.get_video_audio_span(
+        video_id,
+        max(0, kf["frame_idx"] - 450),
+        kf["frame_idx"] + 450,
+    )
 
     return {
         "keyframe": kf,
@@ -442,7 +263,11 @@ async def get_video_media_info(video_id: str):
     if not re.fullmatch(r"[A-Z0-9_]+", canonical_id):
         raise HTTPException(status_code=400, detail="Invalid video ID")
 
-    media_info_dir = Path(__file__).resolve().parents[1] / "data" / "media-info"
+    media_info_dir = (
+        Path(str(config["paths"]["media_info"]).strip().strip('"').strip("'"))
+        .expanduser()
+        .resolve()
+    )
     media_info_path = media_info_dir / f"{canonical_id}.json"
     if not media_info_path.is_file():
         raise HTTPException(status_code=404, detail=f"Media info for {canonical_id} not found")
@@ -458,16 +283,20 @@ async def get_video_media_info(video_id: str):
 # ──────────────────────────────────────────────────────────────────────────────
 # Static File & UI Serving
 # ──────────────────────────────────────────────────────────────────────────────
-FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
-KEYFRAMES_DIR = Path(str(config["paths"]["keyframes_root"]).strip().strip('"').strip("'")).expanduser().resolve()
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
+KEYFRAMES_DIR = (
+    Path(str(config["paths"]["keyframes_root"]).strip().strip('"').strip("'"))
+    .expanduser()
+    .resolve()
+)
 
 
 @app.get("/keyframes/{video_id}/{filename}")
 async def serve_keyframe_image(video_id: str, filename: str):
-    """Dynamically serve keyframe image across arbitrary nested folders, casings, and image extensions."""
+    """Serve a keyframe across nested folders, casings, and image extensions."""
     canon_vid = video_id.upper().replace("-", "_")
     v_dir = _video_to_dir_map.get(canon_vid) or _video_to_dir_map.get(video_id)
-    
+
     stem = Path(filename).stem
     candidates_to_try = [
         filename,
@@ -480,13 +309,18 @@ async def serve_keyframe_image(video_id: str, filename: str):
     ]
     if stem.isdigit():
         num = int(stem)
-        candidates_to_try.extend([
-            f"{num:03d}.jpg",
-            f"{num:04d}.jpg",
-            f"{num}.jpg",
-            f"{num:03d}.png",
-            f"{num}.png",
-        ])
+        candidates_to_try.extend(
+            [
+                f"{num:08d}.jpg",
+                f"{num:08d}.jpeg",
+                f"{num:08d}.png",
+                f"{num:03d}.jpg",
+                f"{num:04d}.jpg",
+                f"{num}.jpg",
+                f"{num:03d}.png",
+                f"{num}.png",
+            ]
+        )
 
     # 1. Look up in indexed directory map
     if v_dir:
@@ -511,10 +345,15 @@ async def serve_keyframe_image(video_id: str, filename: str):
     raise HTTPException(status_code=404, detail=f"Keyframe image {video_id}/{filename} not found")
 
 
-# Mount frontend at / with html=True to automatically serve index.html, style.css, and app.js
-if FRONTEND_DIR.exists():
+# Serve only Vite's compiled output. The source tree contains TypeScript and
+# bare module imports that browsers cannot consume through StaticFiles.
+if (FRONTEND_DIR / "index.html").is_file():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
-
+else:
+    logger.warning(
+        "Compiled frontend not found at %s. Run `npm run build` before starting the UI.",
+        FRONTEND_DIR,
+    )
 
 
 def main():

@@ -2,19 +2,26 @@
   "name": "aic-2026-retrieval-studio",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "dev:mock": "vite --mode mock --host 127.0.0.1 --port 5173",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:dist",
+    "lint": "node --check online/frontend/app.js && node scripts/check_frontend.mjs",
+    "test": "node --test online/frontend/tests/*.test.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.frontend-js.json",
+    "verify:dist": "node scripts/verify_frontend_dist.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
   },
   "dependencies": {
-    "lucide": "latest"
+    "lucide": "1.34.0"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "typescript": "latest",
-    "vite": "latest"
+    "@types/node": "26.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
   }
 }

@@ -13,15 +13,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
+  python-quality:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install CPU test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -37,3 +43,35 @@ jobs:
           ruff format --check .
       - name: CPU tests
         run: pytest -m "not gpu and not slow"
+      - name: Online no-fusion tests
+        run: python -m unittest discover -s online/tests -p 'test_nofusion.py' -v
+
+  frontend-quality:
+    name: Frontend quality and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Frontend syntax and DOM contract
+        run: npm run lint
+      - name: Frontend typecheck
+        run: npm run typecheck
+      - name: Frontend tests
+        run: npm test
+      - name: Build compiled frontend
+        run: npm run build
+      - name: Verify compiled frontend assets
+        run: npm run verify:dist
+      - name: Store compiled frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: aic-frontend-dist
+          path: online/frontend/dist
+          if-no-files-found: error
+          retention-days: 7

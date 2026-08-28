@@ -26,6 +26,7 @@ class MaskPrediction:
 
 class BboxMaskGenerator:
     """Direct, instant bounding box mask generator (zero GPU overhead)."""
+
     def generate(
         self, image: Image.Image, boxes_xyxy: list[tuple[int, int, int, int]]
     ) -> list[MaskPrediction]:

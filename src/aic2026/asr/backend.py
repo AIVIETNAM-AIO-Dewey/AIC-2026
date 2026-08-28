@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -92,7 +92,9 @@ class FasterWhisperBackend(AsrBackend):
             fw_device = "cpu"  # faster-whisper does not support MPS
         logger.info(
             "Loading faster-whisper model %s on %s (%s)",
-            model_id, fw_device, compute_type,
+            model_id,
+            fw_device,
+            compute_type,
         )
         self._model = WhisperModel(
             model_id,
@@ -130,11 +132,13 @@ class FasterWhisperBackend(AsrBackend):
         for seg in segments_iter:
             text = seg.text.strip()
             if text:
-                results.append(AsrSegmentRaw(
-                    start_s=seg.start,
-                    end_s=seg.end,
-                    text=text,
-                ))
+                results.append(
+                    AsrSegmentRaw(
+                        start_s=seg.start,
+                        end_s=seg.end,
+                        text=text,
+                    )
+                )
         return results
 
     @property
@@ -182,7 +186,9 @@ class HuggingFaceBackend(AsrBackend):
 
         logger.info(
             "Loading HuggingFace ASR pipeline %s on %s (dtype=%s)",
-            model_id, resolved, torch_dtype,
+            model_id,
+            resolved,
+            torch_dtype,
         )
         self._pipe = pipeline(
             "automatic-speech-recognition",
@@ -221,11 +227,13 @@ class HuggingFaceBackend(AsrBackend):
             text = chunk.get("text", "").strip()
             ts = chunk.get("timestamp", (None, None))
             if text and ts[0] is not None and ts[1] is not None:
-                segments.append(AsrSegmentRaw(
-                    start_s=ts[0],
-                    end_s=ts[1],
-                    text=text,
-                ))
+                segments.append(
+                    AsrSegmentRaw(
+                        start_s=ts[0],
+                        end_s=ts[1],
+                        text=text,
+                    )
+                )
 
         return segments
 
@@ -271,9 +279,7 @@ def create_asr_backend(
     backend_cls = _ENGINE_MAP.get(engine)
     if backend_cls is None:
         available = ", ".join(sorted(_ENGINE_MAP))
-        raise ValueError(
-            f"Unknown ASR engine '{engine}'. Available: {available}"
-        )
+        raise ValueError(f"Unknown ASR engine '{engine}'. Available: {available}")
 
     logger.info("Creating ASR backend: engine=%s, model=%s", engine, model_id)
 

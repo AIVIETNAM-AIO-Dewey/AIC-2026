@@ -13,7 +13,6 @@ import argparse
 import csv
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -44,7 +43,7 @@ class BGEFastEmbedder:
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.model = AutoModel.from_pretrained(model_id, torch_dtype=dtype).to(self.device)
         self.model.eval()
-        
+
         # Optimize for A100 Tensor Cores
         if self.device == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -57,7 +56,7 @@ class BGEFastEmbedder:
         """Embed list of texts into L2-normalized 1024-d float16 vectors."""
         all_embeddings = []
         total_batches = (len(texts) + batch_size - 1) // batch_size
-        
+
         for i in tqdm(
             range(0, len(texts), batch_size),
             total=total_batches,
@@ -95,15 +94,17 @@ def load_map_keyframes(map_dir: Path) -> dict[str, list[dict[str, Any]]]:
     for csv_file in tqdm(csv_files, desc="Loading map-keyframes"):
         video_id = csv_file.stem
         rows = []
-        with open(csv_file, "r", encoding="utf-8") as f:
+        with open(csv_file, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                rows.append({
-                    "n": int(row.get("n", 0)),
-                    "pts_time": float(row.get("pts_time", 0.0)),
-                    "fps": float(row.get("fps", 25.0)),
-                    "frame_idx": int(row.get("frame_idx", 0)),
-                })
+                rows.append(
+                    {
+                        "n": int(row.get("n", 0)),
+                        "pts_time": float(row.get("pts_time", 0.0)),
+                        "fps": float(row.get("fps", 25.0)),
+                        "frame_idx": int(row.get("frame_idx", 0)),
+                    }
+                )
         video_to_keyframes[video_id] = sorted(rows, key=lambda x: x["pts_time"])
 
     logger.info(f"✅ Loaded keyframe maps for {len(video_to_keyframes)} videos.")
@@ -113,7 +114,9 @@ def load_map_keyframes(map_dir: Path) -> dict[str, list[dict[str, Any]]]:
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. DAM Metadata Extraction
 # ──────────────────────────────────────────────────────────────────────────────
-def extract_all_dam_metadata(dam_dir: Path) -> tuple[list[dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
+def extract_all_dam_metadata(
+    dam_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
     """Extract all DAM region metadata from JSONL files."""
     logger.info("📖 Phase 1a: Extracting DAM metadata from all JSONL files...")
     jsonl_files = sorted(list(dam_dir.glob("*.jsonl")))
@@ -124,7 +127,7 @@ def extract_all_dam_metadata(dam_dir: Path) -> tuple[list[dict[str, Any]], dict[
 
     for jsonl_path in tqdm(jsonl_files, desc="Reading DAM JSONLs"):
         video_id = jsonl_path.stem
-        with open(jsonl_path, "r", encoding="utf-8") as f:
+        with open(jsonl_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -153,15 +156,17 @@ def extract_all_dam_metadata(dam_dir: Path) -> tuple[list[dict[str, Any]], dict[
                     )
 
                     if caption_text:
-                        all_regions.append({
-                            "video_id": video_id,
-                            "frame_idx": frame_idx,
-                            "keyframe_n": keyframe_n,
-                            "region_id": str(region_id),
-                            "class_entity": str(class_entity),
-                            "bbox": [float(b) for b in bbox],
-                            "description_en": str(caption_text),
-                        })
+                        all_regions.append(
+                            {
+                                "video_id": video_id,
+                                "frame_idx": frame_idx,
+                                "keyframe_n": keyframe_n,
+                                "region_id": str(region_id),
+                                "class_entity": str(class_entity),
+                                "bbox": [float(b) for b in bbox],
+                                "description_en": str(caption_text),
+                            }
+                        )
 
                 # Build summary per keyframe
                 kf_captions = []
@@ -206,7 +211,7 @@ def extract_all_asr_metadata(
 
         kf_speech_map: dict[int, list[str]] = {}
 
-        with open(asr_path, "r", encoding="utf-8") as f:
+        with open(asr_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -216,7 +221,11 @@ def extract_all_asr_metadata(
                 except Exception:
                     continue
 
-                raw_text = seg.get("transcript_raw") or seg.get("transcript_normalized") or seg.get("text", "")
+                raw_text = (
+                    seg.get("transcript_raw")
+                    or seg.get("transcript_normalized")
+                    or seg.get("text", "")
+                )
                 if not raw_text:
                     continue
 
@@ -228,8 +237,16 @@ def extract_all_asr_metadata(
                             kf_speech_map[f_idx] = []
                         kf_speech_map[f_idx].append(raw_text)
                 else:
-                    start_s = float(seg.get("start_ms", 0)) / 1000.0 if "start_ms" in seg else float(seg.get("start_s", seg.get("start", 0.0)))
-                    end_s = float(seg.get("end_ms", 0)) / 1000.0 if "end_ms" in seg else float(seg.get("end_s", seg.get("end", 0.0)))
+                    start_s = (
+                        float(seg.get("start_ms", 0)) / 1000.0
+                        if "start_ms" in seg
+                        else float(seg.get("start_s", seg.get("start", 0.0)))
+                    )
+                    end_s = (
+                        float(seg.get("end_ms", 0)) / 1000.0
+                        if "end_ms" in seg
+                        else float(seg.get("end_s", seg.get("end", 0.0)))
+                    )
                     for kf in keyframes:
                         pts = kf["pts_time"]
                         if (start_s - 1.5) <= pts <= (end_s + 1.5):
@@ -248,20 +265,22 @@ def extract_all_asr_metadata(
             kf = kf_lookup[f_idx]
             aggregated_text = " ".join(list(dict.fromkeys(texts)))
             dam_info = (dam_kf_summaries or {}).get((video_id, kf["n"]), {})
-            all_speech_records.append({
-                "video_id": video_id,
-                "keyframe_n": kf["n"],
-                "frame_idx": f_idx,
-                "pts_time_s": kf["pts_time"],
-                "fps": kf["fps"],
-                "frame_uid": f"{video_id}:{f_idx}",
-                "image_relpath": f"keyframes/{video_id}/{kf['n']:03d}.jpg",
-                "asr_transcript_vi": aggregated_text,
-                "has_speech": True,
-                "dam_summary_en": dam_info.get("dam_summary_en", ""),
-                "num_objects": dam_info.get("num_objects", 0),
-                "ocr_text": "",
-            })
+            all_speech_records.append(
+                {
+                    "video_id": video_id,
+                    "keyframe_n": kf["n"],
+                    "frame_idx": f_idx,
+                    "pts_time_s": kf["pts_time"],
+                    "fps": kf["fps"],
+                    "frame_uid": f"{video_id}:{f_idx}",
+                    "image_relpath": f"keyframes/{video_id}/{kf['n']:03d}.jpg",
+                    "asr_transcript_vi": aggregated_text,
+                    "has_speech": True,
+                    "dam_summary_en": dam_info.get("dam_summary_en", ""),
+                    "num_objects": dam_info.get("num_objects", 0),
+                    "ocr_text": "",
+                }
+            )
 
     logger.info(f"  ✅ Extracted {len(all_speech_records):,} keyframe speech records total.")
     return all_speech_records
@@ -272,11 +291,24 @@ def extract_all_asr_metadata(
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Colab A100 High-Throughput BGE-M3 Embedding")
-    parser.add_argument("--dam-dir", type=str, required=True, help="Path to dam_descriptions JSONL folder")
-    parser.add_argument("--asr-dir", type=str, required=True, help="Path to asr_segments JSONL folder")
-    parser.add_argument("--map-dir", type=str, required=True, help="Path to map-keyframes CSV folder")
-    parser.add_argument("--output-dir", type=str, default="./embeddings_output", help="Directory to save .npy and .jsonl")
-    parser.add_argument("--batch-size", type=int, default=1024, help="GPU batch size (default 1024 for A100)")
+    parser.add_argument(
+        "--dam-dir", type=str, required=True, help="Path to dam_descriptions JSONL folder"
+    )
+    parser.add_argument(
+        "--asr-dir", type=str, required=True, help="Path to asr_segments JSONL folder"
+    )
+    parser.add_argument(
+        "--map-dir", type=str, required=True, help="Path to map-keyframes CSV folder"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./embeddings_output",
+        help="Directory to save .npy and .jsonl",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=1024, help="GPU batch size (default 1024 for A100)"
+    )
     parser.add_argument("--model-id", type=str, default="BAAI/bge-m3", help="HuggingFace model ID")
 
     args = parser.parse_args()
@@ -296,7 +328,9 @@ def main():
     logger.info(f"  • GPU Batch Size:   {args.batch_size}")
     if torch.cuda.is_available():
         logger.info(f"  • GPU Device:       {torch.cuda.get_device_name(0)}")
-        logger.info(f"  • GPU VRAM:         {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        logger.info(
+            f"  • GPU VRAM:         {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB"
+        )
     logger.info("=" * 80)
 
     t_start = time.time()
@@ -317,7 +351,9 @@ def main():
             t0 = time.time()
             dam_vectors = embedder.embed_batch(captions, batch_size=args.batch_size)
             dam_embed_time = time.time() - t0
-            logger.info(f"  ✅ DAM Embedding Complete: {len(captions):,} texts in {dam_embed_time:.1f}s ({len(captions)/max(dam_embed_time,0.01):.0f} texts/sec)")
+            logger.info(
+                f"  ✅ DAM Embedding Complete: {len(captions):,} texts in {dam_embed_time:.1f}s ({len(captions) / max(dam_embed_time, 0.01):.0f} texts/sec)"
+            )
 
             # Save FP16 Matrix
             dam_npy_path = output_dir / "dam_vectors.f16.npy"
@@ -331,7 +367,9 @@ def main():
                 for reg in all_dam_regions:
                     f.write(json.dumps(reg, ensure_ascii=False) + "\n")
 
-            logger.info(f"  ✅ Saved DAM: Vector Shape {dam_vectors.shape}, Size ~{dam_npy_path.stat().st_size / 1024**2:.1f} MB")
+            logger.info(
+                f"  ✅ Saved DAM: Vector Shape {dam_vectors.shape}, Size ~{dam_npy_path.stat().st_size / 1024**2:.1f} MB"
+            )
             del all_dam_regions, dam_vectors
 
     # --------------------------------------------------------------------------
@@ -342,13 +380,17 @@ def main():
         logger.info("🎙️ STEP 2: AUDIO ASR EMBEDDINGS")
         logger.info("=" * 80)
 
-        all_speech_records = extract_all_asr_metadata(asr_dir, map_dir, dam_kf_summaries=dam_kf_summaries)
+        all_speech_records = extract_all_asr_metadata(
+            asr_dir, map_dir, dam_kf_summaries=dam_kf_summaries
+        )
         if all_speech_records:
             speech_texts = [r["asr_transcript_vi"] for r in all_speech_records]
             t0 = time.time()
             asr_vectors = embedder.embed_batch(speech_texts, batch_size=args.batch_size)
             asr_embed_time = time.time() - t0
-            logger.info(f"  ✅ ASR Embedding Complete: {len(speech_texts):,} texts in {asr_embed_time:.1f}s ({len(speech_texts)/max(asr_embed_time,0.01):.0f} texts/sec)")
+            logger.info(
+                f"  ✅ ASR Embedding Complete: {len(speech_texts):,} texts in {asr_embed_time:.1f}s ({len(speech_texts) / max(asr_embed_time, 0.01):.0f} texts/sec)"
+            )
 
             # Save FP16 Matrix
             asr_npy_path = output_dir / "asr_vectors.f16.npy"
@@ -362,7 +404,9 @@ def main():
                 for rec in all_speech_records:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-            logger.info(f"  ✅ Saved ASR: Vector Shape {asr_vectors.shape}, Size ~{asr_npy_path.stat().st_size / 1024**2:.1f} MB")
+            logger.info(
+                f"  ✅ Saved ASR: Vector Shape {asr_vectors.shape}, Size ~{asr_npy_path.stat().st_size / 1024**2:.1f} MB"
+            )
             del all_speech_records, asr_vectors
 
     total_time = time.time() - t_start

@@ -2,11 +2,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { mockApiPlugin } from "./online/frontend/dev/mock-api-plugin.ts";
 
+const workspaceRoot = fileURLToPath(new URL(".", import.meta.url));
+const frontendRoot = fileURLToPath(new URL("./online/frontend", import.meta.url));
+
 export default defineConfig(({ mode }) => {
   const useMockApi = mode === "mock";
   return {
-    root: ".",
-    plugins: useMockApi ? [mockApiPlugin(fileURLToPath(new URL(".", import.meta.url)))] : [],
+    root: frontendRoot,
+    plugins: useMockApi ? [mockApiPlugin(workspaceRoot)] : [],
     server: {
       proxy: useMockApi ? undefined : {
         "/api": "http://127.0.0.1:8890",
@@ -14,11 +17,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      outDir: "online/frontend/dist",
+      outDir: "dist",
       emptyOutDir: true,
-      rollupOptions: {
-        input: fileURLToPath(new URL("./online/frontend/index.html", import.meta.url)),
-      },
     },
   };
 });

@@ -24,84 +24,109 @@ logger = logging.getLogger(__name__)
 
 
 def print_kis_results(reranked_pool: list[dict[str, Any]], raw_query: str):
-    print(f"\n{'='*105}")
-    print(f"🎯 TASK 1: KNOWN-ITEM SEARCH (KIS) — FINAL STAGE 2 RANKINGS")
-    print(f"📝 Raw Query: \"{raw_query}\"")
-    print(f"⚖️ Final Score Formula: 0.40 * Stage1_Norm + 0.60 * CrossEncoder_Score")
-    print(f"{'='*105}")
+    print(f"\n{'=' * 105}")
+    print("🎯 TASK 1: KNOWN-ITEM SEARCH (KIS) — FINAL STAGE 2 RANKINGS")
+    print(f'📝 Raw Query: "{raw_query}"')
+    print("⚖️ Final Score Formula: 0.40 * Stage1_Norm + 0.60 * CrossEncoder_Score")
+    print(f"{'=' * 105}")
 
     print("\n### 📋 Official Submission Candidate List (Top 10)")
-    print("| Final Rank | Official Submission String | Frame Index | Time (s) | Stage 1 (Norm) | BGE-Reranker Score | Final Blended Score | Image Path (AIC Relative) |")
+    print(
+        "| Final Rank | Official Submission String | Frame Index | Time (s) | Stage 1 (Norm) | BGE-Reranker Score | Final Blended Score | Image Path (AIC Relative) |"
+    )
     print("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|")
     for r in reranked_pool[:10]:
         print(
             f"| **{r['final_rank']}** | `{r['submission_string']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | "
-            f"`{r['normalized_score']*100:.1f}%` | `{r['cross_encoder_score']:.4f}` | **{r['final_score']:.4f}** | `{r['image_relpath']}` |"
+            f"`{r['normalized_score'] * 100:.1f}%` | `{r['cross_encoder_score']:.4f}` | **{r['final_score']:.4f}** | `{r['image_relpath']}` |"
         )
 
     # Top 1 Explainability Card
     top1 = reranked_pool[0]
-    print(f"\n{'─'*105}")
-    print(f"🌟 TOP 1 FRAME EXPLAINABILITY DOSSIER CARD (KIS)")
-    print(f"{'─'*105}")
-    print(f"• Video ID: `{top1['video_id']}` | Frame Index: `{top1['frame_idx']}` | Timestamp: `{top1['pts_time_s']}s`")
+    print(f"\n{'─' * 105}")
+    print("🌟 TOP 1 FRAME EXPLAINABILITY DOSSIER CARD (KIS)")
+    print(f"{'─' * 105}")
+    print(
+        f"• Video ID: `{top1['video_id']}` | Frame Index: `{top1['frame_idx']}` | Timestamp: `{top1['pts_time_s']}s`"
+    )
     print(f"• Official Submission String: `{top1['submission_string']}`")
     print(f"• Local Keyframe Image Path: `{top1['image_relpath']}`")
-    print(f"• Stage 1 RRF Score: `{top1['stage1_score']:.6f}` (Active Modalities: {top1['active_channels']}/3, Synergy: {top1['synergy_multiplier']}x)")
+    print(
+        f"• Stage 1 RRF Score: `{top1['stage1_score']:.6f}` (Active Modalities: {top1['active_channels']}/3, Synergy: {top1['synergy_multiplier']}x)"
+    )
     print(f"• BGE Cross-Encoder Confidence: `{top1['cross_encoder_score']:.4f}` (Raw Relevance)")
-    print(f"• Final Blended Score: `{top1['final_score']:.4f}` (0.40 * {top1['normalized_score']:.2f} + 0.60 * {top1['cross_encoder_score']:.4f})")
-    print(f"• DAM Visual Entities: \"{top1.get('dam_summary') or 'N/A'}\"")
+    print(
+        f"• Final Blended Score: `{top1['final_score']:.4f}` (0.40 * {top1['normalized_score']:.2f} + 0.60 * {top1['cross_encoder_score']:.4f})"
+    )
+    print(f'• DAM Visual Entities: "{top1.get("dam_summary") or "N/A"}"')
     if top1.get("matched_boxes"):
-        boxes_str = "; ".join([f"{b['class_entity']} (Sim: {b['score']}, BBox: {b['bbox']})" for b in top1["matched_boxes"]])
+        boxes_str = "; ".join(
+            [
+                f"{b['class_entity']} (Sim: {b['score']}, BBox: {b['bbox']})"
+                for b in top1["matched_boxes"]
+            ]
+        )
         print(f"• Matched Bounding Boxes: {boxes_str}")
-    print(f"• Spoken Speech (ASR): \"{top1.get('asr_transcript') or '(No speech / music)'}\"")
-    print(f"{'─'*105}\n")
+    print(f'• Spoken Speech (ASR): "{top1.get("asr_transcript") or "(No speech / music)"}"')
+    print(f"{'─' * 105}\n")
 
 
 def print_vqa_results(vqa_pool: list[dict[str, Any]], raw_query: str):
-    print(f"\n{'='*105}")
-    print(f"❓ TASK 2: VISUAL QUESTION ANSWERING (VQA) — FINAL STAGE 2 RESULTS")
-    print(f"📝 Raw Query: \"{raw_query}\"")
-    print(f"{'='*105}")
+    print(f"\n{'=' * 105}")
+    print("❓ TASK 2: VISUAL QUESTION ANSWERING (VQA) — FINAL STAGE 2 RESULTS")
+    print(f'📝 Raw Query: "{raw_query}"')
+    print(f"{'=' * 105}")
 
     print("\n### 📋 Official Submission Candidate List (Top 10)")
-    print("| Final Rank | Official Submission String | Frame Index | Time (s) | Extracted VQA Answer | Cross-Encoder Score | Final Score | Image Path |")
+    print(
+        "| Final Rank | Official Submission String | Frame Index | Time (s) | Extracted VQA Answer | Cross-Encoder Score | Final Score | Image Path |"
+    )
     print("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|")
     for r in vqa_pool[:10]:
         print(
             f"| **{r['final_rank']}** | `{r['submission_string']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | "
-            f"**\"{r.get('vqa_answer', '')}\"** | `{r['cross_encoder_score']:.4f}` | **{r['final_score']:.4f}** | `{r['image_relpath']}` |"
+            f'**"{r.get("vqa_answer", "")}"** | `{r["cross_encoder_score"]:.4f}` | **{r["final_score"]:.4f}** | `{r["image_relpath"]}` |'
         )
 
     top1 = vqa_pool[0]
-    print(f"\n{'─'*105}")
-    print(f"🌟 TOP 1 EVIDENCE FRAME EXPLAINABILITY DOSSIER CARD (VQA)")
-    print(f"{'─'*105}")
-    print(f"• Extracted VQA Answer: **\"{top1.get('vqa_answer', '')}\"** (Generated by Gemini Flash Extractive Reader)")
+    print(f"\n{'─' * 105}")
+    print("🌟 TOP 1 EVIDENCE FRAME EXPLAINABILITY DOSSIER CARD (VQA)")
+    print(f"{'─' * 105}")
+    print(
+        f'• Extracted VQA Answer: **"{top1.get("vqa_answer", "")}"** (Generated by Gemini Flash Extractive Reader)'
+    )
     print(f"• Official Submission String: `{top1['submission_string']}`")
-    print(f"• Video ID: `{top1['video_id']}` | Frame Index: `{top1['frame_idx']}` | Timestamp: `{top1['pts_time_s']}s`")
+    print(
+        f"• Video ID: `{top1['video_id']}` | Frame Index: `{top1['frame_idx']}` | Timestamp: `{top1['pts_time_s']}s`"
+    )
     print(f"• Local Keyframe Image Path: `{top1['image_relpath']}`")
-    print(f"• Final Blended Score: `{top1['final_score']:.4f}` (Stage 1: {top1['stage1_score']:.6f}, Cross-Encoder: {top1['cross_encoder_score']:.4f})")
-    print(f"• Spoken Transcript Context: \"{top1.get('asr_transcript') or 'N/A'}\"")
-    print(f"• DAM Visual Summary: \"{top1.get('dam_summary') or 'N/A'}\"")
-    print(f"{'─'*105}\n")
+    print(
+        f"• Final Blended Score: `{top1['final_score']:.4f}` (Stage 1: {top1['stage1_score']:.6f}, Cross-Encoder: {top1['cross_encoder_score']:.4f})"
+    )
+    print(f'• Spoken Transcript Context: "{top1.get("asr_transcript") or "N/A"}"')
+    print(f'• DAM Visual Summary: "{top1.get("dam_summary") or "N/A"}"')
+    print(f"{'─' * 105}\n")
 
 
 def print_trake_results(trake_sequences: list[dict[str, Any]], raw_query: str):
-    print(f"\n{'='*105}")
-    print(f"⏱️ TASK 3: TEMPORAL ACTION KEYFRAME EXTRACTION (TRAKE) — DYNAMIC PROGRAMMING SEQUENCES")
-    print(f"📝 Raw Sequence Query: \"{raw_query}\"")
-    print(f"🔒 Constraint: Strict Monotonicity t(f1) < t(f2) < t(f3) < t(f4) within same video")
-    print(f"{'='*105}")
+    print(f"\n{'=' * 105}")
+    print("⏱️ TASK 3: TEMPORAL ACTION KEYFRAME EXTRACTION (TRAKE) — DYNAMIC PROGRAMMING SEQUENCES")
+    print(f'📝 Raw Sequence Query: "{raw_query}"')
+    print("🔒 Constraint: Strict Monotonicity t(f1) < t(f2) < t(f3) < t(f4) within same video")
+    print(f"{'=' * 105}")
 
     print("\n### 📋 Official Submission Candidate Sequences")
     if trake_sequences:
-        print("| Rank | Official Submission String | Video ID | Matched Frames (E1 -> E4) | Timestamps (s) | Monotonic? | Sequence DP Score |")
+        print(
+            "| Rank | Official Submission String | Video ID | Matched Frames (E1 -> E4) | Timestamps (s) | Monotonic? | Sequence DP Score |"
+        )
         print("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
         for s in trake_sequences[:10]:
-            frames_str = " -> ".join(map(str, s['matched_frames']))
-            times_str = " -> ".join([f"{t:.1f}s" for t in s['timestamps']])
-            is_mono = all(s['timestamps'][i] < s['timestamps'][i+1] for i in range(len(s['timestamps'])-1))
+            frames_str = " -> ".join(map(str, s["matched_frames"]))
+            times_str = " -> ".join([f"{t:.1f}s" for t in s["timestamps"]])
+            is_mono = all(
+                s["timestamps"][i] < s["timestamps"][i + 1] for i in range(len(s["timestamps"]) - 1)
+            )
             mono_icon = "✅ YES" if is_mono else "❌ NO"
             print(
                 f"| **{s['rank']}** | `{s['submission_string']}` | `{s['video_id']}` | `{frames_str}` | "
@@ -109,17 +134,21 @@ def print_trake_results(trake_sequences: list[dict[str, Any]], raw_query: str):
             )
 
         top1 = trake_sequences[0]
-        print(f"\n{'─'*105}")
-        print(f"🌟 TOP 1 SEQUENCE EXPLAINABILITY DOSSIER CARD (TRAKE)")
-        print(f"{'─'*105}")
+        print(f"\n{'─' * 105}")
+        print("🌟 TOP 1 SEQUENCE EXPLAINABILITY DOSSIER CARD (TRAKE)")
+        print(f"{'─' * 105}")
         print(f"• Video ID: `{top1['video_id']}`")
         print(f"• Official Submission String: `{top1['submission_string']}`")
         print(f"• Sequence DP Score: `{top1['sequence_score']:.6f}`")
         for i, ev in enumerate(top1.get("event_dossiers", []), 1):
-            print(f"   ► Event E{i}: Frame `{ev['frame_idx']}` at `{ev['pts_time_s']:.1f}s` | Image: `{ev['image_relpath']}` | Vis Sim: `{ev.get('score_vis', 0.0):.3f}`")
-        print(f"{'─'*105}\n")
+            print(
+                f"   ► Event E{i}: Frame `{ev['frame_idx']}` at `{ev['pts_time_s']:.1f}s` | Image: `{ev['image_relpath']}` | Vis Sim: `{ev.get('score_vis', 0.0):.3f}`"
+            )
+        print(f"{'─' * 105}\n")
     else:
-        print("*(No valid multi-event monotonic sequences found across candidates with current branch pool)*")
+        print(
+            "*(No valid multi-event monotonic sequences found across candidates with current branch pool)*"
+        )
 
 
 def main():

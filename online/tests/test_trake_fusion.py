@@ -7,7 +7,6 @@ producing the Top 10 candidate frames per event with step-by-step calculations.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from online.src.contracts.query import ParsedQuery
 from online.src.retrieval.embeddings import ModelRegistry
@@ -31,19 +30,19 @@ E3: Khoảnh khắc miếng măng tây đầu tiên rời khỏi chảo dầu.
 E4: Khoảng khắc miếng măng tây cuối cùng rời chảo dầu và nằm hoàn toàn trên dĩa."""
 
     parsed = parser.parse(raw_trake, task_type="TRAKE", engine="gemini")
-    print(f"\n{'='*105}")
+    print(f"\n{'=' * 105}")
     print(f"🎬 EVALUATING TRAKE QUERY: {len(parsed.trake_events)} SUB-EVENTS")
-    print(f"{'='*105}")
+    print(f"{'=' * 105}")
 
     event_results = {}
 
     for ev in parsed.trake_events:
-        print(f"\n{'─'*105}")
-        print(f"📍 EVENT E{ev.order}: \"{ev.description}\"")
-        print(f"   • Scene (SigLIP): \"{ev.scene_en}\"")
+        print(f"\n{'─' * 105}")
+        print(f'📍 EVENT E{ev.order}: "{ev.description}"')
+        print(f'   • Scene (SigLIP): "{ev.scene_en}"')
         print(f"   • Objects (DAM): {ev.objects_en}")
-        print(f"   • Speech (ASR): \"{ev.speech_vi}\"")
-        print(f"{'─'*105}")
+        print(f'   • Speech (ASR): "{ev.speech_vi}"')
+        print(f"{'─' * 105}")
 
         # Create sub-query for this specific event
         sub_parsed = ParsedQuery(
@@ -60,19 +59,21 @@ E4: Khoảng khắc miếng măng tây cuối cùng rời chảo dầu và nằm
         event_results[f"E{ev.order}"] = fused_pool
 
         print(f"\n### 🏆 Top 10 Stage-1 Keyframes for Event E{ev.order}")
-        print("| Rank | Video ID | Frame Index | Time (s) | Modalities (Vis / DAM / ASR) | Active Ch | Synergy | Step-by-Step RRF Calculation Formula | Fused Score | Rel. Path |")
+        print(
+            "| Rank | Video ID | Frame Index | Time (s) | Modalities (Vis / DAM / ASR) | Active Ch | Synergy | Step-by-Step RRF Calculation Formula | Fused Score | Rel. Path |"
+        )
         print("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|:---:|:---|")
 
         for r in fused_pool:
-            vis_info = f"r={r['rank_vis']} ({r['score_vis']:.3f})" if r['rank_vis'] else "-"
-            dam_info = f"r={r['rank_dam']} ({r['score_dam']:.3f})" if r['rank_dam'] else "-"
-            asr_info = f"r={r['rank_asr']} ({r['score_asr']:.3f})" if r['rank_asr'] else "-"
-            mod_summary = f"{vis_info} \| {dam_info} \| {asr_info}"
+            vis_info = f"r={r['rank_vis']} ({r['score_vis']:.3f})" if r["rank_vis"] else "-"
+            dam_info = f"r={r['rank_dam']} ({r['score_dam']:.3f})" if r["rank_dam"] else "-"
+            asr_info = f"r={r['rank_asr']} ({r['score_asr']:.3f})" if r["rank_asr"] else "-"
+            mod_summary = f"{vis_info} \\| {dam_info} \\| {asr_info}"
 
             print(
                 f"| **{r['rank']}** | `{r['video_id']}` | `{r['frame_idx']}` | {r['pts_time_s']}s | "
                 f"{mod_summary} | {r['active_channels']}/3 | **{r['synergy_multiplier']}x** | "
-                f"`{r['calculation_breakdown']}` | **{r['stage1_score']:.6f}** (Norm: `{r['normalized_score']*100:.1f}%`) | `{r['image_relpath']}` |"
+                f"`{r['calculation_breakdown']}` | **{r['stage1_score']:.6f}** (Norm: `{r['normalized_score'] * 100:.1f}%`) | `{r['image_relpath']}` |"
             )
 
 

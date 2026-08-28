@@ -13,8 +13,9 @@ import argparse
 import json
 import logging
 import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import numpy as np
 from qdrant_client import QdrantClient
@@ -63,7 +64,9 @@ class LocalQdrantIngester:
                     "speech": VectorParams(size=1024, distance=Distance.COSINE),
                 },
             )
-            logger.info(f"✅ Created collection '{self.KEYFRAMES_COLLECTION}' (Named vectors: visual=768-d, speech=1024-d)")
+            logger.info(
+                f"✅ Created collection '{self.KEYFRAMES_COLLECTION}' (Named vectors: visual=768-d, speech=1024-d)"
+            )
 
         # 2. DAM Objects Collection (1024-d BGE-M3)
         if self.DAM_COLLECTION in existing and force_recreate:
@@ -90,7 +93,7 @@ class LocalQdrantIngester:
 
         # Read metadata
         meta_records = []
-        with open(meta_jsonl, "r", encoding="utf-8") as f:
+        with open(meta_jsonl, encoding="utf-8") as f:
             for line in f:
                 meta_records.append(json.loads(line))
 
@@ -130,7 +133,9 @@ class LocalQdrantIngester:
             total_uploaded += len(points_buffer)
 
         duration = time.time() - t0
-        logger.info(f"  ✅ Keyframes Ingested: {total_uploaded:,} points in {duration:.1f}s ({total_uploaded/max(duration,0.01):.0f} pts/sec)")
+        logger.info(
+            f"  ✅ Keyframes Ingested: {total_uploaded:,} points in {duration:.1f}s ({total_uploaded / max(duration, 0.01):.0f} pts/sec)"
+        )
         return total_uploaded
 
     def ingest_dam_objects(self, unified_dir: Path, batch_size: int = 5000) -> int:
@@ -144,7 +149,7 @@ class LocalQdrantIngester:
 
         # Read metadata
         meta_records = []
-        with open(dam_meta, "r", encoding="utf-8") as f:
+        with open(dam_meta, encoding="utf-8") as f:
             for line in f:
                 meta_records.append(json.loads(line))
 
@@ -154,7 +159,9 @@ class LocalQdrantIngester:
         t0 = time.time()
         for i in tqdm(range(total_dam), desc="Preparing & Ingesting DAM Objects", unit="object"):
             reg_meta = meta_records[i]
-            point_id = abs(hash(f"{reg_meta['video_id']}_{reg_meta['frame_idx']}_{reg_meta['region_id']}")) % (10**16)
+            point_id = abs(
+                hash(f"{reg_meta['video_id']}_{reg_meta['frame_idx']}_{reg_meta['region_id']}")
+            ) % (10**16)
             vec = dam_mmap[i].astype(np.float32).tolist()
 
             points_buffer.append(
@@ -183,7 +190,9 @@ class LocalQdrantIngester:
             total_uploaded += len(points_buffer)
 
         duration = time.time() - t0
-        logger.info(f"  ✅ DAM Objects Ingested: {total_uploaded:,} points in {duration:.1f}s ({total_uploaded/max(duration,0.01):.0f} pts/sec)")
+        logger.info(
+            f"  ✅ DAM Objects Ingested: {total_uploaded:,} points in {duration:.1f}s ({total_uploaded / max(duration, 0.01):.0f} pts/sec)"
+        )
         return total_uploaded
 
 

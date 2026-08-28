@@ -19,8 +19,12 @@ from aic2026.contracts import ObjectFrameRecord  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifact", type=Path, required=True, help="Path to description JSONL artifact")
-    parser.add_argument("--data-root", type=Path, required=True, help="Data root containing keyframes/")
+    parser.add_argument(
+        "--artifact", type=Path, required=True, help="Path to description JSONL artifact"
+    )
+    parser.add_argument(
+        "--data-root", type=Path, required=True, help="Data root containing keyframes/"
+    )
     parser.add_argument("--output-dir", type=Path, help="Directory to save visual output images")
     parser.add_argument("--limit", type=int, default=5, help="Maximum number of frames to process")
     return parser
@@ -37,15 +41,15 @@ def draw_region_overlay(
     canvas = image.convert("RGB").copy()
     draw = ImageDraw.Draw(canvas)
     x1, y1, x2, y2 = bbox_xyxy
-    
+
     # Draw thick bounding box
     draw.rectangle([x1, y1, x2, y2], outline="red", width=4)
-    
+
     # Draw label badge
     header_text = f"{label} ({score:.2f})"
     draw.rectangle([x1, max(0, y1 - 20), x1 + len(header_text) * 8 + 10, y1], fill="red")
     draw.text((x1 + 5, max(0, y1 - 18)), header_text, fill="white")
-    
+
     return canvas
 
 
@@ -71,28 +75,36 @@ def inspect_descriptions(
     for frame_idx, raw in enumerate(records, start=1):
         record = ObjectFrameRecord.model_validate(raw)
         image_path = (data_root / record.frame_relpath).resolve()
-        
-        print(f"\n📸 [Frame {frame_idx}/{len(records)}] UID: {record.frame_uid} | Path: {record.frame_relpath}")
+
+        print(
+            f"\n📸 [Frame {frame_idx}/{len(records)}] UID: {record.frame_uid} | Path: {record.frame_relpath}"
+        )
         print("-" * 80)
-        
+
         if not image_path.exists():
             print(f"   ⚠️ Image not found: {image_path}")
             continue
 
         with Image.open(image_path) as source_img:
             img = source_img.convert("RGB")
-            
+
             for region_idx, region in enumerate(record.regions, start=1):
                 detector = region.detector
                 bbox = region.bbox_xyxy_px
                 caption_info = region.caption
-                desc = caption_info.description_en or f"[{caption_info.status}: {caption_info.error}]"
-                
+                desc = (
+                    caption_info.description_en or f"[{caption_info.status}: {caption_info.error}]"
+                )
+
                 print(f"   Region {region_idx}:")
-                print(f"     • Label: {detector.class_name} ({detector.class_entity}) | Confidence: {detector.score:.4f}")
+                print(
+                    f"     • Label: {detector.class_name} ({detector.class_entity}) | Confidence: {detector.score:.4f}"
+                )
                 print(f"     • Box (XYXY): [{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
-                print(f"     • Caption Status: {caption_info.status} | Words: {caption_info.word_count}")
-                print(f"     • 📝 DAM Caption: \"{desc}\"")
+                print(
+                    f"     • Caption Status: {caption_info.status} | Words: {caption_info.word_count}"
+                )
+                print(f'     • 📝 DAM Caption: "{desc}"')
                 print()
 
                 # Generate image overlay
@@ -107,17 +119,19 @@ def inspect_descriptions(
                 if output_dir:
                     out_filename = f"{record.video_id}_frame{record.keyframe_n}_reg{region_idx}.jpg"
                     overlay.save(output_dir / out_filename)
-                
-                results.append({
-                    "frame_uid": record.frame_uid,
-                    "keyframe_n": record.keyframe_n,
-                    "region_id": region.region_id,
-                    "label": detector.class_entity,
-                    "score": detector.score,
-                    "bbox": bbox,
-                    "caption": desc,
-                    "overlay_img": overlay,
-                })
+
+                results.append(
+                    {
+                        "frame_uid": record.frame_uid,
+                        "keyframe_n": record.keyframe_n,
+                        "region_id": region.region_id,
+                        "label": detector.class_entity,
+                        "score": detector.score,
+                        "bbox": bbox,
+                        "caption": desc,
+                        "overlay_img": overlay,
+                    }
+                )
 
     if output_dir:
         print(f"✅ Saved visual inspection images to: {output_dir}")

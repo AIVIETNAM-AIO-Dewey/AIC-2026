@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any
 
-from online.src.contracts.query import ParsedQuery, SearchResult
+from online.src.contracts.query import ParsedQuery
 from online.src.retrieval.embeddings import ModelRegistry
 from online.src.retrieval.vector_search import FastVectorSearchEngine
 
@@ -30,8 +30,8 @@ class MultimodalFusionEngine:
 
     def __init__(
         self,
-        searcher: Optional[FastVectorSearchEngine] = None,
-        registry: Optional[ModelRegistry] = None,
+        searcher: FastVectorSearchEngine | None = None,
+        registry: ModelRegistry | None = None,
         k_rrf: int = 60,
     ):
         self.searcher = searcher or FastVectorSearchEngine()
@@ -60,11 +60,17 @@ class MultimodalFusionEngine:
         dam_hits = []
         if parsed_query.objects_en and w_dam > 0:
             obj_vecs = [self.registry.embed_bge_text(obj) for obj in parsed_query.objects_en]
-            dam_hits = self.searcher.search_dam(obj_vecs, parsed_query.objects_en, top_k=branch_limit)
+            dam_hits = self.searcher.search_dam(
+                obj_vecs, parsed_query.objects_en, top_k=branch_limit
+            )
 
         # Branch 3: Audio ASR
         asr_hits = []
-        audio_text = parsed_query.speech_vi.strip() if parsed_query.speech_vi else parsed_query.original_query
+        audio_text = (
+            parsed_query.speech_vi.strip()
+            if parsed_query.speech_vi
+            else parsed_query.original_query
+        )
         if audio_text and w_asr > 0:
             speech_vec = self.registry.embed_bge_text(audio_text)
             asr_hits = self.searcher.search_speech(speech_vec, top_k=branch_limit)
@@ -87,7 +93,7 @@ class MultimodalFusionEngine:
         dam_hits: list[dict[str, Any]],
         asr_hits: list[dict[str, Any]],
         ocr_hits: list[dict[str, Any]],
-        weights: Optional[dict[str, float]] = None,
+        weights: dict[str, float] | None = None,
         top_k_pool: int = 300,
     ) -> list[dict[str, Any]]:
         """Instant CPU RRF fusion (< 5ms) on pre-computed branch hits with custom weights."""
@@ -99,7 +105,7 @@ class MultimodalFusionEngine:
             weights = weights.dict()
         elif not isinstance(weights, dict):
             weights = dict(weights)
-        
+
         w_vis = weights.get("vis", 0.35)
         w_dam = weights.get("dam", 0.30)
         w_asr = weights.get("asr", 0.35)
@@ -177,7 +183,7 @@ class MultimodalFusionEngine:
             c["score_ocr"] = h.get("score", 1.0)
 
         fused_pool = []
-        for key, c in candidates.items():
+        for _key, c in candidates.items():
             active_count = 0
             rrf_base = 0.0
             formula_terms = []

@@ -87,9 +87,7 @@ class AsrSegmentRecord(StrictModel):
     @model_validator(mode="after")
     def validate_segment_id_prefix(self) -> AsrSegmentRecord:
         if not self.segment_id.startswith(self.video_id + ":"):
-            raise ValueError(
-                f"segment_id must be prefixed with '{self.video_id}:'"
-            )
+            raise ValueError(f"segment_id must be prefixed with '{self.video_id}:'")
         return self
 
     @model_validator(mode="after")
@@ -106,7 +104,8 @@ class AsrSegmentRecord(StrictModel):
     @field_validator("keyframes", mode="after")
     @classmethod
     def validate_keyframe_uniqueness(
-        cls, keyframes: list[AsrKeyframeRef],
+        cls,
+        keyframes: list[AsrKeyframeRef],
     ) -> list[AsrKeyframeRef]:
         uids = [kf.frame_uid for kf in keyframes]
         if len(uids) != len(set(uids)):

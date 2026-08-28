@@ -12,10 +12,9 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
-from typing import Optional
-import urllib.request
 import urllib.error
+import urllib.request
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -47,6 +46,7 @@ class QueryParser:
         if GEMINI_API_KEY:
             try:
                 from google import genai
+
                 self._gemini_client = genai.Client(api_key=GEMINI_API_KEY)
                 logger.info(f"Initialized Gemini Client with model: {self.gemini_model_id}")
             except Exception as e:
@@ -56,7 +56,7 @@ class QueryParser:
     def parse(
         self,
         query_text: str,
-        task_type: Optional[TaskType] = None,
+        task_type: TaskType | None = None,
         engine: str = "gemini",  # "gemini", "qwen", or "rule"
     ) -> ParsedQuery:
         """Parse raw query into structured 4-channel sub-queries."""
@@ -87,9 +87,30 @@ class QueryParser:
 
     def _detect_task_type(self, query_text: str) -> TaskType:
         q_lower = query_text.lower()
-        if bool(re.search(r"E\d+:|khoảnh khắc đầu tiên|khoảnh khắc tiếp theo|sau đó|tiếp theo|sau đấy", query_text, re.I)):
+        if bool(
+            re.search(
+                r"E\d+:|khoảnh khắc đầu tiên|khoảnh khắc tiếp theo|sau đó|tiếp theo|sau đấy",
+                query_text,
+                re.I,
+            )
+        ):
             return "TRAKE"
-        if any(w in q_lower for w in ["hỏi", "là gì", "màu gì", "bao nhiêu", "ai", "ở đâu", "khi nào", "?", "what", "which", "how many"]):
+        if any(
+            w in q_lower
+            for w in [
+                "hỏi",
+                "là gì",
+                "màu gì",
+                "bao nhiêu",
+                "ai",
+                "ở đâu",
+                "khi nào",
+                "?",
+                "what",
+                "which",
+                "how many",
+            ]
+        ):
             return "VQA"
         return "KIS"
 
@@ -166,13 +187,13 @@ class QueryParser:
         with urllib.request.urlopen(req, timeout=60) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             content = res_data.get("message", {}).get("content", "{}").strip()
-            
+
             # Robust JSON extraction (strip ```json ... ``` if present)
             if "```" in content:
                 m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
                 if m:
                     content = m.group(1)
-            
+
             data = json.loads(content)
 
         return self._build_parsed_query(data, query_text, task_type)
@@ -229,7 +250,13 @@ class QueryParser:
             weights["dam"] = 0.10
             weights["vis"] = 0.60
 
-        is_vi = bool(re.search(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", query_text, re.I))
+        is_vi = bool(
+            re.search(
+                r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
+                query_text,
+                re.I,
+            )
+        )
 
         return ParsedQuery(
             task_type=task_type,
@@ -247,12 +274,20 @@ class QueryParser:
 
     def _parse_local(self, query_text: str, task_type: TaskType) -> ParsedQuery:
         """Fast offline rule-based parser."""
-        is_vi = bool(re.search(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", query_text, re.I))
+        is_vi = bool(
+            re.search(
+                r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
+                query_text,
+                re.I,
+            )
+        )
         ocr_matches = re.findall(r'["\']([^"\']+)["\']|\b\d+g\b|\b\d+\s*kg\b', query_text)
         flat_ocr = [m if isinstance(m, str) else m[0] for m in ocr_matches if m]
 
         trake_events = []
-        e_matches = re.findall(r"(?:E(\d+):|\b(\d+)\.\s*)(.*?)(?=(?:E\d+:|\b\d+\.\s*|$))", query_text, re.DOTALL | re.I)
+        e_matches = re.findall(
+            r"(?:E(\d+):|\b(\d+)\.\s*)(.*?)(?=(?:E\d+:|\b\d+\.\s*|$))", query_text, re.DOTALL | re.I
+        )
         if e_matches:
             for idx_str1, idx_str2, content in e_matches:
                 order = int(idx_str1 or idx_str2 or len(trake_events) + 1)
@@ -267,7 +302,11 @@ class QueryParser:
                         )
                     )
 
-        objects = [q.strip() for q in re.split(r",| và | with | and | đang ", query_text) if len(q.strip()) > 3]
+        objects = [
+            q.strip()
+            for q in re.split(r",| và | with | and | đang ", query_text)
+            if len(q.strip()) > 3
+        ]
         if not objects:
             objects = [query_text]
 

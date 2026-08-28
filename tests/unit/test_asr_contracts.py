@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from aic2026.asr.normalizer import normalize_transcript
 from aic2026.asr.pipeline import _deduplicate_segments
-from aic2026.asr.validation import validate_jsonl, validate_manifest
+from aic2026.asr.validation import validate_jsonl
 from aic2026.contracts.asr import AsrKeyframeRef, AsrSegmentRecord, AsrVideoManifest
 
 

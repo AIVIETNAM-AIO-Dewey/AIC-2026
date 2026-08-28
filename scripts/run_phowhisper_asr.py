@@ -19,10 +19,12 @@ from _common import add_common_arguments, read_config, resolve_device  # noqa: E
 from aic2026.asr.backend import create_asr_backend  # noqa: E402
 from aic2026.asr.pipeline import process_video  # noqa: E402
 
+
 class FlushStreamHandler(logging.StreamHandler):
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
         self.flush()
+
 
 handler = FlushStreamHandler(sys.stdout)
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -76,7 +78,7 @@ def rclone_sync_file(local_path: Path, rclone_dest: str) -> bool:
     """Sync a single completed file to rclone remote destination."""
     cmd = ["rclone", "copy", str(local_path), rclone_dest]
     try:
-        res = subprocess.run(cmd, capture_output=True, check=True)
+        subprocess.run(cmd, capture_output=True, check=True)
         logger.info("rclone synced %s -> %s", local_path.name, rclone_dest)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
@@ -84,14 +86,20 @@ def rclone_sync_file(local_path: Path, rclone_dest: str) -> bool:
         return False
 
 
-def find_video_files(video_dir: Path, explicit_video_id: str | None = None) -> list[tuple[str, Path]]:
+def find_video_files(
+    video_dir: Path, explicit_video_id: str | None = None
+) -> list[tuple[str, Path]]:
     """Discover video files (video_id, video_path) under video_dir."""
     videos: list[tuple[str, Path]] = []
 
     # If video_dir (e.g. /kaggle/input/aic2026-data/videos) does not exist, fallback to parent or /kaggle/input
     if not video_dir.exists():
         if video_dir.parent.exists():
-            logger.info("Video directory %s not found, falling back to parent %s", video_dir, video_dir.parent)
+            logger.info(
+                "Video directory %s not found, falling back to parent %s",
+                video_dir,
+                video_dir.parent,
+            )
             video_dir = video_dir.parent
         else:
             raise FileNotFoundError(f"Video directory not found: {video_dir}")
@@ -115,12 +123,16 @@ def main(argv: list[str] | None = None) -> int:
 
     device = resolve_device(args.device, config)
     engine = args.engine or config.get("engine", "faster_whisper")
-    model_id = args.model_id or (
-        config.get("ct2_model_id") if engine == "faster_whisper" else config.get("model_id")
-    ) or "vinai/PhoWhisper-large"
+    model_id = (
+        args.model_id
+        or (config.get("ct2_model_id") if engine == "faster_whisper" else config.get("model_id"))
+        or "vinai/PhoWhisper-large"
+    )
     compute_type = args.compute_type or config.get("compute_type", "float16")
 
-    output_root = args.output_root or Path(os.environ.get("AIC_ARTIFACT_ROOT", REPO_ROOT / "artifacts"))
+    output_root = args.output_root or Path(
+        os.environ.get("AIC_ARTIFACT_ROOT", REPO_ROOT / "artifacts")
+    )
     output_dir = output_root / "asr_segments"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,7 +204,9 @@ def main(argv: list[str] | None = None) -> int:
             vad_filter=bool(config.get("vad_filter", True)),
             vad_min_silence_duration_ms=int(config.get("vad_min_silence_duration_ms", 500)),
             dedup_time_overlap_threshold=float(config.get("dedup_time_overlap_threshold", 0.80)),
-            dedup_text_similarity_threshold=float(config.get("dedup_text_similarity_threshold", 0.85)),
+            dedup_text_similarity_threshold=float(
+                config.get("dedup_text_similarity_threshold", 0.85)
+            ),
             merge_gap_ms=int(config.get("merge_gap_ms", 500)),
         )
 

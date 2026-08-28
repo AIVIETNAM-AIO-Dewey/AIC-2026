@@ -9,7 +9,6 @@ Encodes text sub-queries on Mac MPS / CPU with PyTorch:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import torch
@@ -22,14 +21,15 @@ logger = logging.getLogger(__name__)
 class ModelRegistry:
     """Singleton model registry managing embedding and re-ranking models."""
 
-    _instance: Optional[ModelRegistry] = None
+    _instance: ModelRegistry | None = None
 
     def __init__(
         self,
         siglip_id: str = "google/siglip2-base-patch16-224",
+        siglip_revision: str = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
         bge_id: str = "BAAI/bge-m3",
         reranker_id: str = "BAAI/bge-reranker-v2-m3",
-        device: Optional[str] = None,
+        device: str | None = None,
     ):
         if device is None:
             if torch.backends.mps.is_available():
@@ -42,6 +42,7 @@ class ModelRegistry:
             self.device = device
 
         self.siglip_id = siglip_id
+        self.siglip_revision = siglip_revision
         self.bge_id = bge_id
         self.reranker_id = reranker_id
 
@@ -67,9 +68,21 @@ class ModelRegistry:
     # ──────────────────────────────────────────────────────────────────────────
     def _load_siglip(self):
         if self._siglip_model is None:
-            logger.info(f"Loading SigLIP-2 model ({self.siglip_id})...")
-            self._siglip_tokenizer = AutoTokenizer.from_pretrained(self.siglip_id)
-            self._siglip_model = AutoModel.from_pretrained(self.siglip_id).to(self.device)
+            logger.info(
+                "Loading SigLIP-2 model (%s @ %s)...",
+                self.siglip_id,
+                self.siglip_revision,
+            )
+            self._siglip_tokenizer = AutoTokenizer.from_pretrained(
+                self.siglip_id,
+                revision=self.siglip_revision,
+                trust_remote_code=False,
+            )
+            self._siglip_model = AutoModel.from_pretrained(
+                self.siglip_id,
+                revision=self.siglip_revision,
+                trust_remote_code=False,
+            ).to(self.device)
             self._siglip_model.eval()
             logger.info("✅ SigLIP-2 loaded successfully!")
 
@@ -77,8 +90,14 @@ class ModelRegistry:
     def embed_siglip_text(self, text: str) -> np.ndarray:
         """Embed text using SigLIP-2 text encoder into 768-d normalized float32 vector."""
         self._load_siglip()
-        inputs = self._siglip_tokenizer([text], padding="max_length", truncation=True, max_length=64, return_tensors="pt").to(self.device)
-        
+        inputs = self._siglip_tokenizer(
+            [text],
+            padding="max_length",
+            truncation=True,
+            max_length=64,
+            return_tensors="pt",
+        ).to(self.device)
+
         # Extract text features
         if hasattr(self._siglip_model, "get_text_features"):
             features = self._siglip_model.get_text_features(**inputs)
@@ -140,7 +159,9 @@ class ModelRegistry:
         if self._reranker_model is None:
             logger.info(f"Loading BGE-Reranker ({self.reranker_id})...")
             self._reranker_tokenizer = AutoTokenizer.from_pretrained(self.reranker_id)
-            self._reranker_model = AutoModelForSequenceClassification.from_pretrained(self.reranker_id).to(self.device)
+            self._reranker_model = AutoModelForSequenceClassification.from_pretrained(
+                self.reranker_id
+            ).to(self.device)
             self._reranker_model.eval()
             logger.info("✅ BGE-Reranker loaded successfully!")
 

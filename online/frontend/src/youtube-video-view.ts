@@ -47,7 +47,8 @@ declare global {
 }
 
 export interface YouTubeVideoViewOptions {
-  onSessionChange(label: string): void;
+  /** @deprecated Mapping state is reported through onStatusChange. */
+  onSessionChange?(label: string): void;
   onSourceChange(label: string): void;
   onStatusChange(label: string, state?: MappingStatusState): void;
   onToast(message: string): void;
@@ -82,8 +83,8 @@ function parseYouTubeId(watchUrl: string): string | null {
   }
 }
 
-function formatTime(seconds: number, duration: number): string {
-  const safeSeconds = Math.max(0, Math.min(duration, seconds));
+function formatTime(seconds: number): string {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
   const minutes = Math.floor(safeSeconds / 60);
   const remainder = Math.floor(safeSeconds % 60);
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
@@ -121,24 +122,37 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
   let isPlaying = false;
   let mediaInfo: MediaInfo | null = null;
   let mediaInfoPromise: Promise<MediaInfo> | null = null;
+  let mediaInfoPromiseVideoId: string | null = null;
+  let mediaInfoVideoId: string | null = null;
   let pendingPreview: { requestId: number; targetSeconds: number } | null = null;
   let playbackTimer: number | null = null;
   let player: YouTubePlayer | null = null;
+  let playerAttemptId = 0;
   let playerPromise: Promise<void> | null = null;
   let playerReady = false;
   let preloadPromise: Promise<void> | null = null;
+  let preloadPromiseVideoId: string | null = null;
   let previewPauseTimer: number | null = null;
   let previewRequestId = 0;
   let youtubeVideoId: string | null = null;
 
-  function duration(): number {
-    return mediaInfo?.length || 1;
+  function duration(): number | null {
+    const seconds = Number(mediaInfo?.length);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+
+  function clampSeconds(seconds: number): number {
+    const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+    const knownDuration = duration();
+    return knownDuration === null ? safeSeconds : Math.min(knownDuration, safeSeconds);
   }
 
   function updatePlaybackUi(): void {
-    elements.progress.max = String(duration());
-    elements.progress.value = currentSeconds.toFixed(1);
-    elements.time.textContent = `${formatTime(currentSeconds, duration())} / ${formatTime(duration(), duration())}`;
+    const knownDuration = duration();
+    elements.progress.disabled = knownDuration === null;
+    elements.progress.max = String(knownDuration ?? Math.max(1, Math.ceil(currentSeconds)));
+    elements.progress.value = clampSeconds(currentSeconds).toFixed(1);
+    elements.time.textContent = `${formatTime(currentSeconds)} / ${knownDuration === null ? "--:--" : formatTime(knownDuration)}`;
   }
 
   function setPlaying(playing: boolean): void {
@@ -172,12 +186,16 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     previewRequestId += 1;
     pendingPreview = null;
     clearPreviewPauseTimer();
-    player?.pauseVideo?.();
-    player?.unMute?.();
+    try {
+      player?.pauseVideo();
+      player?.unMute();
+    } catch {
+      // A failed/removed iframe can reject commands while its state is reset.
+    }
     elements.mock.classList.toggle("preview-ready", !showPoster);
   }
 
-  async function loadMediaInfo(videoId: string): Promise<MediaInfo> {
+  async function loadMediaInfo(videoId: string): Promise<{ info: MediaInfo; parsedVideoId: string }> {
     const encodedVideoId = encodeURIComponent(videoId);
     const apiUrl = `/api/video/${encodedVideoId}/media-info`;
     const staticUrl = `/data/media-info/${encodedVideoId}.json`;
@@ -199,53 +217,89 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     const info = await response.json() as MediaInfo;
     const parsedVideoId = parseYouTubeId(info.watch_url);
     if (!parsedVideoId) throw new Error("The media info does not contain a valid YouTube URL");
-    mediaInfo = info;
-    youtubeVideoId = parsedVideoId;
-    elements.openButton.disabled = false;
-    options.onSourceChange(`${info.author} - YouTube`);
-    options.onSessionChange("Mapping: YouTube");
-    updatePlaybackUi();
-    return info;
+    return { info, parsedVideoId };
   }
 
   function getMediaInfo(): Promise<MediaInfo> {
-    if (mediaInfo) return Promise.resolve(mediaInfo);
     if (!currentFrame) return Promise.reject(new Error("No video frame selected"));
-    mediaInfoPromise ??= loadMediaInfo(currentFrame.videoId);
-    return mediaInfoPromise;
+    const videoId = currentFrame.videoId;
+    if (mediaInfo && mediaInfoVideoId === videoId) return Promise.resolve(mediaInfo);
+    if (mediaInfoPromise && mediaInfoPromiseVideoId === videoId) return mediaInfoPromise;
+
+    const pending = loadMediaInfo(videoId).then(({ info, parsedVideoId }) => {
+      if (currentFrame?.videoId !== videoId) throw new Error("Video selection changed while loading media info");
+      mediaInfo = info;
+      mediaInfoVideoId = videoId;
+      youtubeVideoId = parsedVideoId;
+      currentSeconds = clampSeconds(currentSeconds);
+      elements.openButton.disabled = false;
+      options.onSourceChange(`${info.author} - YouTube`);
+      updatePlaybackUi();
+      return info;
+    });
+    const retryable = pending.catch((error: unknown) => {
+      if (mediaInfoPromise === retryable) {
+        mediaInfoPromise = null;
+        mediaInfoPromiseVideoId = null;
+      }
+      throw error;
+    });
+    mediaInfoPromise = retryable;
+    mediaInfoPromiseVideoId = videoId;
+    return retryable;
   }
 
   function loadYouTubeApi(): Promise<YouTubeNamespace> {
     if (window.YT?.Player) return Promise.resolve(window.YT);
     if (apiPromise) return apiPromise;
-    apiPromise = new Promise((resolve, reject) => {
+
+    const pending = new Promise<YouTubeNamespace>((resolve, reject) => {
       const previousReady = window.onYouTubeIframeAPIReady;
-      const timeout = window.setTimeout(() => reject(new Error("YouTube player API timed out")), 15000);
-      window.onYouTubeIframeAPIReady = () => {
+      let settled = false;
+      let script = document.querySelector<HTMLScriptElement>('script[src="https://www.youtube.com/iframe_api"]');
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        if (window.onYouTubeIframeAPIReady === handleReady) window.onYouTubeIframeAPIReady = previousReady;
+        callback();
+      };
+      const handleReady = () => {
         previousReady?.();
-        window.clearTimeout(timeout);
-        if (window.YT?.Player) resolve(window.YT);
-        else reject(new Error("YouTube player API is unavailable"));
+        if (window.YT?.Player) finish(() => resolve(window.YT as YouTubeNamespace));
+        else finish(() => reject(new Error("YouTube player API is unavailable")));
       };
-      if (document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) return;
-      const script = document.createElement("script");
-      script.src = "https://www.youtube.com/iframe_api";
-      script.async = true;
-      script.onerror = () => {
-        window.clearTimeout(timeout);
-        reject(new Error("Could not load YouTube player API"));
-      };
-      document.head.appendChild(script);
+      const timeout = window.setTimeout(
+        () => finish(() => reject(new Error("YouTube player API timed out"))),
+        15000,
+      );
+      window.onYouTubeIframeAPIReady = handleReady;
+      if (!script) {
+        script = document.createElement("script");
+        script.src = "https://www.youtube.com/iframe_api";
+        script.async = true;
+        script.onerror = () => finish(() => reject(new Error("Could not load YouTube player API")));
+        document.head.appendChild(script);
+      }
     });
-    return apiPromise;
+    const retryable = pending.catch((error: unknown) => {
+      if (apiPromise === retryable) apiPromise = null;
+      if (!window.YT?.Player) {
+        document.querySelector<HTMLScriptElement>('script[src="https://www.youtube.com/iframe_api"]')?.remove();
+      }
+      throw error;
+    });
+    apiPromise = retryable;
+    return retryable;
   }
 
   function cueFrame(): void {
     if (!currentFrame || !youtubeVideoId) return;
+    const targetSeconds = clampSeconds(currentFrame.ptsTimeS);
     if (playerReady && player) {
-      player.cueVideoById({ videoId: youtubeVideoId, startSeconds: currentFrame.ptsTimeS });
+      player.cueVideoById({ videoId: youtubeVideoId, startSeconds: targetSeconds });
     } else {
-      const embedKey = `${youtubeVideoId}:${currentFrame.ptsTimeS}`;
+      const embedKey = `${youtubeVideoId}:${targetSeconds}`;
       if (currentEmbedKey !== embedKey) {
         const params = new URLSearchParams({
           controls: "1",
@@ -253,14 +307,14 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
           origin: window.location.origin,
           playsinline: "1",
           rel: "0",
-          start: String(Math.floor(currentFrame.ptsTimeS)),
+          start: String(Math.floor(targetSeconds)),
         });
         elements.youtubeFrame.src = `https://www.youtube.com/embed/${youtubeVideoId}?${params}`;
         currentEmbedKey = embedKey;
       }
       elements.mock.classList.add("player-visible");
     }
-    currentSeconds = currentFrame.ptsTimeS;
+    currentSeconds = targetSeconds;
     updatePlaybackUi();
   }
 
@@ -270,13 +324,13 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     pendingPreview = null;
     previewPauseTimer = null;
     const playerSeconds = player.getCurrentTime();
-    currentSeconds = Number.isFinite(playerSeconds) ? playerSeconds : preview.targetSeconds;
+    currentSeconds = clampSeconds(Number.isFinite(playerSeconds) ? playerSeconds : preview.targetSeconds);
     player.pauseVideo();
     player.unMute();
     elements.mock.classList.add("preview-ready");
     setPlaying(false);
     updatePlaybackUi();
-    options.onStatusChange(`Ready at ${formatTime(currentSeconds, duration())}`, "ready");
+    options.onStatusChange(`Ready at ${formatTime(currentSeconds)}`, "ready");
   }
 
   function handlePlayerStateChange(state: number): void {
@@ -290,50 +344,72 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     setPlaying(state === 1);
   }
 
-  async function ensurePlayer(): Promise<void> {
-    if (playerReady) return;
+  function failPlayerAttempt(attemptId: number, error: unknown): void {
+    if (attemptId !== playerAttemptId) return;
+    cancelPreview(true);
+    playerAttemptId += 1;
+    playerReady = false;
+    player = null;
+    playerPromise = null;
+    currentEmbedKey = null;
+    elements.youtubeFrame.removeAttribute("src");
+    elements.mock.classList.remove("player-ready", "player-visible");
+    const message = error instanceof Error ? error.message : "YouTube player unavailable";
+    options.onStatusChange(message, "error");
+    options.onToast(message);
+  }
+
+  function ensurePlayer(): Promise<void> {
+    if (playerReady) return Promise.resolve();
     if (playerPromise) return playerPromise;
-    playerPromise = (async () => {
-      try {
-        options.onStatusChange("Loading YouTube");
-        const info = await getMediaInfo();
-        cueFrame();
-        const yt = await loadYouTubeApi();
-        await new Promise<void>((resolve, reject) => {
-          player = new yt.Player("youtube-player", {
-            events: {
-              onReady: (event) => {
-                player = event.target;
-                playerReady = true;
-                elements.mock.classList.add("player-ready");
-                options.onSourceChange(`${info.author} - YouTube`);
-                options.onStatusChange("Mapping ready", "ready");
-                cueFrame();
-                resolve();
-              },
-              onStateChange: (event) => handlePlayerStateChange(event.data),
-              onError: (event) => {
-                const error = new Error(describeYouTubeError(event.data));
-                playerReady = false;
-                elements.mock.classList.remove("player-ready");
-                options.onStatusChange(error.message, "error");
-                cancelPreview(true);
-                reject(error);
-              },
+    const attemptId = ++playerAttemptId;
+    let ready = false;
+    const pending = (async () => {
+      options.onStatusChange("Loading YouTube");
+      await getMediaInfo();
+      if (attemptId !== playerAttemptId) throw new Error("Player request superseded");
+      cueFrame();
+      const yt = await loadYouTubeApi();
+      if (attemptId !== playerAttemptId) throw new Error("Player request superseded");
+      await new Promise<void>((resolve, reject) => {
+        player = new yt.Player("youtube-player", {
+          events: {
+            onReady: (event) => {
+              if (attemptId !== playerAttemptId) {
+                try {
+                  event.target.pauseVideo();
+                } catch {
+                  // The superseded iframe may already have been detached.
+                }
+                return;
+              }
+              player = event.target;
+              playerReady = true;
+              ready = true;
+              elements.mock.classList.add("player-ready");
+              options.onStatusChange("Mapping ready", "ready");
+              cueFrame();
+              resolve();
             },
-          });
+            onStateChange: (event) => {
+              if (attemptId === playerAttemptId) handlePlayerStateChange(event.data);
+            },
+            onError: (event) => {
+              if (attemptId !== playerAttemptId) return;
+              const error = new Error(describeYouTubeError(event.data));
+              if (ready) failPlayerAttempt(attemptId, error);
+              else reject(error);
+            },
+          },
         });
-      } catch (error) {
-        playerPromise = null;
-        elements.mock.classList.remove("player-ready");
-        cancelPreview(true);
-        const message = error instanceof Error ? error.message : "YouTube player unavailable";
-        options.onStatusChange(message, "error");
-        options.onToast(message);
-        throw error;
-      }
+      });
     })();
-    return playerPromise;
+    const retryable = pending.catch((error: unknown) => {
+      failPlayerAttempt(attemptId, error);
+      throw error;
+    });
+    playerPromise = retryable;
+    return retryable;
   }
 
   async function preparePreview(): Promise<void> {
@@ -341,14 +417,14 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     if (!youtubeVideoId) await getMediaInfo();
     if (!youtubeVideoId) return;
     const requestId = ++previewRequestId;
-    const targetSeconds = currentFrame.ptsTimeS;
+    const targetSeconds = clampSeconds(currentFrame.ptsTimeS);
     pendingPreview = { requestId, targetSeconds };
     clearPreviewPauseTimer();
     currentSeconds = targetSeconds;
     elements.mock.classList.remove("preview-ready");
     setPlaying(false);
     updatePlaybackUi();
-    options.onStatusChange(`Seeking ${formatTime(targetSeconds, duration())}`);
+    options.onStatusChange(`Seeking ${formatTime(targetSeconds)}`);
     await ensurePlayer();
     if (!active || requestId !== previewRequestId || !player || !youtubeVideoId) return;
     player.mute();
@@ -363,7 +439,7 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     pendingPreview = null;
     clearPreviewPauseTimer();
     player.unMute();
-    if (needsSeek) player.seekTo(currentFrame.ptsTimeS, true);
+    if (needsSeek) player.seekTo(clampSeconds(currentFrame.ptsTimeS), true);
     elements.mock.classList.add("preview-ready");
     player.playVideo();
   }
@@ -385,23 +461,25 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
     },
     preload(frame) {
       controller.setFrame(frame);
-      if (preloadPromise) return preloadPromise;
-      preloadPromise = (async () => {
-        options.onStatusChange("Preloading video");
+      if (preloadPromise && preloadPromiseVideoId === frame.videoId) return preloadPromise;
+      const videoId = frame.videoId;
+      const pending = (async () => {
+        options.onStatusChange("Loading video metadata");
         await getMediaInfo();
-        cueFrame();
-        await loadYouTubeApi();
-        await ensurePlayer();
-        options.onStatusChange("Video preloaded", "ready");
-        options.onSessionChange("Mapping: preloaded");
-      })().catch((error: unknown) => {
-        preloadPromise = null;
+        if (currentFrame?.videoId === videoId) options.onStatusChange("Video metadata ready", "ready");
+      })();
+      const retryable = pending.catch((error: unknown) => {
+        if (preloadPromise === retryable) {
+          preloadPromise = null;
+          preloadPromiseVideoId = null;
+        }
         const message = error instanceof Error ? error.message : "Preload unavailable";
-        options.onStatusChange(message, "error");
-        options.onSessionChange("Mapping: fallback");
+        if (currentFrame?.videoId === videoId) options.onStatusChange(message, "error");
         throw error;
       });
-      return preloadPromise;
+      preloadPromise = retryable;
+      preloadPromiseVideoId = videoId;
+      return retryable;
     },
     requestFullscreen() {
       return elements.mock.requestFullscreen?.() ?? Promise.resolve();
@@ -410,20 +488,27 @@ export function createYouTubeVideoView(options: YouTubeVideoViewOptions): YouTub
       controller.seekTo(currentSeconds + deltaSeconds);
     },
     seekTo(seconds) {
-      currentSeconds = Math.max(0, Math.min(duration(), seconds));
-      player?.seekTo?.(currentSeconds, true);
-      if (!isPlaying) player?.pauseVideo?.();
+      currentSeconds = clampSeconds(seconds);
+      player?.seekTo(currentSeconds, true);
+      if (!isPlaying) player?.pauseVideo();
       updatePlaybackUi();
     },
     setFrame(frame) {
       if (currentFrame && currentFrame.videoId !== frame.videoId) {
         active = false;
         cancelPreview(true);
+        if (playerPromise && !playerReady && !player) {
+          playerAttemptId += 1;
+          playerPromise = null;
+        }
         currentEmbedKey = null;
         elements.openButton.disabled = true;
         mediaInfo = null;
         mediaInfoPromise = null;
+        mediaInfoPromiseVideoId = null;
+        mediaInfoVideoId = null;
         preloadPromise = null;
+        preloadPromiseVideoId = null;
         youtubeVideoId = null;
         options.onSourceChange("Loading media info");
       }

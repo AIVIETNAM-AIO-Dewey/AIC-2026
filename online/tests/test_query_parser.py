@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+
 from online.src.retrieval.query_parser import QueryParser
 
 TEST_QUERIES = [
@@ -36,10 +37,10 @@ def run_comparison():
     print("=" * 80)
 
     for item in TEST_QUERIES:
-        print(f"\n================================================================================")
+        print("\n================================================================================")
         print(f"📌 {item['id']}")
         print(f"📝 Raw Query: {item['query'][:80]}...")
-        print(f"================================================================================")
+        print("================================================================================")
 
         # 1. Test Gemini 3.6 Flash
         t0 = time.perf_counter()
