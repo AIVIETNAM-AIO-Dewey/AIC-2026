@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 import time
 import types
 import zipfile
@@ -397,6 +398,166 @@ def save_array_atomic(path: Path, array: np.ndarray) -> None:
     temporary.replace(path)
 
 
+def save_jsonl_atomic(path: Path, records: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
+def build_video_metadata(video_id: str, paths: Sequence[Path]) -> list[dict[str, Any]]:
+    records = []
+    for local_index, path in enumerate(paths, start=1):
+        number = keyframe_number(path, local_index)
+        records.append(
+            {
+                "video_id": video_id,
+                "keyframe_n": number,
+                "image_relpath": f"keyframes/{video_id}/{path.name}",
+                "filename": path.name,
+            }
+        )
+    return records
+
+
+def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] | None:
+    shard_path = output_dir / "shards" / f"{video_id}.f16.npy"
+    metadata_path = output_dir / "video_metadata" / f"{video_id}.jsonl"
+    if not shard_path.exists() or not metadata_path.exists():
+        return None
+    shard = np.load(shard_path, mmap_mode="r")
+    metadata_rows = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
+    valid = (
+        shard.ndim == 2
+        and shard.dtype == np.float16
+        and shard.shape[0] == metadata_rows
+        and metadata_rows > 0
+    )
+    if not valid:
+        raise RuntimeError(f"Invalid existing streaming shard for {video_id}")
+    return int(shard.shape[1]), metadata_rows
+
+
+def stream_drive_archives(
+    service: Any,
+    archives: Sequence[dict[str, Any]],
+    embedder: Any,
+    output_dir: Path,
+    work_dir: Path,
+    zip_cache_dir: Path,
+    batch_size: int,
+    num_workers: int,
+    device: str,
+) -> tuple[list[str], int, int]:
+    """Download, embed, and discard one shared-Drive ZIP at a time."""
+    from tqdm.auto import tqdm
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    video_ids: list[str] = []
+    embedding_dim = 0
+    total_images = 0
+
+    for item in tqdm(archives, desc="Streaming Drive videos", unit="video"):
+        video_id = Path(item["name"]).stem.upper()
+        if not VIDEO_ID_RE.fullmatch(video_id):
+            raise RuntimeError(f"Unexpected Drive ZIP name: {item['name']}")
+        video_ids.append(video_id)
+
+        completed = completed_stream_shard(output_dir, video_id)
+        if completed is not None:
+            shard_dim, row_count = completed
+            if embedding_dim and shard_dim != embedding_dim:
+                raise RuntimeError(f"Embedding dimension mismatch in shard {video_id}")
+            embedding_dim = shard_dim
+            total_images += row_count
+            continue
+
+        with tempfile.TemporaryDirectory(prefix=f"{video_id}-", dir=work_dir) as temporary:
+            temporary_dir = Path(temporary)
+            download_and_extract_archives(
+                service,
+                [item],
+                temporary_dir,
+                zip_cache_dir,
+                keep_zips=False,
+            )
+            grouped = discover_keyframes(temporary_dir)
+            paths = grouped.get(video_id, [])
+            if not paths:
+                raise RuntimeError(f"ZIP {item['name']} contains no images for {video_id}")
+            unexpected = sorted(set(grouped) - {video_id}, key=natural_key)
+            if unexpected:
+                raise RuntimeError(
+                    f"ZIP {item['name']} unexpectedly contains other videos: {unexpected}"
+                )
+
+            shard_dim = embed_video_shards(
+                {video_id: paths},
+                embedder,
+                output_dir,
+                batch_size,
+                num_workers,
+                device,
+            )
+            records = build_video_metadata(video_id, paths)
+            save_jsonl_atomic(
+                output_dir / "video_metadata" / f"{video_id}.jsonl",
+                records,
+            )
+            if embedding_dim and shard_dim != embedding_dim:
+                raise RuntimeError(f"Embedding dimension changed at {video_id}")
+            embedding_dim = shard_dim
+            total_images += len(records)
+
+    if len(video_ids) != len(set(video_ids)):
+        raise RuntimeError("Duplicate video IDs in Drive archive manifest")
+    return video_ids, embedding_dim, total_images
+
+
+def merge_stream_outputs(
+    video_ids: Sequence[str],
+    output_dir: Path,
+    embedding_dim: int,
+) -> tuple[Path, Path, int]:
+    shard_rows: list[tuple[str, int]] = []
+    for video_id in video_ids:
+        shard = np.load(output_dir / "shards" / f"{video_id}.f16.npy", mmap_mode="r")
+        if shard.ndim != 2 or shard.shape[1] != embedding_dim:
+            raise RuntimeError(f"Invalid shard shape for {video_id}: {shard.shape}")
+        shard_rows.append((video_id, int(shard.shape[0])))
+
+    total = sum(rows for _, rows in shard_rows)
+    matrix_path = output_dir / "keyframes_visual_vectors.f16.npy"
+    metadata_path = output_dir / "keyframes_metadata.jsonl"
+    temporary_matrix = matrix_path.with_suffix(matrix_path.suffix + ".tmp")
+    temporary_metadata = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    matrix = np.lib.format.open_memmap(
+        temporary_matrix,
+        mode="w+",
+        dtype=np.float16,
+        shape=(total, embedding_dim),
+    )
+    offset = 0
+    with temporary_metadata.open("w", encoding="utf-8") as destination:
+        for video_id, rows in shard_rows:
+            shard = np.load(output_dir / "shards" / f"{video_id}.f16.npy", mmap_mode="r")
+            matrix[offset : offset + rows] = shard
+            source_path = output_dir / "video_metadata" / f"{video_id}.jsonl"
+            with source_path.open("r", encoding="utf-8") as source:
+                for local_index, line in enumerate(source):
+                    record = json.loads(line)
+                    record["row_id"] = offset + local_index
+                    destination.write(json.dumps(record, ensure_ascii=False) + "\n")
+            offset += rows
+    matrix.flush()
+    del matrix
+    temporary_matrix.replace(matrix_path)
+    temporary_metadata.replace(metadata_path)
+    return matrix_path, metadata_path, total
+
+
 def embed_video_shards(
     grouped_paths: dict[str, list[Path]],
     embedder: Any,
@@ -507,6 +668,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-zips", type=int)
     parser.add_argument("--keep-zips", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
+    parser.add_argument(
+        "--stream-archives",
+        action="store_true",
+        help="Embed one shared-Drive ZIP at a time and discard its temporary images.",
+    )
     parser.add_argument("--expected-videos", type=int, default=873)
     parser.add_argument(
         "--expected-images",
@@ -532,6 +698,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.stream_archives and args.skip_download:
+        raise ValueError("--stream-archives and --skip-download cannot be used together")
+
     if not args.skip_download:
         import google.auth
         from googleapiclient.discovery import build
@@ -548,6 +717,99 @@ def main(argv: Sequence[str] | None = None) -> int:
         compressed_gib = sum(int(item.get("size") or 0) for item in archives) / 1024**3
         print(f"Drive manifest: {len(archives)} ZIPs, {compressed_gib:.2f} GiB compressed")
         atomic_json(output_dir / "drive_archives_manifest.json", archives)
+        if args.stream_archives:
+            identity = {
+                "model_family": args.model,
+                "model_id": (
+                    args.metaclip2_model_id
+                    if args.model == "metaclip2"
+                    else args.beit3_checkpoint_url
+                ),
+                "source_drive_folder_ids": list(folder_ids),
+                "dtype": "float16",
+                "l2_normalized": True,
+            }
+            identity_path = output_dir / "embedding_identity.json"
+            if identity_path.exists():
+                existing_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+                if existing_identity != identity:
+                    raise RuntimeError(
+                        "Output directory belongs to a different embedding run: "
+                        f"{existing_identity}. Choose a new --output-dir."
+                    )
+            else:
+                atomic_json(identity_path, identity)
+
+            if not torch.cuda.is_available():
+                raise RuntimeError("A CUDA GPU is required; choose an A100 runtime in Colab")
+            device = "cuda"
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            print(
+                f"GPU: {torch.cuda.get_device_name(0)} "
+                f"({torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GiB)"
+            )
+
+            started = time.time()
+            embedder = create_embedder(args, device)
+            video_ids, embedding_dim, image_count = stream_drive_archives(
+                service,
+                archives,
+                embedder,
+                output_dir,
+                data_dir,
+                Path(args.zip_cache_dir),
+                args.batch_size,
+                args.num_workers,
+                device,
+            )
+            video_count = len(video_ids)
+            video_count_mismatch = video_count != args.expected_videos
+            image_count_mismatch = (
+                args.expected_images is not None and image_count != args.expected_images
+            )
+            count_mismatch = video_count_mismatch or image_count_mismatch
+            if not args.allow_count_mismatch and args.max_zips is None and count_mismatch:
+                expected_images = (
+                    args.expected_images if args.expected_images is not None else "dynamic"
+                )
+                raise RuntimeError(
+                    "Corpus count mismatch: "
+                    f"got {video_count} videos/{image_count} images; expected "
+                    f"{args.expected_videos}/{expected_images}."
+                )
+
+            matrix_path, metadata_path, total = merge_stream_outputs(
+                video_ids,
+                output_dir,
+                embedding_dim,
+            )
+            matrix = np.load(matrix_path, mmap_mode="r")
+            metadata_lines = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
+            if matrix.shape != (total, embedding_dim) or metadata_lines != total:
+                raise RuntimeError("Final streaming matrix/metadata verification failed")
+            run_manifest = {
+                "schema_version": "aic26.keyframe_embeddings.v1",
+                "model_family": args.model,
+                "model_id": identity["model_id"],
+                "source_drive_folder_ids": list(folder_ids),
+                "source_mode": "shared_drive_zip_streaming",
+                "video_count": video_count,
+                "keyframe_count": total,
+                "embedding_dimension": embedding_dim,
+                "dtype": "float16",
+                "l2_normalized": True,
+                "preprocessing": embedder.preprocessing,
+                "matrix_file": matrix_path.name,
+                "metadata_file": metadata_path.name,
+                "elapsed_seconds": round(time.time() - started, 3),
+                "gpu": torch.cuda.get_device_name(0),
+            }
+            atomic_json(output_dir / "run_manifest.json", run_manifest)
+            print(json.dumps(run_manifest, ensure_ascii=False, indent=2))
+            print(f"Done: {matrix_path}")
+            return 0
+
         download_and_extract_archives(
             service,
             archives,
