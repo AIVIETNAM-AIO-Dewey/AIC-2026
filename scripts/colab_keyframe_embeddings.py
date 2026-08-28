@@ -10,6 +10,7 @@ Embeddings are committed per video before a final, deterministic merge.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -190,8 +191,12 @@ def discover_keyframes(data_dir: Path) -> dict[str, list[Path]]:
 
 
 def keyframe_number(path: Path, fallback: int) -> int:
-    numbers = re.findall(r"\d+", path.stem)
-    return int(numbers[-1]) if numbers else fallback
+    del fallback
+    if not path.stem.isdigit():
+        raise ValueError(
+            f"Keyframe filename must be numeric (for example 001.jpg), got {path.name!r}"
+        )
+    return int(path.stem)
 
 
 def collate_image_batch(batch: Sequence[tuple[str, Any]]) -> tuple[list[str], list[Any]]:
@@ -415,10 +420,17 @@ def build_video_metadata(video_id: str, paths: Sequence[Path]) -> list[dict[str,
             {
                 "video_id": video_id,
                 "keyframe_n": number,
+                "vector_row": local_index - 1,
+                "vector_shard": f"shards/{video_id}.f16.npy",
                 "image_relpath": f"keyframes/{video_id}/{path.name}",
                 "filename": path.name,
             }
         )
+    numbers = [record["keyframe_n"] for record in records]
+    if len(numbers) != len(set(numbers)):
+        raise RuntimeError(f"Duplicate keyframe_n values for {video_id}")
+    if numbers != sorted(numbers):
+        raise RuntimeError(f"keyframe_n values are not increasing for {video_id}")
     return records
 
 
@@ -428,7 +440,9 @@ def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] |
     if not shard_path.exists() or not metadata_path.exists():
         return None
     shard = np.load(shard_path, mmap_mode="r")
-    metadata_rows = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle]
+    metadata_rows = len(records)
     valid = (
         shard.ndim == 2
         and shard.dtype == np.float16
@@ -437,6 +451,19 @@ def completed_stream_shard(output_dir: Path, video_id: str) -> tuple[int, int] |
     )
     if not valid:
         raise RuntimeError(f"Invalid existing streaming shard for {video_id}")
+    migrated = False
+    for vector_row, record in enumerate(records):
+        if record.get("video_id") != video_id or "keyframe_n" not in record:
+            raise RuntimeError(f"Invalid mapping record for {video_id} row {vector_row}")
+        expected_shard = f"shards/{video_id}.f16.npy"
+        if record.get("vector_row") != vector_row:
+            record["vector_row"] = vector_row
+            migrated = True
+        if record.get("vector_shard") != expected_shard:
+            record["vector_shard"] = expected_shard
+            migrated = True
+    if migrated:
+        save_jsonl_atomic(metadata_path, records)
     return int(shard.shape[1]), metadata_rows
 
 
@@ -548,7 +575,9 @@ def merge_stream_outputs(
             with source_path.open("r", encoding="utf-8") as source:
                 for local_index, line in enumerate(source):
                     record = json.loads(line)
-                    record["row_id"] = offset + local_index
+                    global_row = offset + local_index
+                    record["row_id"] = global_row
+                    record["global_vector_row"] = global_row
                     destination.write(json.dumps(record, ensure_ascii=False) + "\n")
             offset += rows
     matrix.flush()
@@ -556,6 +585,32 @@ def merge_stream_outputs(
     temporary_matrix.replace(matrix_path)
     temporary_metadata.replace(metadata_path)
     return matrix_path, metadata_path, total
+
+
+def export_keyframe_index_csv(metadata_path: Path, output_dir: Path) -> Path:
+    """Export a human-readable row-to-keyframe mapping beside the NPY matrix."""
+    index_path = output_dir / "keyframe_index.csv"
+    temporary = index_path.with_suffix(index_path.suffix + ".tmp")
+    fieldnames = [
+        "global_vector_row",
+        "video_id",
+        "keyframe_n",
+        "vector_shard",
+        "vector_row",
+        "filename",
+        "image_relpath",
+    ]
+    with (
+        metadata_path.open("r", encoding="utf-8") as source,
+        temporary.open("w", encoding="utf-8", newline="") as destination,
+    ):
+        writer = csv.DictWriter(destination, fieldnames=fieldnames)
+        writer.writeheader()
+        for line in source:
+            record = json.loads(line)
+            writer.writerow({field: record.get(field) for field in fieldnames})
+    temporary.replace(index_path)
+    return index_path
 
 
 def embed_video_shards(
@@ -641,8 +696,11 @@ def merge_outputs(
             for local_index, path in enumerate(paths, start=1):
                 record = {
                     "row_id": offset + local_index - 1,
+                    "global_vector_row": offset + local_index - 1,
                     "video_id": video_id,
                     "keyframe_n": keyframe_number(path, local_index),
+                    "vector_row": local_index - 1,
+                    "vector_shard": f"shards/{video_id}.f16.npy",
                     "image_relpath": path.relative_to(data_dir).as_posix(),
                     "filename": path.name,
                 }
@@ -788,6 +846,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             metadata_lines = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
             if matrix.shape != (total, embedding_dim) or metadata_lines != total:
                 raise RuntimeError("Final streaming matrix/metadata verification failed")
+            index_path = export_keyframe_index_csv(metadata_path, output_dir)
             run_manifest = {
                 "schema_version": "aic26.keyframe_embeddings.v1",
                 "model_family": args.model,
@@ -802,6 +861,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "preprocessing": embedder.preprocessing,
                 "matrix_file": matrix_path.name,
                 "metadata_file": metadata_path.name,
+                "keyframe_index_file": index_path.name,
                 "elapsed_seconds": round(time.time() - started, 3),
                 "gpu": torch.cuda.get_device_name(0),
             }
@@ -888,6 +948,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     metadata_lines = sum(1 for _ in metadata_path.open("r", encoding="utf-8"))
     if matrix.shape != (total, embedding_dim) or metadata_lines != total:
         raise RuntimeError("Final matrix/metadata verification failed")
+    index_path = export_keyframe_index_csv(metadata_path, output_dir)
 
     run_manifest = {
         "schema_version": "aic26.keyframe_embeddings.v1",
@@ -904,6 +965,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "preprocessing": embedder.preprocessing,
         "matrix_file": matrix_path.name,
         "metadata_file": metadata_path.name,
+        "keyframe_index_file": index_path.name,
         "elapsed_seconds": round(time.time() - started, 3),
         "gpu": torch.cuda.get_device_name(0),
     }
