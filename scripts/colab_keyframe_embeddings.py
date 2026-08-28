@@ -193,7 +193,7 @@ def load_drive_keyframe_maps(
         timestamps = [row["pts_time_s"] for row in rows]
         if not rows or numbers != sorted(set(numbers)):
             raise RuntimeError(f"Invalid keyframe sequence in {item['name']}")
-        if frame_indices != sorted(frame_indices) or timestamps != sorted(timestamps):
+        if frame_indices != sorted(set(frame_indices)) or timestamps != sorted(timestamps):
             raise RuntimeError(f"Non-monotonic map rows in {item['name']}")
         if any(row["fps"] <= 0 for row in rows):
             raise RuntimeError(f"Non-positive FPS in {item['name']}")
@@ -373,6 +373,16 @@ def keyframe_number(path: Path, fallback: int) -> int:
     if not path.stem.isdigit():
         raise ValueError(
             f"Keyframe filename must be numeric (for example 001.jpg), got {path.name!r}"
+        )
+    return int(path.stem)
+
+
+def image_frame_index(path: Path) -> int:
+    """Return the original video frame index encoded in a keyframe filename."""
+    if not path.stem.isdigit():
+        raise ValueError(
+            f"Keyframe filename must contain frame_idx (for example 000024.jpg), "
+            f"got {path.name!r}"
         )
     return int(path.stem)
 
@@ -595,19 +605,18 @@ def build_video_metadata(
     paths: Sequence[Path],
     map_rows: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    map_by_number = {int(row["keyframe_n"]): row for row in map_rows}
-    image_numbers = [keyframe_number(path, index) for index, path in enumerate(paths, start=1)]
-    map_numbers = [int(row["keyframe_n"]) for row in map_rows]
-    if image_numbers != map_numbers:
+    image_frame_indices = [image_frame_index(path) for path in paths]
+    map_frame_indices = [int(row["frame_idx"]) for row in map_rows]
+    if image_frame_indices != map_frame_indices:
         raise RuntimeError(
-            f"Image/map mismatch for {video_id}: {len(image_numbers)} images versus "
-            f"{len(map_numbers)} map rows; image sample={image_numbers[:5]}, "
-            f"map sample={map_numbers[:5]}"
+            f"Image/map mismatch for {video_id}: {len(image_frame_indices)} images versus "
+            f"{len(map_frame_indices)} map rows; filename frame_idx "
+            f"sample={image_frame_indices[:5]}, CSV frame_idx sample={map_frame_indices[:5]}"
         )
 
     records = []
-    for vector_row, (path, number) in enumerate(zip(paths, image_numbers, strict=True)):
-        mapping = map_by_number[number]
+    for vector_row, (path, mapping) in enumerate(zip(paths, map_rows, strict=True)):
+        number = int(mapping["keyframe_n"])
         frame_idx = int(mapping["frame_idx"])
         records.append(
             {
@@ -652,21 +661,29 @@ def completed_stream_shard(
     )
     if not valid:
         raise RuntimeError(f"Invalid existing streaming shard for {video_id}")
-    map_by_number = {int(row["keyframe_n"]): row for row in map_rows}
-    record_numbers = [int(record.get("keyframe_n", -1)) for record in records]
-    map_numbers = [int(row["keyframe_n"]) for row in map_rows]
-    if record_numbers != map_numbers:
+    record_frame_indices = []
+    for record in records:
+        filename = Path(str(record.get("filename", "")))
+        if filename.stem.isdigit():
+            record_frame_indices.append(int(filename.stem))
+        elif "frame_idx" in record:
+            record_frame_indices.append(int(record["frame_idx"]))
+        else:
+            raise RuntimeError(f"Cannot recover frame_idx from existing metadata for {video_id}")
+    map_frame_indices = [int(row["frame_idx"]) for row in map_rows]
+    if record_frame_indices != map_frame_indices:
         raise RuntimeError(
             f"Existing shard/map mismatch for {video_id}: "
-            f"{len(record_numbers)} vector rows versus {len(map_numbers)} map rows"
+            f"{len(record_frame_indices)} vector rows versus "
+            f"{len(map_frame_indices)} map rows"
         )
 
     migrated = False
-    for vector_row, record in enumerate(records):
+    for vector_row, (record, mapping) in enumerate(zip(records, map_rows, strict=True)):
         if record.get("video_id") != video_id or "keyframe_n" not in record:
             raise RuntimeError(f"Invalid mapping record for {video_id} row {vector_row}")
-        mapping = map_by_number[int(record["keyframe_n"])]
         expected_mapping = {
+            "keyframe_n": int(mapping["keyframe_n"]),
             "frame_idx": int(mapping["frame_idx"]),
             "pts_time_s": float(mapping["pts_time_s"]),
             "fps": float(mapping["fps"]),
