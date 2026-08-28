@@ -508,7 +508,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--keep-zips", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--expected-videos", type=int, default=873)
-    parser.add_argument("--expected-images", type=int, default=177321)
+    parser.add_argument(
+        "--expected-images",
+        type=int,
+        help="Optional exact image count. Omit when the Drive corpus can grow.",
+    )
     parser.add_argument("--allow-count-mismatch", action="store_true")
     parser.add_argument("--metaclip2-model-id", default=DEFAULT_METACLIP2_ID)
     parser.add_argument("--beit3-repo-dir", default="/content/unilm")
@@ -556,12 +560,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     video_count = len(grouped_paths)
     image_count = sum(len(paths) for paths in grouped_paths.values())
     print(f"Discovered {image_count:,} keyframes across {video_count:,} videos")
-    count_mismatch = video_count != args.expected_videos or image_count != args.expected_images
+    video_count_mismatch = video_count != args.expected_videos
+    image_count_mismatch = (
+        args.expected_images is not None and image_count != args.expected_images
+    )
+    count_mismatch = video_count_mismatch or image_count_mismatch
     if not args.allow_count_mismatch and args.max_zips is None and count_mismatch:
+        expected_images = args.expected_images if args.expected_images is not None else "dynamic"
         raise RuntimeError(
             "Corpus count mismatch: "
             f"got {video_count} videos/{image_count} images; expected "
-            f"{args.expected_videos}/{args.expected_images}. "
+            f"{args.expected_videos}/{expected_images}. "
             "Use --allow-count-mismatch only after checking the Drive manifest."
         )
     if image_count == 0:
