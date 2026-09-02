@@ -82,3 +82,35 @@ def test_create_keyframe_zip(tmp_path: Path):
         namelist = zf.namelist()
         assert "L21_V001/00000001.jpg" in namelist
         assert "L21_V001/00000002.jpg" in namelist
+
+
+def test_build_parser_asr_defaults():
+    from scripts.run_dam_batch import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.enable_asr is True
+    assert args.asr_engine == "auto"
+    assert args.asr_model_id == "kiendt/PhoWhisper-large-ct2"
+    assert args.asr_compute_type == "float16"
+
+    args_no_asr = parser.parse_args(["--no-asr"])
+    assert args_no_asr.enable_asr is False
+
+
+def test_build_parser_visual_embeddings_defaults():
+    from scripts.run_dam_batch import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.enable_siglip is True
+    assert args.enable_metaclip2 is True
+    assert args.enable_beit3 is True
+    assert "metaclip-2-worldwide-huge-quickgelu" in args.metaclip2_model
+    assert "beit3_base_patch16_384_coco_retrieval" in args.beit3_checkpoint
+
+    args_disabled = parser.parse_args(["--no-metaclip2", "--no-beit3", "--no-siglip"])
+    assert args_disabled.enable_siglip is False
+    assert args_disabled.enable_metaclip2 is False
+    assert args_disabled.enable_beit3 is False
+

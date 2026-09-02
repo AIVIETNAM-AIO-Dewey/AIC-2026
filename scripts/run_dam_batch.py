@@ -63,9 +63,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ocr", action="store_false", dest="enable_ocr", help="Disable Stage 3 OCR extraction")
     parser.add_argument("--ocr-backend", default="auto", choices=["auto", "easyocr", "paddleocr"], help="OCR engine backend")
     parser.add_argument("--ocr-threshold", type=float, default=0.30, help="Confidence threshold for OCR")
+    parser.add_argument("--enable-asr", action="store_true", default=True, help="Enable Stage 3.5 PhoWhisper ASR extraction (default: True)")
+    parser.add_argument("--no-asr", action="store_false", dest="enable_asr", help="Disable Stage 3.5 PhoWhisper ASR extraction")
+    parser.add_argument("--asr-engine", default="auto", choices=["auto", "faster_whisper", "huggingface"], help="ASR backend engine")
+    parser.add_argument("--asr-model-id", default="kiendt/PhoWhisper-large-ct2", help="ASR model ID or CT2 path")
+    parser.add_argument("--asr-compute-type", default="float16", help="ASR compute type: float16, int8, float32")
     parser.add_argument("--enable-siglip", action="store_true", default=True, help="Enable Stage 4 SigLIP2 embedding (default: True)")
     parser.add_argument("--no-siglip", action="store_false", dest="enable_siglip", help="Disable Stage 4 SigLIP2 embedding")
     parser.add_argument("--siglip-model", default="google/siglip2-base-patch16-224", help="SigLIP2 model ID or path")
+    parser.add_argument("--enable-metaclip2", action="store_true", default=True, help="Enable Stage 4 MetaCLIP 2 embedding (default: True)")
+    parser.add_argument("--no-metaclip2", action="store_false", dest="enable_metaclip2", help="Disable Stage 4 MetaCLIP 2 embedding")
+    parser.add_argument("--metaclip2-model", default="facebook/metaclip-2-worldwide-huge-quickgelu", help="MetaCLIP 2 model ID")
+    parser.add_argument("--enable-beit3", action="store_true", default=True, help="Enable Stage 4 BEiT-3 embedding (default: True)")
+    parser.add_argument("--no-beit3", action="store_false", dest="enable_beit3", help="Disable Stage 4 BEiT-3 embedding")
+    parser.add_argument(
+        "--beit3-checkpoint",
+        default="https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth",
+        help="BEiT-3 checkpoint URL",
+    )
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/aic2026-artifacts"))
     parser.add_argument("--cache-root", type=Path, default=Path("/kaggle/working/aic2026-model-cache"))
     parser.add_argument("--device", default="cuda", help="Execution device (cuda or auto)")
@@ -709,8 +724,47 @@ def main(argv: list[str] | None = None) -> int:
                 ocr_cmd.extend(["--limit", str(args.limit)])
             run_pipeline_step(ocr_cmd, step_name="run_ocr_extraction")
 
-        # Stage 4: SigLIP2 Dense Scene Embeddings (Optional / Default True)
+        # Stage 3.5: PhoWhisper ASR Speech Extraction (Optional / Default True)
+        asr_artifact = output_root / "asr_transcripts" / f"{video_id}.jsonl"
+        asr_manifest = asr_artifact.with_suffix(".manifest.json")
+        if args.enable_asr:
+            try:
+                asr_video_path = resolver.resolve_video_path(video_id)
+            except Exception:
+                asr_video_path = None
+
+            if asr_video_path and asr_video_path.is_file():
+                asr_cmd = [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/run_phowhisper_asr.py"),
+                    "--video-id", video_id,
+                    "--video-path", str(asr_video_path),
+                    "--output", str(asr_artifact),
+                    "--device", args.device,
+                    "--engine", args.asr_engine,
+                    "--model-id", args.asr_model_id,
+                    "--compute-type", args.asr_compute_type,
+                ]
+                map_csv_candidate = output_root / "map-keyframes" / f"{video_id}.csv"
+                if not map_csv_candidate.is_file():
+                    try:
+                        map_csv_candidate = resolver.resolve_map_csv(video_id)
+                    except Exception:
+                        map_csv_candidate = None
+                if map_csv_candidate and map_csv_candidate.is_file():
+                    asr_cmd.extend(["--keyframe-csv", str(map_csv_candidate)])
+                if args.no_resume:
+                    asr_cmd.append("--no-resume")
+                if args.limit:
+                    asr_cmd.extend(["--limit", str(args.limit)])
+                run_pipeline_step(asr_cmd, step_name="run_phowhisper_asr")
+            else:
+                logger.warning("  ⚠️ Video file not found for ASR on %s, skipping audio stage", video_id)
+
+        # Stage 4: Tri-Model Dense Scene Embeddings (SigLIP-2, MetaCLIP-2, BEiT-3)
+        # 4.1 SigLIP-2 (768-dim)
         emb_artifact = output_root / "scene_embeddings" / f"{video_id}.jsonl"
+        siglip2_artifact = output_root / "scene_embeddings" / "siglip2" / f"{video_id}.jsonl"
         if args.enable_siglip:
             siglip_cmd = [
                 sys.executable,
@@ -719,7 +773,9 @@ def main(argv: list[str] | None = None) -> int:
                 "--video-id", video_id,
                 "--frame-manifest", str(frame_manifest),
                 "--data-root", str(data_root),
-                "--output", str(emb_artifact),
+                "--output", str(siglip2_artifact),
+                "--model-family", "siglip2",
+                "--model-id", args.siglip_model,
                 "--device", args.device,
                 "--matrix-format", "safetensors",
             ]
@@ -727,7 +783,68 @@ def main(argv: list[str] | None = None) -> int:
                 siglip_cmd.append("--no-resume")
             if args.limit:
                 siglip_cmd.extend(["--limit", str(args.limit)])
-            run_pipeline_step(siglip_cmd, step_name="run_scene_embeddings")
+            run_pipeline_step(siglip_cmd, step_name="run_siglip2_embeddings")
+
+            # Maintain legacy root path compatibility
+            siglip2_mat = siglip2_artifact.with_suffix(".safetensors")
+            legacy_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
+            if siglip2_mat.is_file() and not legacy_mat.exists():
+                try:
+                    legacy_mat.symlink_to(siglip2_mat)
+                except OSError:
+                    import shutil
+                    shutil.copy2(siglip2_mat, legacy_mat)
+            if siglip2_artifact.is_file() and not emb_artifact.exists():
+                try:
+                    emb_artifact.symlink_to(siglip2_artifact)
+                except OSError:
+                    import shutil
+                    shutil.copy2(siglip2_artifact, emb_artifact)
+
+        # 4.2 MetaCLIP-2 (1024-dim)
+        metaclip_artifact = output_root / "scene_embeddings" / "metaclip2" / f"{video_id}.jsonl"
+        if args.enable_metaclip2:
+            metaclip_cmd = [
+                sys.executable,
+                str(REPO_ROOT / "scripts/run_scene_embeddings.py"),
+                "--config", str(args.config),
+                "--video-id", video_id,
+                "--frame-manifest", str(frame_manifest),
+                "--data-root", str(data_root),
+                "--output", str(metaclip_artifact),
+                "--model-family", "metaclip2",
+                "--model-id", args.metaclip2_model,
+                "--device", args.device,
+                "--matrix-format", "safetensors",
+            ]
+            if args.no_resume:
+                metaclip_cmd.append("--no-resume")
+            if args.limit:
+                metaclip_cmd.extend(["--limit", str(args.limit)])
+            run_pipeline_step(metaclip_cmd, step_name="run_metaclip2_embeddings")
+
+        # 4.3 BEiT-3 (768-dim)
+        beit3_artifact = output_root / "scene_embeddings" / "beit3" / f"{video_id}.jsonl"
+        if args.enable_beit3:
+            beit3_cmd = [
+                sys.executable,
+                str(REPO_ROOT / "scripts/run_scene_embeddings.py"),
+                "--config", str(args.config),
+                "--video-id", video_id,
+                "--frame-manifest", str(frame_manifest),
+                "--data-root", str(data_root),
+                "--output", str(beit3_artifact),
+                "--model-family", "beit3",
+                "--model-id", args.beit3_checkpoint,
+                "--checkpoint-dir", str(args.cache_root / "beit3"),
+                "--device", args.device,
+                "--matrix-format", "safetensors",
+            ]
+            if args.no_resume:
+                beit3_cmd.append("--no-resume")
+            if args.limit:
+                beit3_cmd.extend(["--limit", str(args.limit)])
+            run_pipeline_step(beit3_cmd, step_name="run_beit3_embeddings")
 
         # Stage 5: Multi-Modal Metadata Fusion
         unified_artifact = output_root / "unified_metadata" / f"{video_id}.jsonl"
@@ -741,8 +858,14 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.enable_ocr and ocr_artifact.is_file():
             fusion_cmd.extend(["--ocr-transcripts", str(ocr_artifact)])
+        if args.enable_asr and asr_artifact.is_file():
+            fusion_cmd.extend(["--asr-transcripts", str(asr_artifact)])
         if args.enable_siglip and emb_artifact.is_file():
             fusion_cmd.extend(["--embeddings", str(emb_artifact)])
+        if args.enable_metaclip2 and metaclip_artifact.is_file():
+            fusion_cmd.extend(["--metaclip2-embeddings", str(metaclip_artifact)])
+        if args.enable_beit3 and beit3_artifact.is_file():
+            fusion_cmd.extend(["--beit3-embeddings", str(beit3_artifact)])
         run_pipeline_step(fusion_cmd, step_name="build_unified_frame_metadata")
 
         # Atomic & Fault-Tolerant Google Drive Upload
@@ -765,12 +888,35 @@ def main(argv: list[str] | None = None) -> int:
                 if ocr_artifact.is_file():
                     rclone_sync_file(ocr_artifact, f"{rclone_base}/ocr_transcripts/")
 
-                # 4. Sync SigLIP2 Scene Embeddings
+                # 3.5 Sync ASR speech transcripts
+                if asr_artifact.is_file():
+                    rclone_sync_file(asr_artifact, f"{rclone_base}/asr_transcripts/")
+                if asr_manifest.is_file():
+                    rclone_sync_file(asr_manifest, f"{rclone_base}/asr_transcripts/")
+
+                # 4. Sync Visual Scene Embeddings
+                # 4.1 SigLIP2
                 safetensors_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
                 if safetensors_mat.is_file():
                     rclone_sync_file(safetensors_mat, f"{rclone_base}/scene_embeddings/")
+                    rclone_sync_file(safetensors_mat, f"{rclone_base}/scene_embeddings/siglip2/")
                 if emb_artifact.is_file():
                     rclone_sync_file(emb_artifact, f"{rclone_base}/scene_embeddings/")
+                    rclone_sync_file(emb_artifact, f"{rclone_base}/scene_embeddings/siglip2/")
+
+                # 4.2 MetaCLIP2
+                metaclip_mat = output_root / "scene_embeddings" / "metaclip2" / f"{video_id}.safetensors"
+                if metaclip_mat.is_file():
+                    rclone_sync_file(metaclip_mat, f"{rclone_base}/scene_embeddings/metaclip2/")
+                if metaclip_artifact.is_file():
+                    rclone_sync_file(metaclip_artifact, f"{rclone_base}/scene_embeddings/metaclip2/")
+
+                # 4.3 BEiT-3
+                beit3_mat = output_root / "scene_embeddings" / "beit3" / f"{video_id}.safetensors"
+                if beit3_mat.is_file():
+                    rclone_sync_file(beit3_mat, f"{rclone_base}/scene_embeddings/beit3/")
+                if beit3_artifact.is_file():
+                    rclone_sync_file(beit3_artifact, f"{rclone_base}/scene_embeddings/beit3/")
 
                 # 5. Sync map-keyframes CSV
                 map_csv = output_root / "map-keyframes" / f"{video_id}.csv"

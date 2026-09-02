@@ -42,9 +42,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(parser)
     parser.add_argument(
+        "--video-path",
+        type=Path,
+        help="Explicit path to a single .mp4 video file.",
+    )
+    parser.add_argument(
         "--video-dir",
         type=Path,
         help="Directory containing .mp4 video files (or parent of video folders).",
+    )
+    parser.add_argument(
+        "--keyframe-csv",
+        type=Path,
+        help="Explicit path to a single map-keyframes CSV file.",
     )
     parser.add_argument(
         "--map-csv-dir",
@@ -52,13 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing map-keyframes/*.csv files.",
     )
     parser.add_argument(
+        "--output",
+        type=Path,
+        help="Explicit path to output .jsonl artifact.",
+    )
+    parser.add_argument(
         "--engine",
-        choices=["faster_whisper", "huggingface"],
-        help="ASR backend engine (default from config or faster_whisper).",
+        choices=["auto", "faster_whisper", "huggingface"],
+        default="auto",
+        help="ASR backend engine (default: auto -> faster_whisper with fallback).",
     )
     parser.add_argument(
         "--model-id",
-        help="Model ID or CT2 path (default from config or vinai/PhoWhisper-large).",
+        help="Model ID or CT2 path (default from config or kiendt/PhoWhisper-large-ct2).",
     )
     parser.add_argument(
         "--compute-type",
@@ -66,8 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="CTranslate2 compute type: float16, int8, float32.",
     )
     parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Force re-running already completed videos.",
+    )
+    parser.add_argument(
         "--rclone-dest",
-        help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/asr_segments/).",
+        help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/asr_transcripts/).",
     )
     return parser
 
@@ -115,13 +136,15 @@ def main(argv: list[str] | None = None) -> int:
 
     device = resolve_device(args.device, config)
     engine = args.engine or config.get("engine", "faster_whisper")
+    if engine == "auto":
+        engine = "faster_whisper"
     model_id = args.model_id or (
         config.get("ct2_model_id") if engine == "faster_whisper" else config.get("model_id")
-    ) or "vinai/PhoWhisper-large"
+    ) or "kiendt/PhoWhisper-large-ct2"
     compute_type = args.compute_type or config.get("compute_type", "float16")
 
     output_root = args.output_root or Path(os.environ.get("AIC_ARTIFACT_ROOT", REPO_ROOT / "artifacts"))
-    output_dir = output_root / "asr_segments"
+    output_dir = output_root / "asr_transcripts"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data_root = args.data_root or Path(os.environ.get("AIC_DATA_ROOT", REPO_ROOT))
@@ -130,6 +153,65 @@ def main(argv: list[str] | None = None) -> int:
 
     rclone_dest = args.rclone_dest or config.get("rclone_dest")
 
+    window_size_s = float(config.get("window_size_s", 15.0))
+    stride_s = float(config.get("stride_s", 7.5))
+    initial_prompt = config.get(
+        "initial_prompt",
+        "Bản tin thời sự, tin tức Việt Nam, YouTube, Facebook, iPhone, AI, video, online",
+    )
+
+    # Direct single-video mode
+    if args.video_path or (args.video_id and args.output):
+        video_id = args.video_id or args.video_path.stem
+        video_path = args.video_path or (video_dir / f"{video_id}.mp4")
+        if not video_path.is_file():
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        output_jsonl = args.output or (output_dir / f"{video_id}.jsonl")
+        output_manifest = output_jsonl.with_suffix(".manifest.json")
+
+        if not args.no_resume and not getattr(args, "force", False) and output_jsonl.exists() and output_manifest.exists():
+            logger.info("Skipping already completed video: %s (manifest present)", video_id)
+            return 0
+
+        logger.info("Initializing ASR backend engine=%s model=%s device=%s", engine, model_id, device)
+        backend = create_asr_backend(
+            engine=engine,
+            model_id=model_id,
+            device=device,
+            compute_type=compute_type,
+        )
+
+        csv_path = args.keyframe_csv
+        if not csv_path and map_csv_dir:
+            candidate = map_csv_dir / f"{video_id}.csv"
+            if candidate.is_file():
+                csv_path = candidate
+
+        logger.info("Processing single video: %s (%s)", video_id, video_path.name)
+        manifest = process_video(
+            video_id=video_id,
+            video_path=video_path,
+            keyframe_csv_path=csv_path,
+            output_jsonl=output_jsonl,
+            backend=backend,
+            window_size_s=window_size_s,
+            stride_s=stride_s,
+            initial_prompt=initial_prompt,
+            vad_filter=bool(config.get("vad_filter", True)),
+            vad_min_silence_duration_ms=int(config.get("vad_min_silence_duration_ms", 500)),
+            dedup_time_overlap_threshold=float(config.get("dedup_time_overlap_threshold", 0.80)),
+            dedup_text_similarity_threshold=float(config.get("dedup_text_similarity_threshold", 0.85)),
+            merge_gap_ms=int(config.get("merge_gap_ms", 500)),
+        )
+
+        if rclone_dest and manifest.status in ("completed", "skipped"):
+            rclone_sync_file(output_jsonl, rclone_dest)
+            rclone_sync_file(output_manifest, rclone_dest)
+
+        return 0
+
+    # Batch directory scan mode
     logger.info("Initializing ASR backend engine=%s model=%s device=%s", engine, model_id, device)
     backend = create_asr_backend(
         engine=engine,
@@ -141,7 +223,6 @@ def main(argv: list[str] | None = None) -> int:
     # Find videos
     video_list = find_video_files(video_dir, explicit_video_id=args.video_id)
     if not video_list and args.video_id:
-        # Check if video_path can be inferred
         possible_mp4 = video_dir / f"{args.video_id}.mp4"
         if possible_mp4.exists():
             video_list = [(args.video_id, possible_mp4)]
@@ -155,26 +236,16 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Found %d videos to process.", len(video_list))
 
-    window_size_s = float(config.get("window_size_s", 15.0))
-    stride_s = float(config.get("stride_s", 7.5))
-    initial_prompt = config.get(
-        "initial_prompt",
-        "Bản tin thời sự, tin tức Việt Nam, YouTube, Facebook, iPhone, AI, video, online",
-    )
-
     completed_count = 0
     skipped_count = 0
 
     for video_id, video_path in video_list:
         csv_path = map_csv_dir / f"{video_id}.csv"
-        if not csv_path.exists():
-            logger.warning("Missing map-keyframes CSV for %s at %s. Skipping.", video_id, csv_path)
-            continue
 
         manifest_path = output_dir / f"{video_id}.manifest.json"
         jsonl_path = output_dir / f"{video_id}.jsonl"
 
-        if args.resume and manifest_path.exists() and jsonl_path.exists():
+        if not args.no_resume and args.resume and manifest_path.exists() and jsonl_path.exists():
             logger.info("Skipping already completed video: %s (--resume)", video_id)
             skipped_count += 1
             continue
@@ -183,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest = process_video(
             video_id=video_id,
             video_path=video_path,
-            keyframe_csv_path=csv_path,
+            keyframe_csv_path=csv_path if csv_path.exists() else None,
             output_dir=output_dir,
             backend=backend,
             window_size_s=window_size_s,

@@ -159,9 +159,14 @@ def _deduplicate_segments(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_keyframes(csv_path: str | Path) -> pd.DataFrame:
-    """Load a map-keyframes CSV and return a sorted DataFrame."""
-    df = pd.read_csv(csv_path)
+def _load_keyframes(csv_path: str | Path | None) -> pd.DataFrame | None:
+    """Load a map-keyframes CSV and return a sorted DataFrame, or None if not provided/found."""
+    if csv_path is None:
+        return None
+    p = Path(csv_path)
+    if not p.is_file():
+        return None
+    df = pd.read_csv(p)
     # Normalise column names (strip whitespace, handle BOM)
     df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
     required = {"n", "pts_time", "fps", "frame_idx"}
@@ -173,21 +178,27 @@ def _load_keyframes(csv_path: str | Path) -> pd.DataFrame:
 
 def _index_keyframes(
     video_id: str,
-    keyframe_df: pd.DataFrame,
+    keyframe_df: pd.DataFrame | None,
     start_ms: int,
     end_ms: int,
 ) -> list[AsrKeyframeRef]:
     """Find all keyframes within ``[start_ms, end_ms]``."""
+    if keyframe_df is None:
+        return []
     refs: list[AsrKeyframeRef] = []
+    seen_uids: set[str] = set()
     for row in keyframe_df.itertuples(index=False):
         kf_ms = row.pts_time * 1000.0
         if start_ms <= kf_ms <= end_ms:
-            refs.append(AsrKeyframeRef(
-                keyframe_n=int(row.n),
-                frame_idx=int(row.frame_idx),
-                pts_time_s=float(row.pts_time),
-                frame_uid=f"{video_id}:{int(row.frame_idx)}",
-            ))
+            uid = f"{video_id}:{int(row.frame_idx)}"
+            if uid not in seen_uids:
+                seen_uids.add(uid)
+                refs.append(AsrKeyframeRef(
+                    keyframe_n=int(row.n),
+                    frame_idx=int(row.frame_idx),
+                    pts_time_s=float(row.pts_time),
+                    frame_uid=uid,
+                ))
     return refs
 
 
@@ -232,8 +243,9 @@ def process_video(
     *,
     video_id: str,
     video_path: str | Path,
-    keyframe_csv_path: str | Path,
-    output_dir: str | Path,
+    keyframe_csv_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    output_jsonl: str | Path | None = None,
     backend: AsrBackend,
     window_size_s: float = 15.0,
     stride_s: float = 7.5,
@@ -286,7 +298,16 @@ def process_video(
     AsrVideoManifest
         Pipeline run metadata for this video.
     """
-    output_dir = Path(output_dir)
+    if output_jsonl is not None:
+        jsonl_path = Path(output_jsonl).expanduser().resolve()
+        manifest_path = jsonl_path.with_suffix(".manifest.json")
+    elif output_dir is not None:
+        output_dir = Path(output_dir).expanduser().resolve()
+        jsonl_path = output_dir / f"{video_id}.jsonl"
+        manifest_path = output_dir / f"{video_id}.manifest.json"
+    else:
+        raise ValueError("Either output_dir or output_jsonl must be provided")
+
     started_at = datetime.now(timezone.utc)
 
     # ── 1. Extract audio ──
@@ -305,8 +326,8 @@ def process_video(
             started_at=started_at,
             ended_at=datetime.now(timezone.utc),
         )
-        _write_jsonl_atomic([], output_dir / f"{video_id}.jsonl")
-        _write_manifest_atomic(manifest, output_dir / f"{video_id}.manifest.json")
+        _write_jsonl_atomic([], jsonl_path)
+        _write_manifest_atomic(manifest, manifest_path)
         return manifest
 
     audio_duration_s = get_audio_duration_s(audio, sample_rate)
@@ -392,9 +413,6 @@ def process_video(
         records.append(record)
 
     # ── 6. Atomic write ──
-    jsonl_path = output_dir / f"{video_id}.jsonl"
-    manifest_path = output_dir / f"{video_id}.manifest.json"
-
     _write_jsonl_atomic(records, jsonl_path)
 
     manifest = AsrVideoManifest(

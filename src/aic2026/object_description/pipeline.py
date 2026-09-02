@@ -248,6 +248,7 @@ def prepare_masks(
             object_path = object_files.get(frame.keyframe_n)
             if object_path is None:
                 raise ValueError(f"Missing Objects JSON for keyframe n={frame.keyframe_n}")
+            raw_detections = load_organizer_detections(object_path)
         detections = filter_detections(raw_detections, filter_config)
         if not detections and filter_config.fallback_scene:
             detections = [

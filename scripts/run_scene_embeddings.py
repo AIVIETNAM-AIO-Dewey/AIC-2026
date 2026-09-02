@@ -26,6 +26,8 @@ from aic2026.common.manifest import (  # noqa: E402
 )
 from aic2026.contracts import FrameRef  # noqa: E402
 from aic2026.scene_embedding import (  # noqa: E402
+    Beit3Encoder,
+    MetaClipEncoder,
     SiglipEncoder,
     embed_frames,
     matrix_path_for,
@@ -41,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-manifest", type=Path, required=True, help="Path to frame manifest JSONL")
     parser.add_argument("--data-root", type=Path, required=True, help="Root directory containing keyframe images")
     parser.add_argument("--output", type=Path, required=True, help="Output JSONL index path")
+    parser.add_argument(
+        "--model-family",
+        default="siglip2",
+        choices=["siglip2", "metaclip2", "beit3"],
+        help="Visual embedding model family (default: siglip2)",
+    )
+    parser.add_argument("--model-id", help="Override default model ID or checkpoint URL")
+    parser.add_argument("--checkpoint-dir", type=Path, help="Directory to cache checkpoints")
     parser.add_argument("--config", type=Path, help="Path to YAML configuration")
     parser.add_argument("--device", default="auto", help="Execution device (auto, cuda, cpu)")
     parser.add_argument("--batch-size", type=int, default=32, help="Inference batch size")
@@ -61,10 +71,26 @@ def main(argv: list[str] | None = None) -> int:
     config = read_config(args.config)
     seed = int(config.get("seed", 2026))
     device = resolve_device(args.device, config)
-    run_id = str(config.get("run", {}).get("run_id", "scene-embedding-v1"))
-    model_id = str(config.get("siglip_model_id", "google/siglip2-base-patch16-224"))
-    revision = str(config.get("siglip_revision", "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"))
-    compute_dtype = str(config.get("compute_dtype", "float32"))
+    model_family = args.model_family.lower()
+    run_id = str(config.get("run", {}).get("run_id", f"{model_family}-embedding-v1"))
+
+    if model_family == "metaclip2":
+        model_id = str(args.model_id or config.get("metaclip2_model_id", "facebook/metaclip-2-worldwide-huge-quickgelu"))
+        revision = None
+    elif model_family == "beit3":
+        model_id = str(
+            args.model_id
+            or config.get(
+                "beit3_checkpoint_url",
+                "https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth",
+            )
+        )
+        revision = None
+    else:
+        model_id = str(args.model_id or config.get("siglip_model_id", "google/siglip2-base-patch16-224"))
+        revision = str(config.get("siglip_revision", "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"))
+
+    compute_dtype = str(config.get("compute_dtype", "float16"))
     matrix_dtype = str(config.get("matrix_dtype", "float16"))
     batch_size = int(args.batch_size or config.get("batch_size", 32))
 
@@ -74,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": config.get("schema_version", "1.0"),
         "video_id": video_id,
         "device": device,
+        "model_family": model_family,
         "model_id": model_id,
         "revision": revision,
         "compute_dtype": compute_dtype,
@@ -85,11 +112,11 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = create_manifest(
         run_id=run_id,
-        stage="scene_embeddings",
+        stage=f"scene_embeddings_{model_family}",
         config=resolved_config,
         seed=seed,
         input_paths=[("frame_manifest", manifest_path)],
-        models=[{"model_id": model_id, "revision": revision, "license": "Apache-2.0"}],
+        models=[{"model_id": model_id, "revision": revision or "main", "license": "Open"}],
         repo_root=REPO_ROOT,
     )
     manifest, complete = prepare_resume(
@@ -105,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "status": "already_complete",
                     "video_id": video_id,
+                    "model_family": model_family,
                     "frames": len(records),
                     "index": str(output_index),
                     "matrix": str(matrix_path),
@@ -122,14 +150,28 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
     )
 
-    # 2. Load SigLIP2 Model
-    print(f"[siglip2] Loading {model_id} on {device} ...", file=sys.stderr, flush=True)
-    encoder = SiglipEncoder.from_pretrained(
-        model_id=model_id,
-        revision=revision,
-        device=device,
-        compute_dtype=compute_dtype,
-    )
+    # 2. Load Model Encoder
+    print(f"[{model_family}] Loading {model_id} on {device} ...", file=sys.stderr, flush=True)
+    if model_family == "metaclip2":
+        encoder = MetaClipEncoder.from_pretrained(
+            model_id=model_id,
+            device=device,
+            compute_dtype=compute_dtype,
+        )
+    elif model_family == "beit3":
+        encoder = Beit3Encoder.from_pretrained(
+            checkpoint_url=model_id,
+            checkpoint_dir=args.checkpoint_dir,
+            device=device,
+            compute_dtype=compute_dtype,
+        )
+    else:
+        encoder = SiglipEncoder.from_pretrained(
+            model_id=model_id,
+            revision=revision or "main",
+            device=device,
+            compute_dtype=compute_dtype,
+        )
 
     # 3. Batch Embed Keyframes
     start_time = time.time()

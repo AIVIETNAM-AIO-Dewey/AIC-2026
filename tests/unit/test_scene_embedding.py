@@ -93,3 +93,27 @@ def test_embed_frames_with_mock_backend(tmp_path: Path) -> None:
         expected_run_id="test-run",
     )
     assert summary["frames"] == 1
+
+
+def test_run_scene_embeddings_parser_options():
+    from scripts.run_scene_embeddings import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "--video-id", "L21_V001",
+        "--frame-manifest", "manifest.jsonl",
+        "--data-root", "/data",
+        "--output", "output.jsonl",
+        "--model-family", "metaclip2",
+    ])
+    assert args.model_family == "metaclip2"
+
+    args_beit = parser.parse_args([
+        "--video-id", "L21_V001",
+        "--frame-manifest", "manifest.jsonl",
+        "--data-root", "/data",
+        "--output", "output.jsonl",
+        "--model-family", "beit3",
+    ])
+    assert args_beit.model_family == "beit3"
+
