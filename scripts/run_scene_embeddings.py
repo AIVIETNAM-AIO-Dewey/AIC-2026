@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = create_manifest(
         run_id=run_id,
-        stage=f"scene_embeddings_{model_family}",
+        stage="scene_embeddings",
         config=resolved_config,
         seed=seed,
         input_paths=[("frame_manifest", manifest_path)],

@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rclone-dest", help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/dam_descriptions/)")
     parser.add_argument("--master-video-list", type=Path, default=REPO_ROOT / "configs/master_video_list.txt")
     parser.add_argument("--limit", type=int, help="Optional frame limit per video for smoke testing")
+    parser.add_argument("--max-videos", type=int, help="Optional maximum number of videos to process for quick smoke testing")
     parser.add_argument("--dry-run", action="store_true", help="Validate assignments and input paths without running models")
     parser.add_argument("--no-resume", action="store_true", help="Force re-running already completed videos")
     return parser
@@ -444,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     # 1. Load Master Video List and Partition
     all_videos = load_master_video_list(args.master_video_list, args.objects_root)
     assigned_videos = all_videos[args.worker_id::args.num_workers]
+    if args.max_videos and args.max_videos > 0:
+        assigned_videos = assigned_videos[:args.max_videos]
 
     print("=" * 80)
     print(f" 🛰️  KAGGLE DAM DISTRIBUTED WORKER INITIALIZATION")
@@ -744,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--engine", args.asr_engine,
                     "--model-id", args.asr_model_id,
                     "--compute-type", args.asr_compute_type,
+                    "--no-rclone",
                 ]
                 map_csv_candidate = output_root / "map-keyframes" / f"{video_id}.csv"
                 if not map_csv_candidate.is_file():

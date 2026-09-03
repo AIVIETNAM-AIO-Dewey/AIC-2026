@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rclone-dest",
         help="Remote rclone destination (e.g. gdrive:AIC_HCM/artifacts/asr_transcripts/).",
     )
+    parser.add_argument(
+        "--no-rclone",
+        action="store_true",
+        help="Disable automatic rclone upload after processing.",
+    )
     return parser
 
 
@@ -151,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     video_dir = args.video_dir or (data_root / "videos")
     map_csv_dir = args.map_csv_dir or (data_root / "map-keyframes")
 
-    rclone_dest = args.rclone_dest or config.get("rclone_dest")
+    rclone_dest = None if args.no_rclone else (args.rclone_dest or config.get("rclone_dest"))
 
     window_size_s = float(config.get("window_size_s", 15.0))
     stride_s = float(config.get("stride_s", 7.5))
