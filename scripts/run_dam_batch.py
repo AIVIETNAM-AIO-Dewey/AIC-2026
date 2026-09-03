@@ -324,14 +324,15 @@ def find_rclone_config() -> str | None:
 
 def rclone_sync_file(local_path: Path, rclone_dest: str, max_retries: int = 10) -> bool:
     """Sync a single file to rclone remote with 10-attempt exponential backoff retries and jitter."""
-    if not local_path.is_file():
-        logger.error("  [RCLONE] Source file does not exist: %s", local_path)
+    real_path = local_path.resolve()
+    if not real_path.is_file():
+        logger.error("  [RCLONE] Source file does not exist: %s (resolved: %s)", local_path, real_path)
         return False
 
     dest_url = rclone_dest if rclone_dest.endswith("/") else rclone_dest + "/"
     config_path = find_rclone_config()
 
-    base_cmd = ["rclone", "copyto", str(local_path), dest_url + local_path.name]
+    base_cmd = ["rclone", "copyto", str(real_path), dest_url + local_path.name, "--copy-links"]
     if config_path:
         base_cmd.extend(["--config", config_path])
     base_cmd.extend([
@@ -900,13 +901,13 @@ def main(argv: list[str] | None = None) -> int:
 
                 # 4. Sync Visual Scene Embeddings
                 # 4.1 SigLIP2
-                safetensors_mat = output_root / "scene_embeddings" / f"{video_id}.safetensors"
-                if safetensors_mat.is_file():
-                    rclone_sync_file(safetensors_mat, f"{rclone_base}/scene_embeddings/")
-                    rclone_sync_file(safetensors_mat, f"{rclone_base}/scene_embeddings/siglip2/")
-                if emb_artifact.is_file():
-                    rclone_sync_file(emb_artifact, f"{rclone_base}/scene_embeddings/")
-                    rclone_sync_file(emb_artifact, f"{rclone_base}/scene_embeddings/siglip2/")
+                siglip2_mat = siglip2_artifact.with_suffix(".safetensors")
+                if siglip2_mat.is_file():
+                    rclone_sync_file(siglip2_mat, f"{rclone_base}/scene_embeddings/")
+                    rclone_sync_file(siglip2_mat, f"{rclone_base}/scene_embeddings/siglip2/")
+                if siglip2_artifact.is_file():
+                    rclone_sync_file(siglip2_artifact, f"{rclone_base}/scene_embeddings/")
+                    rclone_sync_file(siglip2_artifact, f"{rclone_base}/scene_embeddings/siglip2/")
 
                 # 4.2 MetaCLIP2
                 metaclip_mat = output_root / "scene_embeddings" / "metaclip2" / f"{video_id}.safetensors"
