@@ -1,0 +1,182 @@
+name: aic-2026-local
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    container_name: aic-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+
+  qdrant-ingest:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile
+    depends_on:
+      - qdrant
+    volumes:
+      - ./data:/data:ro
+      - search-state:/state
+    command:
+      - --url
+      - http://qdrant:6333
+      - --grpc-host
+      - qdrant
+      - --data-root
+      - /data
+      - --state-root
+      - /state
+
+  branch1-model-setup:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.branch1-setup
+    environment:
+      AIC_BRANCH1_MODEL_ROOT: /models/branch1
+    volumes:
+      - search-model-cache:/models
+
+  query-model-setup:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.query-model-setup
+    volumes:
+      - search-model-cache:/models
+
+  ui-mock:
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.ui-mock
+    container_name: aic-ui-mock
+    ports:
+      - "127.0.0.1:5173:5173"
+    restart: unless-stopped
+
+  search-api:
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.cpu-api
+    container_name: aic-search-cpu
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      AIC_DATA_ROOT: /data
+      AIC_STATE_ROOT: /state
+      AIC_CPU_THREADS: "8"
+      AIC_BRANCH1_MODEL_ROOT: /models/branch1
+      AIC_QUERY_MODEL_MANIFEST: /models/query_models.json
+      HF_HOME: /models/huggingface
+      TOKENIZERS_PARALLELISM: "false"
+      # Bootstrap runs may use the non-empty sentinel. It can never qualify
+      # production because resource_qualification requires a matching SHA-256
+      # runtime_fingerprint.json as well.
+      AIC_COMPOSE_FINGERPRINT: "${AIC_COMPOSE_FINGERPRINT:-unqualified}"
+    ports:
+      - "127.0.0.1:8890:8890"
+    volumes:
+      - ./data:/data:ro
+      - search-model-cache:/models
+      - search-state:/state
+    restart: unless-stopped
+
+  branch2-prepare:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.cpu-api
+    environment:
+      AIC_DATA_ROOT: /data
+      AIC_STATE_ROOT: /state
+      AIC_QUERY_MODEL_MANIFEST: /models/query_models.json
+    volumes:
+      - ./data:/data:ro
+      - search-state:/state
+      - search-model-cache:/models:ro
+    command:
+      - python
+      - scripts/qdrant/prepare_branch2.py
+      - --data-root
+      - /data
+      - --state-root
+      - /state
+
+  branch1-prepare:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.cpu-api
+    environment:
+      AIC_DATA_ROOT: /data
+      AIC_STATE_ROOT: /state
+      AIC_BRANCH1_MODEL_ROOT: /models/branch1
+      AIC_QUERY_MODEL_MANIFEST: /models/query_models.json
+    volumes:
+      - ./data:/data:ro
+      - search-state:/state
+      - search-model-cache:/models:ro
+    command:
+      - python
+      - scripts/qdrant/prepare_branch1.py
+      - --data-root
+      - /data
+      - --state-root
+      - /state
+      - --model-root
+      - /models/branch1
+      - --query-manifest
+      - /models/query_models.json
+
+  text-index-prepare:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.cpu-api
+    environment:
+      AIC_DATA_ROOT: /data
+      AIC_STATE_ROOT: /state
+    volumes:
+      - ./data:/data:ro
+      - search-state:/state
+    command:
+      - python
+      - scripts/qdrant/prepare_text_indexes.py
+      - --data-root
+      - /data
+      - --state-root
+      - /state
+
+  asr-index-prepare:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/qdrant/Dockerfile.cpu-api
+    environment:
+      AIC_DATA_ROOT: /data
+      AIC_STATE_ROOT: /state
+    volumes:
+      - ./data:/data:ro
+      - search-state:/state
+    command:
+      - python
+      - scripts/qdrant/prepare_asr_index.py
+      - --data-root
+      - /data
+      - --state-root
+      - /state
+
+volumes:
+  qdrant-storage:
+    name: aic-2026-qdrant-storage
+  search-model-cache:
+    name: aic-2026-search-model-cache
+  search-state:
+    name: aic-2026-search-state

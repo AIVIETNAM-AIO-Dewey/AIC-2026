@@ -32,13 +32,12 @@
       <div class="parser-selector" aria-label="Query parser settings">
         <label for="select-parser-engine">Parser</label>
         <select id="select-parser-engine">
-          <option value="gemini" selected>Gemini</option>
-          <option value="qwen">Qwen</option>
+          <option value="local" selected>CPU Local</option>
           <option value="direct">Direct · no LLM</option>
         </select>
-        <label class="parser-fallback-control" title="When disabled, Gemini errors must not invoke local Qwen">
-          <input id="chk-qwen-fallback" type="checkbox" checked>
-          <span>Qwen fallback</span>
+        <label class="parser-fallback-control" title="All query processing stays on this machine">
+          <input id="chk-external-fallback" type="checkbox" disabled>
+          <span>No external LLM</span>
         </label>
       </div>
 
@@ -50,7 +49,12 @@
   </header>
 
   <nav class="workspace-tabs" aria-label="Retrieval workspaces">
+    <button class="workspace-tab" type="button" data-workspace="kis_fusion" aria-selected="false" aria-controls="workspace-kis-fusion">KIS Fusion</button>
+    <button class="workspace-tab" type="button" data-workspace="branch2" aria-selected="false" aria-controls="workspace-branch2">Branch 2 - DAM Hybrid</button>
+    <button class="workspace-tab" type="button" data-workspace="branch3_asr" aria-selected="false" aria-controls="workspace-branch3-asr">Branch 3 · ASR</button>
+    <button class="workspace-tab" type="button" data-workspace="branch3_ocr" aria-selected="false" aria-controls="workspace-branch3-ocr">Branch 3 · OCR</button>
     <button class="workspace-tab active" type="button" data-workspace="text" aria-selected="true" aria-controls="workspace-text">⌨ Text Search</button>
+    <button class="workspace-tab" type="button" data-workspace="branch1" aria-selected="false" aria-controls="workspace-branch1">Branch 1 · 3 Models</button>
     <button class="workspace-tab" type="button" data-workspace="image" aria-selected="false" aria-controls="workspace-image">🖼 Image Search</button>
     <button class="workspace-tab" type="button" data-workspace="video" aria-selected="false" aria-controls="workspace-video">▶ Watch Video</button>
     <button id="btn-toggle-submission-rail" class="btn-toggle-submission-rail" type="button" aria-expanded="true" aria-controls="submission-rail">Submission <span id="submission-tab-count">0</span></button>
@@ -263,6 +267,235 @@
     </section>
     </div>
 
+    <section id="workspace-branch1" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch1" aria-labelledby="branch1-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">30 COSINE STREAMS · MAX PER MODEL · Z-SIGMOID FUSION</div>
+          <h1 id="branch1-workspace-title">Three-model visual retrieval</h1>
+          <p>Paste exactly six bilingual query variants. SigLIP2 and MetaCLIP2 read both VI and EN; BEiT-3 reads EN. No LLM API and no reranker are called.</p>
+        </div>
+        <span id="branch1-health-badge" class="nofusion-badge">CHECKING DATA GATE</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header">
+            <label for="branch1-json-editor">BRANCH-1 QUERY BUNDLE</label>
+            <button id="btn-format-branch1-json" class="btn-text" type="button">Format</button>
+          </div>
+          <textarea id="branch1-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch1-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Model-level fusion</h2>
+          <label for="branch1-weight-siglip">SigLIP2 <output id="branch1-weight-siglip-value">0.45</output></label>
+          <input id="branch1-weight-siglip" type="range" min="0" max="1" step="0.05" value="0.45">
+          <label for="branch1-weight-metaclip">MetaCLIP2 <output id="branch1-weight-metaclip-value">0.30</output></label>
+          <input id="branch1-weight-metaclip" type="range" min="0" max="1" step="0.05" value="0.30">
+          <label for="branch1-weight-beit">BEiT-3 <output id="branch1-weight-beit-value">0.25</output></label>
+          <input id="branch1-weight-beit" type="range" min="0" max="1" step="0.05" value="0.25">
+          <div id="branch1-normalized-weights" class="branch1-normalized-weights">Normalized: 45% / 30% / 25%</div>
+          <div class="branch1-fixed-setting">API pool: 1,500 · per stream: 2,000 · one heavy search at a time</div>
+          <button id="btn-run-branch1" class="btn-primary" type="button" disabled>Run Branch 1</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group">
+          <span class="results-heading">BRANCH-1 FUSED RESULTS</span>
+          <span id="branch1-results-count" class="count-badge">Not run</span>
+        </div>
+        <span id="branch1-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch1-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">3×6</div><div class="empty-title">Strict three-model search</div><div class="empty-desc">Search remains disabled until every data, collection, and encoder gate is ready.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-branch2" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch2" aria-labelledby="branch2-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">DAM DENSE + BM25 SPARSE - BEiT-3 COCO COSINE RERANK</div>
+          <h1 id="branch2-workspace-title">DAM hybrid + BEiT-3 COCO cosine rerank</h1>
+          <p>Six English query variants search DAM regions with BGE-M3 and local BM25. Only the top 100 of 500 hybrid frames are reranked by BEiT-3 cosine.</p>
+        </div>
+        <span id="branch2-health-badge" class="nofusion-badge">CHECKING DATA GATE</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch2-json-editor">BRANCH-2 QUERY BUNDLE</label><button id="btn-format-branch2-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch2-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch2-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Hybrid and rerank weights</h2>
+          <label for="branch2-weight-dense">Dense <output id="branch2-weight-dense-value">0.70</output></label>
+          <input id="branch2-weight-dense" type="range" min="0" max="1" step="0.05" value="0.70">
+          <label for="branch2-weight-sparse">Sparse <output id="branch2-weight-sparse-value">0.30</output></label>
+          <input id="branch2-weight-sparse" type="range" min="0" max="1" step="0.05" value="0.30">
+          <label for="branch2-weight-beit">BEiT-3 COCO cosine <output id="branch2-weight-beit-value">0.40</output></label>
+          <input id="branch2-weight-beit" type="range" min="0" max="1" step="0.05" value="0.40">
+          <label for="branch2-weight-previous">Hybrid <output id="branch2-weight-previous-value">0.60</output></label>
+          <input id="branch2-weight-previous" type="range" min="0" max="1" step="0.05" value="0.60">
+          <div id="branch2-normalized-weights" class="branch1-normalized-weights">Hybrid 70% / 30% - Rerank 40% BEiT-3 / 60% Hybrid</div>
+          <div class="branch1-fixed-setting">API pool: 500 · per stream: 2,000 · BEiT-3 COCO cosine rerank top 100</div>
+          <button id="btn-run-branch2" class="btn-primary" type="button" disabled>Run Branch 2</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header"><div class="results-title-group"><span class="results-heading">BRANCH-2 HYBRID RESULTS</span><span id="branch2-results-count" class="count-badge">Not run</span></div><span id="branch2-timing" class="meta-badge">Ready</span></div>
+      <div id="branch2-results-grid" class="results-grid feature-results-grid"><div class="empty-placeholder"><div class="empty-icon">DAM</div><div class="empty-title">Dense + sparse search</div><div class="empty-desc">Search remains disabled until DAM, BM25, BGE-M3, and BEiT-3 COCO cosine gates are ready.</div></div></div>
+    </section>
+
+    <section id="workspace-branch3-asr" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch3_asr" aria-labelledby="branch3-asr-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">12 VI/EN FTS5 STREAMS · BM25 + TOKEN/NGRAM COVERAGE · TOP 500</div>
+          <h1 id="branch3-asr-workspace-title">ASR speech retrieval</h1>
+          <p>Six bilingual query variants search the prepared ASR transcript index. Each segment maps to its nearest canonical keyframe; OCR and final RRF remain independent for now.</p>
+        </div>
+        <span id="branch3-asr-health-badge" class="nofusion-badge">CHECKING ASR INDEX</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch3-asr-json-editor">BRANCH-3 ASR QUERY BUNDLE</label><button id="btn-format-branch3-asr-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch3-asr-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch3-asr-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>ASR retrieval</h2>
+          <div class="branch1-fixed-setting">BM25 55% · token 30% · adjacent n-gram 15%</div>
+          <div class="branch1-fixed-setting">12 streams × 2,000 · max bilingual segment/frame score · API pool: 500</div>
+          <button id="btn-run-branch3-asr" class="btn-primary" type="button" disabled>Run ASR</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span class="results-heading">BRANCH-3 ASR RESULTS</span><span id="branch3-asr-results-count" class="count-badge">Not run</span></div>
+        <span id="branch3-asr-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch3-asr-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">ASR</div><div class="empty-title">Speech retrieval ready</div><div class="empty-desc">Search remains disabled until the ASR SQLite index and canonical frame mapping are prepared.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-branch3-ocr" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch3_ocr" aria-labelledby="branch3-ocr-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">12 VI/EN FTS5 STREAMS · BM25 + TOKEN/NGRAM COVERAGE · TOP 500</div>
+          <h1 id="branch3-ocr-workspace-title">OCR text retrieval</h1>
+          <p>Six bilingual query variants search the prepared OCR frame index independently from ASR. OCR results are capped at 500 for future fusion; only the first 150 are displayed here.</p>
+        </div>
+        <span id="branch3-ocr-health-badge" class="nofusion-badge">CHECKING OCR INDEX</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch3-ocr-json-editor">BRANCH-3 OCR QUERY BUNDLE</label><button id="btn-format-branch3-ocr-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch3-ocr-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch3-ocr-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>OCR retrieval</h2>
+          <div class="branch1-fixed-setting">BM25 55% · token 30% · adjacent n-gram 15%</div>
+          <div class="branch1-fixed-setting">12 streams × 2,000 · max bilingual frame score · API pool: 500</div>
+          <button id="btn-run-branch3-ocr" class="btn-primary" type="button" disabled>Run OCR</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span class="results-heading">BRANCH-3 OCR RESULTS</span><span id="branch3-ocr-results-count" class="count-badge">Not run</span></div>
+        <span id="branch3-ocr-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch3-ocr-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">OCR</div><div class="empty-title">OCR retrieval ready</div><div class="empty-desc">Search remains disabled until the OCR SQLite index is prepared.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-kis-fusion" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="kis_fusion" aria-labelledby="kis-fusion-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">WEIGHTED RRF k=60 Â· FOUR BRANCH POOLS Â· FINAL TOP 150</div>
+          <h1 id="kis-fusion-workspace-title">KIS cross-branch fusion</h1>
+          <p>Branch 1 (1,500), Branch 2 (500), ASR (500) and OCR (500) are fused by rank. BEiT-3 COCO cosine reranks only the first 100; frames 101-150 keep their RRF order.</p>
+        </div>
+        <span id="kis-fusion-health-badge" class="nofusion-badge">CHECKING FUSION HEALTH</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="kis-fusion-json-editor">KIS QUERY BUNDLE</label><button id="btn-format-kis-fusion-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="kis-fusion-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="kis-fusion-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Fusion weights</h2>
+          <label for="kis-fusion-weight-branch1">Branch 1 <output id="kis-fusion-weight-branch1-value">0.40</output></label>
+          <input id="kis-fusion-weight-branch1" type="range" min="0.01" max="1" step="0.01" value="0.40">
+          <label for="kis-fusion-weight-branch2">Branch 2 <output id="kis-fusion-weight-branch2-value">0.30</output></label>
+          <input id="kis-fusion-weight-branch2" type="range" min="0.01" max="1" step="0.01" value="0.30">
+          <label for="kis-fusion-weight-ocr">OCR <output id="kis-fusion-weight-ocr-value">0.15</output></label>
+          <input id="kis-fusion-weight-ocr" type="range" min="0.01" max="1" step="0.01" value="0.15">
+          <label for="kis-fusion-weight-asr">ASR <output id="kis-fusion-weight-asr-value">0.15</output></label>
+          <input id="kis-fusion-weight-asr" type="range" min="0.01" max="1" step="0.01" value="0.15">
+          <div id="kis-fusion-normalized-weights" class="branch1-normalized-weights">Normalized: 40% / 30% / 15% / 15%</div>
+          <div class="branch1-fixed-setting">RRF k=60 Â· final pool: 150 Â· BEiT-3 COCO cosine rerank top 100</div>
+          <div class="branch1-fixed-setting">Final score: 25% BEiT-3 + 75% RRF</div>
+          <button id="btn-run-kis-fusion" class="btn-primary" type="button" disabled>Run KIS fusion</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span class="results-heading">KIS FINAL RESULTS</span><span id="kis-fusion-results-count" class="count-badge">Not run</span></div>
+        <span id="kis-fusion-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="kis-fusion-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">RRF</div><div class="empty-title">KIS fusion ready</div><div class="empty-desc">Search is enabled when Branch 1, Branch 2, ASR and OCR health gates are all ready.</div></div>
+      </div>
+    </section>
+
     <section id="workspace-image" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="image" aria-labelledby="image-workspace-title">
       <div class="feature-panel-header">
         <div>
@@ -474,8 +707,7 @@
                 <input id="inspector-video-query" type="text" placeholder="Describe another moment in this video…">
                 <select id="inspector-parser-engine" aria-label="Inside-video parser">
                   <option value="direct" selected>Direct SigLIP</option>
-                  <option value="gemini">Gemini</option>
-                  <option value="qwen">Qwen</option>
+                  <option value="local">CPU Local</option>
                 </select>
                 <button id="btn-inspector-video-search" type="button">Search</button>
               </div>
@@ -515,6 +747,12 @@
           <div class="meta-detail-box">
             <div class="detail-box-title">🎙️ SPOKEN SPEECH (ASR)</div>
             <div class="detail-box-content" id="insp-asr-text">(No dialogue recorded in this keyframe)</div>
+          </div>
+
+          <div class="meta-detail-box">
+            <div class="detail-box-title">ASR RETRIEVAL EVIDENCE</div>
+            <div class="detail-box-content" id="insp-asr-evidence">(No ASR ranking evidence)</div>
+            <div class="detail-box-content" id="insp-asr-context">(No macro audio context)</div>
           </div>
 
           <!-- DAM Visual Description -->

@@ -1,6 +1,7 @@
 /**
  * AIC-2026 Multimodal Retrieval Studio — Frontend Logic
- * KIS-only no-fusion retrieval UI.
+ * KIS retrieval workbench with independent branch diagnostics and an optional
+ * final cross-branch fusion workspace.
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -17,15 +18,28 @@ import {
   submissionSchemaDefaults,
 } from "./src/submission-workbench.js";
 import { estimateRawFrame, nearestKeyframe } from "./src/time-keyframe-map.js";
+import {
+  branchPoolCountLabel,
+  formatOcrEvidence,
+  formatKisFusionEvidence,
+  formatKisFusionCardEvidence,
+  renderVisibleResultPool,
+  resolveWinningOcrText,
+} from "./src/result-gates.js";
 
 const state = {
   taskType: "KIS",
   queryMode: "auto", // "auto", "edit", "direct"
-  parserEngine: "gemini",
-  allowQwenFallback: true,
+  parserEngine: "local",
   activeWorkspace: "text",
+  capabilities: {},
   submissionContexts: {
     text: "text:empty",
+    branch1: "branch1:empty",
+    branch2: "branch2:empty",
+    branch3_asr: "branch3_asr:empty",
+    branch3_ocr: "branch3_ocr:empty",
+    kis_fusion: "kis_fusion:empty",
     image: "image:empty",
     video: "video:empty",
   },
@@ -45,6 +59,21 @@ const state = {
   imageQueryFile: null,
   imageQueryObjectUrl: null,
   imageResults: [],
+  branch1Ready: false,
+  branch1Results: [],
+  branch1Response: null,
+  branch2Ready: false,
+  branch2Results: [],
+  branch2Response: null,
+  branch3AsrReady: false,
+  branch3AsrResults: [],
+  branch3AsrResponse: null,
+  branch3OcrReady: false,
+  branch3OcrResults: [],
+  branch3OcrResponse: null,
+  kisFusionReady: false,
+  kisFusionResults: [],
+  kisFusionResponse: null,
   inspectorLocalResults: [],
   exportBackfillByContext: {},
   watch: {
@@ -91,6 +120,11 @@ let standaloneScopedAbortController = null;
 let standaloneScopedRequestId = 0;
 let inspectorScopedAbortController = null;
 let inspectorScopedRequestId = 0;
+let branch1AbortController = null;
+let branch2AbortController = null;
+let branch3AsrAbortController = null;
+let branch3OcrAbortController = null;
+let kisFusionAbortController = null;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // DOM Elements
@@ -98,7 +132,7 @@ let inspectorScopedRequestId = 0;
 const el = {
   taskBtns: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".task-btn")),
   parserEngine: /** @type {HTMLSelectElement} */ (document.getElementById("select-parser-engine")),
-  qwenFallback: /** @type {HTMLInputElement} */ (document.getElementById("chk-qwen-fallback")),
+  externalFallback: /** @type {HTMLInputElement} */ (document.getElementById("chk-external-fallback")),
   workspaceTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".workspace-tab")),
   workspacePanels: /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("[data-workspace-panel]")),
   btnToggleSubmissionRail: document.getElementById("btn-toggle-submission-rail"),
@@ -124,6 +158,71 @@ const el = {
   resultsGrid: document.getElementById("results-grid"),
   resultsCount: document.getElementById("results-count-badge"),
   selectTopK: /** @type {HTMLSelectElement} */ (document.getElementById("select-top-k")),
+  branch1JsonEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("branch1-json-editor")),
+  btnFormatBranch1Json: /** @type {HTMLButtonElement} */ (document.getElementById("btn-format-branch1-json")),
+  btnRunBranch1: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-branch1")),
+  branch1HealthBadge: document.getElementById("branch1-health-badge"),
+  branch1Validation: document.getElementById("branch1-validation"),
+  branch1WeightSiglip: /** @type {HTMLInputElement} */ (document.getElementById("branch1-weight-siglip")),
+  branch1WeightMetaclip: /** @type {HTMLInputElement} */ (document.getElementById("branch1-weight-metaclip")),
+  branch1WeightBeit: /** @type {HTMLInputElement} */ (document.getElementById("branch1-weight-beit")),
+  branch1WeightSiglipValue: document.getElementById("branch1-weight-siglip-value"),
+  branch1WeightMetaclipValue: document.getElementById("branch1-weight-metaclip-value"),
+  branch1WeightBeitValue: document.getElementById("branch1-weight-beit-value"),
+  branch1NormalizedWeights: document.getElementById("branch1-normalized-weights"),
+  branch1ResultsCount: document.getElementById("branch1-results-count"),
+  branch1Timing: document.getElementById("branch1-timing"),
+  branch1ResultsGrid: document.getElementById("branch1-results-grid"),
+  branch2JsonEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("branch2-json-editor")),
+  btnFormatBranch2Json: document.getElementById("btn-format-branch2-json"),
+  btnRunBranch2: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-branch2")),
+  branch2HealthBadge: document.getElementById("branch2-health-badge"),
+  branch2Validation: document.getElementById("branch2-validation"),
+  branch2WeightDense: /** @type {HTMLInputElement} */ (document.getElementById("branch2-weight-dense")),
+  branch2WeightSparse: /** @type {HTMLInputElement} */ (document.getElementById("branch2-weight-sparse")),
+  branch2WeightBeit: /** @type {HTMLInputElement} */ (document.getElementById("branch2-weight-beit")),
+  branch2WeightPrevious: /** @type {HTMLInputElement} */ (document.getElementById("branch2-weight-previous")),
+  branch2WeightDenseValue: document.getElementById("branch2-weight-dense-value"),
+  branch2WeightSparseValue: document.getElementById("branch2-weight-sparse-value"),
+  branch2WeightBeitValue: document.getElementById("branch2-weight-beit-value"),
+  branch2WeightPreviousValue: document.getElementById("branch2-weight-previous-value"),
+  branch2NormalizedWeights: document.getElementById("branch2-normalized-weights"),
+  branch2ResultsCount: document.getElementById("branch2-results-count"),
+  branch2Timing: document.getElementById("branch2-timing"),
+  branch2ResultsGrid: document.getElementById("branch2-results-grid"),
+  branch3AsrJsonEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("branch3-asr-json-editor")),
+  btnFormatBranch3AsrJson: document.getElementById("btn-format-branch3-asr-json"),
+  btnRunBranch3Asr: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-branch3-asr")),
+  branch3AsrHealthBadge: document.getElementById("branch3-asr-health-badge"),
+  branch3AsrValidation: document.getElementById("branch3-asr-validation"),
+  branch3AsrResultsCount: document.getElementById("branch3-asr-results-count"),
+  branch3AsrTiming: document.getElementById("branch3-asr-timing"),
+  branch3AsrResultsGrid: document.getElementById("branch3-asr-results-grid"),
+  branch3OcrJsonEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("branch3-ocr-json-editor")),
+  btnFormatBranch3OcrJson: document.getElementById("btn-format-branch3-ocr-json"),
+  btnRunBranch3Ocr: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-branch3-ocr")),
+  branch3OcrHealthBadge: document.getElementById("branch3-ocr-health-badge"),
+  branch3OcrValidation: document.getElementById("branch3-ocr-validation"),
+  branch3OcrResultsCount: document.getElementById("branch3-ocr-results-count"),
+  branch3OcrTiming: document.getElementById("branch3-ocr-timing"),
+  branch3OcrResultsGrid: document.getElementById("branch3-ocr-results-grid"),
+  kisFusionJsonEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("kis-fusion-json-editor")),
+  btnFormatKisFusionJson: document.getElementById("btn-format-kis-fusion-json"),
+  btnRunKisFusion: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-kis-fusion")),
+  kisFusionHealthBadge: document.getElementById("kis-fusion-health-badge"),
+  kisFusionValidation: document.getElementById("kis-fusion-validation"),
+  kisFusionWeightBranch1: /** @type {HTMLInputElement} */ (document.getElementById("kis-fusion-weight-branch1")),
+  kisFusionWeightBranch2: /** @type {HTMLInputElement} */ (document.getElementById("kis-fusion-weight-branch2")),
+  kisFusionWeightOcr: /** @type {HTMLInputElement} */ (document.getElementById("kis-fusion-weight-ocr")),
+  kisFusionWeightAsr: /** @type {HTMLInputElement} */ (document.getElementById("kis-fusion-weight-asr")),
+  kisFusionWeightBranch1Value: document.getElementById("kis-fusion-weight-branch1-value"),
+  kisFusionWeightBranch2Value: document.getElementById("kis-fusion-weight-branch2-value"),
+  kisFusionWeightOcrValue: document.getElementById("kis-fusion-weight-ocr-value"),
+  kisFusionWeightAsrValue: document.getElementById("kis-fusion-weight-asr-value"),
+  kisFusionNormalizedWeights: document.getElementById("kis-fusion-normalized-weights"),
+  kisFusionResultsCount: document.getElementById("kis-fusion-results-count"),
+  kisFusionTiming: document.getElementById("kis-fusion-timing"),
+  kisFusionResultsGrid: document.getElementById("kis-fusion-results-grid"),
   btnDiscoveryCascade: /** @type {HTMLButtonElement} */ (document.getElementById("btn-discovery-cascade")),
   btnTemporalIntersection: /** @type {HTMLButtonElement} */ (document.getElementById("btn-temporal-intersection")),
   selectTemporalGap: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-gap")),
@@ -215,6 +314,8 @@ const el = {
   inspVideoSource: document.getElementById("insp-video-source"),
   inspMappingOffset: document.getElementById("insp-mapping-offset"),
   inspAsrText: document.getElementById("insp-asr-text"),
+  inspAsrEvidence: document.getElementById("insp-asr-evidence"),
+  inspAsrContext: document.getElementById("insp-asr-context"),
   inspDamText: document.getElementById("insp-dam-text"),
   inspOcrText: document.getElementById("insp-ocr-text"),
   inspObjectsList: document.getElementById("insp-objects-list"),
@@ -292,6 +393,12 @@ async function initApp() {
   setInspectorMediaMode("keyframe");
   refreshVideoIcons();
   await loadServerConfig();
+  await loadBranch1Health();
+  await loadBranch2Health();
+  await loadBranch3AsrHealth();
+  await loadBranch3OcrHealth();
+  await loadKisFusionHealth();
+  await loadOverallHealth();
   updateQueryModeUI();
   if (typeof ResizeObserver !== "undefined") {
     const resizeObserver = new ResizeObserver(() => {
@@ -301,16 +408,722 @@ async function initApp() {
   }
 }
 
+async function loadOverallHealth() {
+  try {
+    const response = await fetch("/api/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    if (health.status === "ready") {
+      setServerStatus("CPU local / Qdrant ready", "ready");
+    } else if (health.status === "starting") {
+      setServerStatus("Server starting", "pending");
+    } else {
+      const components = health.components || {};
+      const requiredNames = ["api_process", "qdrant", "metadata", "branch1", "branch2"];
+      const requiredUnavailable = requiredNames.some(
+        (name) => components[name]?.ready !== true,
+      );
+      setServerStatus(
+        requiredUnavailable
+          ? "Server degraded · required dependencies unavailable"
+          : "Server degraded · optional indexes unavailable",
+        "pending",
+      );
+    }
+  } catch (error) {
+    setServerStatus("Server health unavailable", "error");
+    console.warn("Could not load /api/health:", error);
+  }
+}
+
 async function loadServerConfig() {
   try {
     const res = await fetch("/api/config");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const cfg = await res.json();
     if (cfg.keyframes_root) state.keyframesRoot = cfg.keyframes_root;
-    setServerStatus("No fusion / no reranking", "ready");
+    state.capabilities = cfg.capabilities || {};
+    const asrTab = /** @type {HTMLButtonElement | null} */ (document.querySelector('[data-modality="asr"]'));
+    if (asrTab && state.capabilities.asr === false) {
+      asrTab.disabled = true;
+      asrTab.title = "ASR artifacts are not installed in the local dataset";
+    }
+    const asrWorkspaceTab = /** @type {HTMLButtonElement | null} */ (document.querySelector('[data-workspace="branch3_asr"]'));
+    if (asrWorkspaceTab && state.capabilities.branch3_asr === false) {
+      asrWorkspaceTab.disabled = true;
+      asrWorkspaceTab.title = "ASR artifacts are not ready in the local dataset";
+    }
+    const ocrWorkspaceTab = /** @type {HTMLButtonElement | null} */ (document.querySelector('[data-workspace="branch3_ocr"]'));
+    if (ocrWorkspaceTab && state.capabilities.branch3_ocr === false) {
+      ocrWorkspaceTab.disabled = true;
+      ocrWorkspaceTab.title = "OCR artifacts are not ready in the local dataset";
+    }
+    const fusionWorkspaceTab = /** @type {HTMLButtonElement | null} */ (document.querySelector('[data-workspace="kis_fusion"]'));
+    if (fusionWorkspaceTab && state.capabilities.kis_fusion === false) {
+      fusionWorkspaceTab.title = "KIS fusion requires all four branch pools to be ready";
+    }
+    // A successful config response only means the API answered.  Readiness is
+    // reported by /api/health and the per-branch health endpoints below.
+    setServerStatus("Capabilities loaded", "pending");
   } catch (err) {
     console.warn("Could not load /api/config:", err);
     setServerStatus("Server configuration unavailable", "error");
+  }
+}
+
+const BRANCH1_ROLES = ["original", "entity", "action", "context", "synonym", "keyword"];
+
+async function loadBranch1Health() {
+  try {
+    const response = await fetch("/api/branch1/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    state.branch1Ready = health.ready === true;
+    el.btnRunBranch1.disabled = !state.branch1Ready;
+    el.branch1HealthBadge.textContent = state.branch1Ready ? "ALL 3 MODELS READY" : "FAIL-CLOSED · NOT READY";
+    el.branch1HealthBadge.title = state.branch1Ready
+      ? "Data gate, three Qdrant vectors, and three text encoders are ready"
+      : "Open /api/branch1/health to inspect the failed gate";
+    validateBranch1Editor();
+  } catch (error) {
+    state.branch1Ready = false;
+    el.btnRunBranch1.disabled = true;
+    el.branch1HealthBadge.textContent = "HEALTH UNAVAILABLE";
+    console.warn("Could not load Branch-1 health:", error);
+  }
+}
+
+async function loadBranch2Health() {
+  try {
+    const response = await fetch("/api/branch2/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    state.branch2Ready = health.ready === true;
+    el.btnRunBranch2.disabled = !state.branch2Ready;
+    el.branch2HealthBadge.textContent = state.branch2Ready ? "DAM + BM25 + BEiT-3 COCO READY" : "FAIL-CLOSED - NOT READY";
+    el.branch2HealthBadge.title = state.branch2Ready ? "DAM collection, local BM25, BGE-M3, and BEiT-3 COCO cosine are ready" : "Open /api/branch2/health to inspect the failed gate";
+    validateBranch2Editor();
+  } catch (error) {
+    state.branch2Ready = false;
+    el.btnRunBranch2.disabled = true;
+    el.branch2HealthBadge.textContent = "HEALTH UNAVAILABLE";
+    console.warn("Could not load Branch-2 health:", error);
+  }
+}
+
+async function loadBranch3AsrHealth() {
+  try {
+    const response = await fetch("/api/branch3/asr/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    state.branch3AsrReady = health.ready === true;
+    el.btnRunBranch3Asr.disabled = !state.branch3AsrReady;
+    el.branch3AsrHealthBadge.textContent = state.branch3AsrReady
+      ? "ASR INDEX READY"
+      : "FAIL-CLOSED · ASR NOT READY";
+    el.branch3AsrHealthBadge.title = state.branch3AsrReady
+      ? "55,168 ASR segments mapped to canonical frames"
+      : "Prepare the ASR SQLite index and inspect /api/branch3/asr/health";
+    validateBranch3AsrEditor();
+  } catch (error) {
+    state.branch3AsrReady = false;
+    el.btnRunBranch3Asr.disabled = true;
+    el.branch3AsrHealthBadge.textContent = "HEALTH UNAVAILABLE";
+    console.warn("Could not load Branch-3 ASR health:", error);
+  }
+}
+
+function parseBranch3AsrBundle() {
+  let value;
+  try { value = JSON.parse(el.branch3AsrJsonEditor.value); } catch (error) { throw new Error(`Invalid JSON: ${error.message}`); }
+  if (value?.schema_version !== "branch1.query.v1") throw new Error("schema_version must be branch1.query.v1");
+  if (!Array.isArray(value.queries) || value.queries.length !== 6) throw new Error("queries must contain exactly six items");
+  const roles = value.queries.map((query) => query?.role);
+  if (new Set(roles).size !== 6 || !BRANCH1_ROLES.every((role) => roles.includes(role))) throw new Error(`Required roles: ${BRANCH1_ROLES.join(", ")}`);
+  value.queries.forEach((query) => {
+    if (typeof query.vi !== "string" || !query.vi.trim()) throw new Error(`${query.role}.vi is required`);
+    if (typeof query.en !== "string" || !query.en.trim()) throw new Error(`${query.role}.en is required`);
+  });
+  return value;
+}
+
+function validateBranch3AsrEditor() {
+  try {
+    parseBranch3AsrBundle();
+    el.branch3AsrValidation.textContent = state.branch3AsrReady
+      ? "Valid six-role bilingual bundle. Ready to search ASR."
+      : "JSON is valid, but the ASR index or canonical mapping is not ready.";
+    el.branch3AsrValidation.classList.toggle("ready", state.branch3AsrReady);
+    el.branch3AsrValidation.classList.toggle("error", !state.branch3AsrReady);
+    el.btnRunBranch3Asr.disabled = !state.branch3AsrReady;
+    return true;
+  } catch (error) {
+    el.branch3AsrValidation.textContent = error.message;
+    el.branch3AsrValidation.classList.remove("ready");
+    el.branch3AsrValidation.classList.add("error");
+    el.btnRunBranch3Asr.disabled = true;
+    return false;
+  }
+}
+
+async function runBranch3AsrSearch() {
+  if (!validateBranch3AsrEditor()) return;
+  const queryBundle = parseBranch3AsrBundle();
+  branch3AsrAbortController?.abort();
+  branch3AsrAbortController = new AbortController();
+  el.btnRunBranch3Asr.disabled = true;
+  el.btnRunBranch3Asr.textContent = "Running ASR...";
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/search/branch3/asr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: branch3AsrAbortController.signal,
+      body: JSON.stringify({ query_bundle: queryBundle, per_stream_top_k: 2000, final_top_k: 500 }),
+    });
+    if (!response.ok) throw await responseError(response, "Branch-3 ASR search failed");
+    const payload = await response.json();
+    // Keep the complete API pool and diagnostics in state. Rendering is
+    // intentionally limited to the first 150 cards, while future fusion and
+    // audit views must still be able to consume the full response.
+    state.branch3AsrResponse = payload;
+    state.branch3AsrResults = (payload.results || []).map((item) => ({
+      ...item,
+      score: item.asr_normalized_score ?? item.score ?? 0,
+      score_type: "asr_bm25_ngram",
+      retrieval_modality: "asr",
+    }));
+    setSubmissionContext("branch3_asr", JSON.stringify(queryBundle));
+    const returnedCount = Number(payload.result_count || state.branch3AsrResults.length || 0);
+    el.branch3AsrResultsCount.textContent = branchPoolCountLabel(payload, returnedCount, 500);
+    el.branch3AsrTiming.textContent = `${Number(payload.timing?.total_ms || (performance.now() - started)).toFixed(0)} ms · ${Object.values(payload.stream_counts || {}).join(" / ")} hits`;
+    el.branch3AsrValidation.textContent = "ASR ranking complete: BM25 55% · token 30% · adjacent n-gram 15%.";
+    el.branch3AsrValidation.classList.remove("error");
+    el.branch3AsrValidation.classList.add("ready");
+    el.branch3AsrResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.branch3AsrResultsGrid,
+      state.branch3AsrResults,
+      (visible, container) => renderStandardCards(visible, container, "asr", ++resultsRenderId),
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.branch3AsrResultsCount.textContent = "Search failed";
+    el.branch3AsrTiming.textContent = `${Math.round(performance.now() - started)} ms`;
+    el.branch3AsrResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Branch-3 ASR failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    el.btnRunBranch3Asr.textContent = "Run ASR";
+    if (state.branch3AsrReady) el.btnRunBranch3Asr.disabled = false;
+  }
+}
+
+function parseBranch3OcrBundle() {
+  let value;
+  try { value = JSON.parse(el.branch3OcrJsonEditor.value); } catch (error) { throw new Error(`Invalid JSON: ${error.message}`); }
+  if (value?.schema_version !== "branch1.query.v1") throw new Error("schema_version must be branch1.query.v1");
+  if (!Array.isArray(value.queries) || value.queries.length !== 6) throw new Error("queries must contain exactly six items");
+  const roles = value.queries.map((query) => query?.role);
+  if (new Set(roles).size !== 6 || !BRANCH1_ROLES.every((role) => roles.includes(role))) throw new Error(`Required roles: ${BRANCH1_ROLES.join(", ")}`);
+  value.queries.forEach((query) => {
+    if (typeof query.vi !== "string" || !query.vi.trim()) throw new Error(`${query.role}.vi is required`);
+    if (typeof query.en !== "string" || !query.en.trim()) throw new Error(`${query.role}.en is required`);
+  });
+  return value;
+}
+
+function validateBranch3OcrEditor() {
+  try {
+    parseBranch3OcrBundle();
+    el.branch3OcrValidation.textContent = state.branch3OcrReady
+      ? "Valid six-role bilingual bundle. Ready to search OCR."
+      : "JSON is valid, but the OCR index is not ready.";
+    el.branch3OcrValidation.classList.toggle("ready", state.branch3OcrReady);
+    el.branch3OcrValidation.classList.toggle("error", !state.branch3OcrReady);
+    el.btnRunBranch3Ocr.disabled = !state.branch3OcrReady;
+    return true;
+  } catch (error) {
+    el.branch3OcrValidation.textContent = error.message;
+    el.branch3OcrValidation.classList.remove("ready");
+    el.branch3OcrValidation.classList.add("error");
+    el.btnRunBranch3Ocr.disabled = true;
+    return false;
+  }
+}
+
+async function loadBranch3OcrHealth() {
+  try {
+    const response = await fetch("/api/branch3/ocr/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    state.branch3OcrReady = health.ready === true;
+    el.btnRunBranch3Ocr.disabled = !state.branch3OcrReady;
+    el.branch3OcrHealthBadge.textContent = state.branch3OcrReady
+      ? "OCR INDEX READY"
+      : "FAIL-CLOSED · OCR NOT READY";
+    el.branch3OcrHealthBadge.title = state.branch3OcrReady
+      ? "OCR frame index is ready for bilingual retrieval"
+      : "Prepare the OCR SQLite index and inspect /api/branch3/ocr/health";
+    validateBranch3OcrEditor();
+  } catch (error) {
+    state.branch3OcrReady = false;
+    el.btnRunBranch3Ocr.disabled = true;
+    el.branch3OcrHealthBadge.textContent = "HEALTH UNAVAILABLE";
+    console.warn("Could not load Branch-3 OCR health:", error);
+  }
+}
+
+async function loadKisFusionHealth() {
+  if (!el.kisFusionHealthBadge) return;
+  try {
+    const response = await fetch("/api/fusion/kis/health");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const health = await response.json();
+    state.kisFusionReady = health.ready === true;
+    el.btnRunKisFusion.disabled = !state.kisFusionReady;
+    el.kisFusionHealthBadge.textContent = state.kisFusionReady
+      ? "ALL POOLS READY"
+      : "FAIL-CLOSED · FUSION NOT READY";
+    el.kisFusionHealthBadge.title = state.kisFusionReady
+      ? "Branch 1, Branch 2, ASR and OCR are ready for weighted RRF"
+      : "All four branch health gates must be ready before KIS fusion can run";
+    validateKisFusionEditor();
+  } catch (error) {
+    state.kisFusionReady = false;
+    el.btnRunKisFusion.disabled = true;
+    el.kisFusionHealthBadge.textContent = "HEALTH UNAVAILABLE";
+    console.warn("Could not load KIS fusion health:", error);
+  }
+}
+
+function parseKisFusionBundle() {
+  let value;
+  try { value = JSON.parse(el.kisFusionJsonEditor.value); } catch (error) { throw new Error(`Invalid JSON: ${error.message}`); }
+  if (value?.schema_version !== "branch1.query.v1") throw new Error("schema_version must be branch1.query.v1");
+  if (!Array.isArray(value.queries) || value.queries.length !== 6) throw new Error("queries must contain exactly six items");
+  const roles = value.queries.map((query) => query?.role);
+  if (new Set(roles).size !== 6 || !BRANCH1_ROLES.every((role) => roles.includes(role))) throw new Error(`Required roles: ${BRANCH1_ROLES.join(", ")}`);
+  value.queries.forEach((query) => {
+    if (typeof query.vi !== "string" || !query.vi.trim()) throw new Error(`${query.role}.vi is required`);
+    if (typeof query.en !== "string" || !query.en.trim()) throw new Error(`${query.role}.en is required`);
+  });
+  return value;
+}
+
+function validateKisFusionEditor() {
+  try {
+    parseKisFusionBundle();
+    el.kisFusionValidation.textContent = state.kisFusionReady
+      ? "Valid six-role bilingual bundle. Ready for KIS fusion."
+      : "JSON is valid, but at least one branch fusion dependency is not ready.";
+    el.kisFusionValidation.classList.toggle("ready", state.kisFusionReady);
+    el.kisFusionValidation.classList.toggle("error", !state.kisFusionReady);
+    el.btnRunKisFusion.disabled = !state.kisFusionReady;
+    return true;
+  } catch (error) {
+    el.kisFusionValidation.textContent = error.message;
+    el.kisFusionValidation.classList.remove("ready");
+    el.kisFusionValidation.classList.add("error");
+    el.btnRunKisFusion.disabled = true;
+    return false;
+  }
+}
+
+function updateKisFusionWeights() {
+  const inputs = [
+    el.kisFusionWeightBranch1,
+    el.kisFusionWeightBranch2,
+    el.kisFusionWeightOcr,
+    el.kisFusionWeightAsr,
+  ];
+  const values = inputs.map((input) => Number(input.value));
+  [
+    el.kisFusionWeightBranch1Value,
+    el.kisFusionWeightBranch2Value,
+    el.kisFusionWeightOcrValue,
+    el.kisFusionWeightAsrValue,
+  ].forEach((node, index) => { node.textContent = values[index].toFixed(2); });
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const normalized = total > 0 ? values.map((value) => Math.round(value / total * 100)) : [0, 0, 0, 0];
+  el.kisFusionNormalizedWeights.textContent = `Normalized: ${normalized[0]}% / ${normalized[1]}% / ${normalized[2]}% / ${normalized[3]}%`;
+}
+
+// Card and inspector both delegate to the canonical pure formatter. The
+// card intentionally retains only its leading summary segments.
+function fusionEvidence(item) {
+  return formatKisFusionCardEvidence(item);
+}
+
+function fusionInspectorEvidence(item) {
+  return formatKisFusionEvidence(item);
+}
+
+async function runKisFusionSearch() {
+  if (!validateKisFusionEditor()) return;
+  const queryBundle = parseKisFusionBundle();
+  kisFusionAbortController?.abort();
+  kisFusionAbortController = new AbortController();
+  el.btnRunKisFusion.disabled = true;
+  el.btnRunKisFusion.textContent = "Running four pools\u2026";
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/search/fusion/kis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: kisFusionAbortController.signal,
+      body: JSON.stringify({
+        query_bundle: queryBundle,
+        branch_weights: {
+          branch1: Number(el.kisFusionWeightBranch1.value),
+          branch2: Number(el.kisFusionWeightBranch2.value),
+          ocr: Number(el.kisFusionWeightOcr.value),
+          asr: Number(el.kisFusionWeightAsr.value),
+        },
+      }),
+    });
+    if (!response.ok) throw await responseError(response, "KIS fusion search failed");
+    const payload = await response.json();
+    state.kisFusionResponse = payload;
+    // Keep the complete final top-150 response in state.  Unlike standalone
+    // branch workspaces, the final KIS pool is already the display gate.
+    state.kisFusionResults = (payload.results || []).map((item) => ({
+      ...item,
+      score: item.final_score ?? item.score ?? item.rrf_score ?? 0,
+      score_type: item.score_type || "weighted_rrf",
+      retrieval_modality: "kis_fusion",
+      dam_summary: fusionEvidence(item),
+    }));
+    setSubmissionContext("kis_fusion", JSON.stringify(queryBundle));
+    const returnedCount = Number(payload.result_count ?? state.kisFusionResults.length ?? 0);
+    el.kisFusionResultsCount.textContent = branchPoolCountLabel(payload, returnedCount, 150);
+    el.kisFusionTiming.textContent = `${Number(payload.timing?.total_ms || (performance.now() - started)).toFixed(0)} ms \u00b7 RRF k=${payload.rrf_k} \u00b7 BEiT top ${payload.rerank_top_k}`;
+    el.kisFusionValidation.textContent = "KIS fusion complete: weighted RRF 40/30/15/15 \u00b7 BEiT-3 COCO cosine 25% / RRF 75%.";
+    el.kisFusionValidation.classList.remove("error");
+    el.kisFusionValidation.classList.add("ready");
+    el.kisFusionResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.kisFusionResultsGrid,
+      state.kisFusionResults,
+      (visible, container) => renderStandardCards(visible, container, "kis_fusion", ++resultsRenderId),
+      150,
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.kisFusionResultsCount.textContent = "Search failed";
+    el.kisFusionTiming.textContent = `${Math.round(performance.now() - started)} ms`;
+    el.kisFusionResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">KIS fusion failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    el.btnRunKisFusion.textContent = "Run KIS fusion";
+    if (state.kisFusionReady) el.btnRunKisFusion.disabled = false;
+  }
+}
+
+async function runBranch3OcrSearch() {
+  if (!validateBranch3OcrEditor()) return;
+  const queryBundle = parseBranch3OcrBundle();
+  branch3OcrAbortController?.abort();
+  branch3OcrAbortController = new AbortController();
+  el.btnRunBranch3Ocr.disabled = true;
+  el.btnRunBranch3Ocr.textContent = "Running OCR...";
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/search/branch3/ocr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: branch3OcrAbortController.signal,
+      body: JSON.stringify({ query_bundle: queryBundle, per_stream_top_k: 2000, final_top_k: 500 }),
+    });
+    if (!response.ok) throw await responseError(response, "Branch-3 OCR search failed");
+    const payload = await response.json();
+    state.branch3OcrResponse = payload;
+    state.branch3OcrResults = (payload.results || []).map((item) => ({
+      ...item,
+      score: item.ocr_normalized_score ?? item.score ?? 0,
+      score_type: "ocr_bm25_ngram",
+      retrieval_modality: "ocr",
+    }));
+    setSubmissionContext("branch3_ocr", JSON.stringify(queryBundle));
+    const returnedCount = Number(payload.result_count || state.branch3OcrResults.length || 0);
+    el.branch3OcrResultsCount.textContent = branchPoolCountLabel(payload, returnedCount, 500);
+    el.branch3OcrTiming.textContent = `${Number(payload.timing?.total_ms || (performance.now() - started)).toFixed(0)} ms · ${Object.values(payload.stream_counts || {}).join(" / ")} hits`;
+    el.branch3OcrValidation.textContent = "OCR ranking complete: BM25 55% · token 30% · adjacent n-gram 15%.";
+    el.branch3OcrValidation.classList.remove("error");
+    el.branch3OcrValidation.classList.add("ready");
+    el.branch3OcrResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.branch3OcrResultsGrid,
+      state.branch3OcrResults,
+      (visible, container) => renderStandardCards(visible, container, "ocr", ++resultsRenderId),
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.branch3OcrResultsCount.textContent = "Search failed";
+    el.branch3OcrTiming.textContent = `${Math.round(performance.now() - started)} ms`;
+    el.branch3OcrResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Branch-3 OCR failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    el.btnRunBranch3Ocr.textContent = "Run OCR";
+    if (state.branch3OcrReady) el.btnRunBranch3Ocr.disabled = false;
+  }
+}
+
+function parseBranch2Bundle() {
+  let value;
+  try { value = JSON.parse(el.branch2JsonEditor.value); } catch (error) { throw new Error(`Invalid JSON: ${error.message}`); }
+  if (value?.schema_version !== "branch1.query.v1") throw new Error("schema_version must be branch1.query.v1");
+  if (!Array.isArray(value.queries) || value.queries.length !== 6) throw new Error("queries must contain exactly six items");
+  const roles = value.queries.map((query) => query?.role);
+  if (new Set(roles).size !== 6 || !BRANCH1_ROLES.every((role) => roles.includes(role))) throw new Error(`Required roles: ${BRANCH1_ROLES.join(", ")}`);
+  value.queries.forEach((query) => {
+    if (typeof query.vi !== "string" || !query.vi.trim()) throw new Error(`${query.role}.vi is required`);
+    if (typeof query.en !== "string" || !query.en.trim()) throw new Error(`${query.role}.en is required`);
+  });
+  return value;
+}
+
+function validateBranch2Editor() {
+  try {
+    parseBranch2Bundle();
+    el.branch2Validation.textContent = state.branch2Ready ? "Valid six-role bilingual bundle. Ready to search." : "JSON is valid, but a server-side data or encoder gate is not ready.";
+    el.branch2Validation.classList.toggle("ready", state.branch2Ready);
+    el.branch2Validation.classList.toggle("error", !state.branch2Ready);
+    el.branch2Validation.classList.remove("warning");
+    el.btnRunBranch2.disabled = !state.branch2Ready;
+    return true;
+  } catch (error) {
+    el.branch2Validation.textContent = error.message;
+    el.branch2Validation.classList.remove("ready");
+    el.branch2Validation.classList.add("error");
+    el.branch2Validation.classList.remove("warning");
+    el.btnRunBranch2.disabled = true;
+    return false;
+  }
+}
+
+function updateBranch2Weights() {
+  const values = [Number(el.branch2WeightDense.value), Number(el.branch2WeightSparse.value), Number(el.branch2WeightBeit.value), Number(el.branch2WeightPrevious.value)];
+  [el.branch2WeightDenseValue, el.branch2WeightSparseValue, el.branch2WeightBeitValue, el.branch2WeightPreviousValue].forEach((node, index) => { node.textContent = values[index].toFixed(2); });
+  const hybridTotal = values[0] + values[1];
+  const rerankTotal = values[2] + values[3];
+  el.branch2NormalizedWeights.textContent = `Hybrid ${hybridTotal ? Math.round(values[0] / hybridTotal * 100) : 0}% / ${hybridTotal ? Math.round(values[1] / hybridTotal * 100) : 0}% - Rerank ${rerankTotal ? Math.round(values[2] / rerankTotal * 100) : 0}% / ${rerankTotal ? Math.round(values[3] / rerankTotal * 100) : 0}%`;
+  if (hybridTotal <= 0 || rerankTotal <= 0) {
+    el.branch2Validation.textContent = "Both weight groups need a positive sum.";
+    el.branch2Validation.classList.remove("ready", "warning");
+    el.branch2Validation.classList.add("error");
+    el.btnRunBranch2.disabled = true;
+  } else validateBranch2Editor();
+}
+
+async function runBranch2Search() {
+  if (!validateBranch2Editor()) return;
+  const queryBundle = parseBranch2Bundle();
+  branch2AbortController?.abort();
+  branch2AbortController = new AbortController();
+  el.btnRunBranch2.disabled = true;
+  el.btnRunBranch2.textContent = "Running DAM + BM25...";
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/search/branch2", { method: "POST", headers: { "Content-Type": "application/json" }, signal: branch2AbortController.signal, body: JSON.stringify({ query_bundle: queryBundle, hybrid_weights: { dense: Number(el.branch2WeightDense.value), sparse: Number(el.branch2WeightSparse.value) }, rerank_weights: { beit3: Number(el.branch2WeightBeit.value), previous: Number(el.branch2WeightPrevious.value) }, per_stream_top_k: 2000, pre_rerank_top_k: 500, rerank_top_k: 100 }) });
+    if (!response.ok) throw await responseError(response, "Branch-2 search failed");
+    const payload = await response.json();
+    state.branch2Response = payload;
+    state.branch2Results = payload.results.map((item) => ({ ...item, score: item.reranked_score ?? item.hybrid_score ?? item.score, score_type: item.rerank_score_type || "dam_dense_bm25_hybrid", retrieval_modality: "branch2", dam_summary: item.dam_winner?.description_en || item.sparse_winner?.description_en || "" }));
+    setSubmissionContext("branch2", JSON.stringify(queryBundle));
+    const returnedCount = Number(payload.result_count || state.branch2Results.length || 0);
+    el.branch2ResultsCount.textContent = `${branchPoolCountLabel(payload, returnedCount, 500)} · top ${payload.rerank_top_k} reranked`;
+    el.branch2Timing.textContent = `${Number(payload.timing.total_ms).toFixed(0)} ms - dense ${Number(payload.timing.dense_ms).toFixed(0)} - sparse ${Number(payload.timing.sparse_ms).toFixed(0)}`;
+    const warnings = [];
+    Object.entries(payload.tokenizer_diagnostics || {}).forEach(([model, rows]) => {
+      rows.forEach((row, index) => {
+        if (row.truncated) warnings.push(`${model}/${row.role || BRANCH1_ROLES[index] || "stream"}${row.language ? `:${row.language}` : ""}: ${row.token_count} > ${row.max_tokens} tokens`);
+      });
+    });
+    el.branch2Validation.textContent = warnings.length
+      ? `Tokenizer truncation warning: ${warnings.join("; ")}`
+      : "All Branch-2 query streams fit their tokenizer limits.";
+    el.branch2Validation.classList.remove("error");
+    el.branch2Validation.classList.toggle("warning", warnings.length > 0);
+    // Truncation is a quality warning, not a failed search.  Keep the
+    // successful/ready state while the warning class supplies yellow styling.
+    el.branch2Validation.classList.add("ready");
+    el.branch2ResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.branch2ResultsGrid,
+      state.branch2Results,
+      (visible, container) => renderStandardCards(visible, container, "branch2", ++resultsRenderId),
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.branch2ResultsCount.textContent = "Search failed";
+    el.branch2Timing.textContent = `${Math.round(performance.now() - started)} ms`;
+    el.branch2ResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Branch-2 failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    el.btnRunBranch2.textContent = "Run Branch 2";
+    // Do not re-run validation here: it would overwrite a useful tokenizer
+    // truncation warning rendered from the response payload.
+    if (state.branch2Ready) el.btnRunBranch2.disabled = false;
+  }
+}
+
+function parseBranch1Bundle() {
+  let value;
+  try {
+    value = JSON.parse(el.branch1JsonEditor.value);
+  } catch (error) {
+    throw new Error(`Invalid JSON: ${error.message}`);
+  }
+  if (value?.schema_version !== "branch1.query.v1") {
+    throw new Error("schema_version must be branch1.query.v1");
+  }
+  if (!Array.isArray(value.queries) || value.queries.length !== 6) {
+    throw new Error("queries must contain exactly six items");
+  }
+  const roles = value.queries.map((query) => query?.role);
+  if (new Set(roles).size !== 6 || !BRANCH1_ROLES.every((role) => roles.includes(role))) {
+    throw new Error(`Required roles: ${BRANCH1_ROLES.join(", ")}`);
+  }
+  value.queries.forEach((query) => {
+    if (typeof query.vi !== "string" || !query.vi.trim()) throw new Error(`${query.role}.vi is required`);
+    if (typeof query.en !== "string" || !query.en.trim()) throw new Error(`${query.role}.en is required`);
+  });
+  return value;
+}
+
+function validateBranch1Editor() {
+  try {
+    parseBranch1Bundle();
+    el.branch1Validation.textContent = state.branch1Ready
+      ? "Valid six-role bilingual bundle. Ready to search."
+      : "JSON is valid, but a server-side data or encoder gate is not ready.";
+    el.branch1Validation.classList.toggle("ready", state.branch1Ready);
+    el.branch1Validation.classList.toggle("error", !state.branch1Ready);
+    el.branch1Validation.classList.remove("warning");
+    el.btnRunBranch1.disabled = !state.branch1Ready;
+    return true;
+  } catch (error) {
+    el.branch1Validation.textContent = error.message;
+    el.branch1Validation.classList.remove("ready");
+    el.branch1Validation.classList.add("error");
+    el.branch1Validation.classList.remove("warning");
+    el.btnRunBranch1.disabled = true;
+    return false;
+  }
+}
+
+function formatBranch1Json() {
+  try {
+    el.branch1JsonEditor.value = JSON.stringify(JSON.parse(el.branch1JsonEditor.value), null, 2);
+    validateBranch1Editor();
+  } catch (error) {
+    showToast(`Cannot format Branch-1 JSON: ${error.message}`, "error");
+  }
+}
+
+function updateBranch1Weights() {
+  const raw = [
+    Number(el.branch1WeightSiglip.value),
+    Number(el.branch1WeightMetaclip.value),
+    Number(el.branch1WeightBeit.value),
+  ];
+  el.branch1WeightSiglipValue.textContent = raw[0].toFixed(2);
+  el.branch1WeightMetaclipValue.textContent = raw[1].toFixed(2);
+  el.branch1WeightBeitValue.textContent = raw[2].toFixed(2);
+  const total = raw.reduce((sum, value) => sum + value, 0);
+  const normalized = total > 0 ? raw.map((value) => Math.round((value / total) * 100)) : [0, 0, 0];
+  el.branch1NormalizedWeights.textContent = `Normalized: ${normalized[0]}% / ${normalized[1]}% / ${normalized[2]}%`;
+  if (total <= 0) {
+    el.branch1Validation.textContent = "At least one model weight must be greater than zero.";
+    el.branch1Validation.classList.remove("ready", "warning");
+    el.branch1Validation.classList.add("error");
+    el.btnRunBranch1.disabled = true;
+  } else {
+    validateBranch1Editor();
+  }
+}
+
+function branch1Audit(item) {
+  return ["siglip2", "metaclip2", "beit3"].map((model) => {
+    const evidence = item.model_provenance?.[model];
+    if (!evidence?.observed) return `${model}: missing → 0.0000`;
+    const stream = evidence.best_query_language
+      ? `${evidence.best_query_role}:${evidence.best_query_language}`
+      : evidence.best_query_role;
+    return `${model}: raw ${Number(evidence.raw_cosine).toFixed(4)} · norm ${Number(evidence.normalized_score).toFixed(4)} · ${stream} #${evidence.best_query_rank}`;
+  }).join(" | ");
+}
+
+async function runBranch1Search() {
+  if (!validateBranch1Editor()) return;
+  const queryBundle = parseBranch1Bundle();
+  const weights = {
+    siglip2: Number(el.branch1WeightSiglip.value),
+    metaclip2: Number(el.branch1WeightMetaclip.value),
+    beit3: Number(el.branch1WeightBeit.value),
+  };
+  branch1AbortController?.abort();
+  branch1AbortController = new AbortController();
+  el.btnRunBranch1.disabled = true;
+  el.btnRunBranch1.textContent = "Running 30 searches…";
+  el.branch1Timing.textContent = "Loading encoders sequentially";
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/search/branch1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: branch1AbortController.signal,
+      body: JSON.stringify({
+        query_bundle: queryBundle,
+        model_weights: weights,
+        per_stream_top_k: 2000,
+        final_top_k: 1500,
+      }),
+    });
+    if (!response.ok) throw await responseError(response, "Branch-1 search failed");
+    const payload = await response.json();
+    state.branch1Response = payload;
+    state.branch1Results = payload.results.map((item) => ({
+      ...item,
+      score: item.final_score,
+      score_type: "weighted_zsigmoid_fusion",
+      dam_summary: branch1Audit(item),
+      retrieval_modality: "branch1",
+    }));
+    setSubmissionContext("branch1", JSON.stringify(queryBundle));
+    const returnedCount = Number(payload.result_count || state.branch1Results.length || 0);
+    el.branch1ResultsCount.textContent = branchPoolCountLabel(payload, returnedCount, 1500);
+    el.branch1Timing.textContent = `${Number(payload.timing.total_ms).toFixed(0)} ms · fusion ${Number(payload.timing.fusion_ms).toFixed(1)} ms`;
+    const warnings = [];
+    Object.entries(payload.tokenizer_diagnostics || {}).forEach(([model, rows]) => {
+      rows.forEach((row, index) => {
+        if (row.truncated) warnings.push(`${model}/${row.role || BRANCH1_ROLES[index] || "stream"}${row.language ? `:${row.language}` : ""}: ${row.token_count} > ${row.max_tokens} tokens`);
+      });
+    });
+    el.branch1Validation.textContent = warnings.length
+      ? `Tokenizer truncation warning: ${warnings.join("; ")}`
+      : "All 30 query streams fit their tokenizer limits.";
+    el.branch1Validation.classList.remove("error");
+    el.branch1Validation.classList.toggle("warning", warnings.length > 0);
+    // Truncation is a quality warning, not a failed search.  Keep the
+    // successful/ready state while the warning class supplies yellow styling.
+    el.branch1Validation.classList.add("ready");
+    el.branch1ResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.branch1ResultsGrid,
+      state.branch1Results,
+      (visible, container) => renderStandardCards(visible, container, "branch1", ++resultsRenderId),
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    el.branch1ResultsCount.textContent = "Search failed";
+    el.branch1Timing.textContent = `${Math.round(performance.now() - started)} ms`;
+    el.branch1ResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Branch-1 failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    showToast(error.message, "error");
+  } finally {
+    el.btnRunBranch1.textContent = "Run Branch 1";
+    // Preserve tokenizer diagnostics shown after a successful search.
+    if (state.branch1Ready) el.btnRunBranch1.disabled = false;
   }
 }
 
@@ -333,6 +1146,8 @@ async function responseError(response, prefix) {
       }).join("; ");
     } else if (typeof payload?.detail === "string") {
       detail = payload.detail;
+    } else if (payload?.detail?.message) {
+      detail = payload.detail.message;
     }
   } catch (_) {
     // The HTTP status remains useful when a proxy returns a non-JSON error body.
@@ -353,10 +1168,7 @@ function bindEvents() {
 
   el.parserEngine.addEventListener("change", () => {
     state.parserEngine = el.parserEngine.value;
-    el.qwenFallback.disabled = state.parserEngine !== "gemini";
-  });
-  el.qwenFallback.addEventListener("change", () => {
-    state.allowQwenFallback = el.qwenFallback.checked;
+    el.externalFallback.disabled = true;
   });
 
   el.workspaceTabs.forEach((tab) => {
@@ -382,6 +1194,62 @@ function bindEvents() {
   el.btnRunQuery.addEventListener("click", handleRunQueryClick);
   el.btnExecuteJson.addEventListener("click", () => void handleExecuteJsonClick());
   el.btnFormatJson.addEventListener("click", formatJsonEditor);
+  el.btnFormatBranch1Json.addEventListener("click", formatBranch1Json);
+  el.btnRunBranch1.addEventListener("click", () => void runBranch1Search());
+  el.btnFormatBranch2Json.addEventListener("click", () => { try { el.branch2JsonEditor.value = JSON.stringify(JSON.parse(el.branch2JsonEditor.value), null, 2); validateBranch2Editor(); } catch (error) { showToast(`Cannot format Branch-2 JSON: ${error.message}`, "error"); } });
+  el.btnRunBranch2.addEventListener("click", () => void runBranch2Search());
+  el.btnFormatBranch3AsrJson.addEventListener("click", () => { try { el.branch3AsrJsonEditor.value = JSON.stringify(JSON.parse(el.branch3AsrJsonEditor.value), null, 2); validateBranch3AsrEditor(); } catch (error) { showToast(`Cannot format Branch-3 ASR JSON: ${error.message}`, "error"); } });
+  el.btnRunBranch3Asr.addEventListener("click", () => void runBranch3AsrSearch());
+  el.branch3AsrJsonEditor.addEventListener("input", validateBranch3AsrEditor);
+  el.branch3AsrJsonEditor.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runBranch3AsrSearch();
+    }
+  });
+  el.btnFormatBranch3OcrJson.addEventListener("click", () => { try { el.branch3OcrJsonEditor.value = JSON.stringify(JSON.parse(el.branch3OcrJsonEditor.value), null, 2); validateBranch3OcrEditor(); } catch (error) { showToast(`Cannot format Branch-3 OCR JSON: ${error.message}`, "error"); } });
+  el.btnRunBranch3Ocr.addEventListener("click", () => void runBranch3OcrSearch());
+  el.branch3OcrJsonEditor.addEventListener("input", validateBranch3OcrEditor);
+  el.branch3OcrJsonEditor.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runBranch3OcrSearch();
+    }
+  });
+  el.btnFormatKisFusionJson.addEventListener("click", () => {
+    try {
+      el.kisFusionJsonEditor.value = JSON.stringify(JSON.parse(el.kisFusionJsonEditor.value), null, 2);
+      validateKisFusionEditor();
+    } catch (error) {
+      showToast(`Cannot format KIS fusion JSON: ${error.message}`, "error");
+    }
+  });
+  el.btnRunKisFusion.addEventListener("click", () => void runKisFusionSearch());
+  el.kisFusionJsonEditor.addEventListener("input", validateKisFusionEditor);
+  el.kisFusionJsonEditor.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runKisFusionSearch();
+    }
+  });
+  [
+    el.kisFusionWeightBranch1,
+    el.kisFusionWeightBranch2,
+    el.kisFusionWeightOcr,
+    el.kisFusionWeightAsr,
+  ].forEach((input) => input.addEventListener("input", updateKisFusionWeights));
+  el.branch2JsonEditor.addEventListener("input", validateBranch2Editor);
+  [el.branch2WeightDense, el.branch2WeightSparse, el.branch2WeightBeit, el.branch2WeightPrevious].forEach((input) => input.addEventListener("input", updateBranch2Weights));
+  el.branch1JsonEditor.addEventListener("input", validateBranch1Editor);
+  el.branch1JsonEditor.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void runBranch1Search();
+    }
+  });
+  [el.branch1WeightSiglip, el.branch1WeightMetaclip, el.branch1WeightBeit].forEach((input) => {
+    input.addEventListener("input", updateBranch1Weights);
+  });
   el.btnDiscoveryCascade.addEventListener("click", () => void runDiscoveryCascade());
   el.btnTemporalIntersection.addEventListener("click", () => void runTemporalIntersection());
   el.temporalEventsEditor.addEventListener("input", () => {
@@ -597,7 +1465,7 @@ function clearSubmissionSelection() {
 }
 
 function setWorkspace(workspace) {
-  if (!new Set(["text", "image", "video"]).has(workspace)) return;
+  if (!new Set(["text", "branch1", "branch2", "branch3_asr", "branch3_ocr", "kis_fusion", "image", "video"]).has(workspace)) return;
   state.activeWorkspace = workspace;
   submissionStore.setContext(state.submissionContexts[workspace]);
   el.workspaceTabs.forEach((tab) => {
@@ -1189,7 +2057,6 @@ async function handleRunQueryClick() {
         query: query,
         task_type: "KIS",
         engine: state.parserEngine,
-        allow_qwen_fallback: state.allowQwenFallback,
       }),
       signal: parseAbortController.signal,
     });
@@ -1791,7 +2658,6 @@ async function parseScopedQuery(query, engine, signal = undefined) {
       query,
       task_type: "KIS",
       engine,
-      allow_qwen_fallback: false,
     }),
     signal,
   });
@@ -2255,13 +3121,35 @@ function renderPoolSection(pool, limit, renderId) {
 }
 
 function resultEvidence(item, modality) {
+  if (modality === "kis_fusion") {
+    return fusionEvidence(item);
+  }
+  if (modality === "branch2") {
+    const evidence = (raw, normalized, observed, digits = 3) => {
+      if (observed === false || raw == null) return `missing→${Number(normalized || 0).toFixed(3)}`;
+      return `${Number(raw).toFixed(digits)}→${Number(normalized || 0).toFixed(3)}`;
+    };
+    const dense = evidence(item.dense_raw, item.dense_normalized, item.dense_observed, 3);
+    const sparse = evidence(item.sparse_raw, item.sparse_normalized, item.sparse_observed, 4);
+    const beit = item.beit3_normalized == null ? "-" : `${Number(item.beit3_raw_cosine).toFixed(3)}→${Number(item.beit3_normalized).toFixed(3)}`;
+    const delta = item.rank_delta == null ? "-" : (Number(item.rank_delta) > 0 ? `+${item.rank_delta}` : item.rank_delta);
+    return `Dense ${dense} · Sparse ${sparse} · BEiT-3 ${beit} · rank Δ ${delta}`;
+  }
   if (modality === "cascade") {
     return `Video via DAM raw rank #${item.dam_discovery_rank} at frame ${item.dam_discovery_frame_idx} · SigLIP rank #${item.video_scope_rank} inside ${item.video_id}`;
   }
-  if (modality === "asr") return item.transcript || item.asr_transcript || "No speech text";
+  if (modality === "asr") {
+    const transcript = item.transcript || item.asr_transcript || "No speech text";
+    const role = item.asr_best_query_role ? ` · ${item.asr_best_query_role}${item.asr_best_query_language ? `:${item.asr_best_query_language}` : ""}` : "";
+    const score = item.asr_normalized_score == null ? "" : ` · norm ${Number(item.asr_normalized_score).toFixed(3)}`;
+    const bm25 = item.bm25_relevance == null ? "" : ` · BM25 ${Number(item.bm25_relevance).toFixed(3)}`;
+    const token = item.token_coverage == null ? "" : ` · token ${Number(item.token_coverage).toFixed(3)}`;
+    const ngram = item.ngram_coverage == null ? "" : ` · bigram ${Number(item.ngram_coverage).toFixed(3)}`;
+    const span = item.asr_start_s == null ? "" : ` · ${Number(item.asr_start_s).toFixed(2)}-${Number(item.asr_end_s ?? item.asr_start_s).toFixed(2)}s`;
+    return `${transcript}${role}${score}${bm25}${token}${ngram}${span}`;
+  }
   if (modality === "ocr") {
-    const matches = (item.matched_keywords || []).join(", ");
-    return `${matches ? `Matched: ${matches} · ` : ""}${item.ocr_text || "No OCR text"}`;
+    return formatOcrEvidence(item);
   }
   if (modality === "dam") {
     const subjects = (item.subject_scores || [])
@@ -2462,8 +3350,56 @@ function populateInspectorCommon(item) {
   };
   el.inspectorImg.src = imgUrl;
 
-  el.inspAsrText.textContent = item.asr_transcript || "(No speech / silent frame)";
-  el.inspDamText.textContent = item.dam_summary || "(No visual description available)";
+  // KIS keeps ASR evidence under branch_provenance when a visual voter was
+  // encountered first. Prefer that winning segment over macro context.
+  const kisBranchEvidence = item.retrieval_modality === "kis_fusion"
+    ? (item.branch_provenance || {})
+    : {};
+  const asrEvidence = item.retrieval_modality === "kis_fusion"
+    ? (kisBranchEvidence.asr || {})
+    : item;
+  const ocrEvidence = item.retrieval_modality === "kis_fusion"
+    ? (kisBranchEvidence.ocr || {})
+    : item;
+  if (item.retrieval_modality === "kis_fusion") {
+    // The remaining inspector code predates nested branch evidence.  Merge a
+    // shallow, local view so its existing score fields resolve to the winning
+    // ASR/OCR evidence without mutating the final response held in state.
+    item = { ...item, ...asrEvidence, ...ocrEvidence };
+  }
+  el.inspAsrText.textContent = asrEvidence.asr_transcript
+    || asrEvidence.transcript
+    || "(No speech / silent frame)";
+  if (el.inspAsrEvidence) {
+    if (asrEvidence.asr_best_query_role || asrEvidence.bm25_raw != null) {
+      const roles = asrEvidence.asr_stream_provenance || {};
+      const observed = Object.entries(roles)
+        .map(([role, evidence]) => `${role}: ${evidence ? Number(evidence.combined_score ?? 0).toFixed(3) : "not observed"}`)
+        .join(" · ");
+      el.inspAsrEvidence.textContent = [
+        `winner=${asrEvidence.asr_best_query_role || "-"}`,
+        `combined=${Number(asrEvidence.asr_raw_score ?? 0).toFixed(4)}`,
+        `normalized=${Number(asrEvidence.asr_normalized_score ?? asrEvidence.score ?? 0).toFixed(4)}`,
+        // KIS keeps ASR and OCR lexical evidence in separate nested branch
+        // objects.  Do not let the local inspector merge make OCR's BM25
+        // fields overwrite the winning ASR evidence.
+        `BM25=${Number(asrEvidence.bm25_raw ?? 0).toFixed(4)} → ${Number(asrEvidence.bm25_relevance ?? 0).toFixed(4)}`,
+        `token=${Number(asrEvidence.token_coverage ?? 0).toFixed(4)}`,
+        `bigram=${Number(asrEvidence.ngram_coverage ?? asrEvidence.adjacent_bigram_coverage ?? 0).toFixed(4)}`,
+        asrEvidence.asr_segment_id ? `segment=${asrEvidence.asr_segment_id}` : "",
+        asrEvidence.asr_start_s != null
+          ? `span=${Number(asrEvidence.asr_start_s).toFixed(2)}-${Number(asrEvidence.asr_end_s ?? asrEvidence.asr_start_s).toFixed(2)}s`
+          : "",
+        observed ? `streams: ${observed}` : "",
+      ].filter(Boolean).join(" · ");
+    } else {
+      el.inspAsrEvidence.textContent = "(No ASR ranking evidence)";
+    }
+  }
+  if (el.inspAsrContext) el.inspAsrContext.textContent = "(Loading macro audio context...)";
+  el.inspDamText.textContent = item.retrieval_modality === "kis_fusion"
+    ? fusionInspectorEvidence(item)
+    : item.dam_summary || "(No visual description available)";
   if (el.inspOcrText) {
     el.inspOcrText.textContent = item.ocr_text || "(No text detected on screen)";
   }
@@ -2484,13 +3420,34 @@ function populateInspectorCommon(item) {
         const active = state.activeInspectorItem;
         if (active.video_id !== item.video_id) return;
         state.activeBBoxObjects = data.dam_objects || [];
-        if (data.macro_audio_transcript) {
-          el.inspAsrText.textContent = data.macro_audio_transcript;
+        if (el.inspAsrContext) {
+          el.inspAsrContext.textContent = data.macro_audio_transcript || "(No macro audio context)";
         }
-        if (el.inspOcrText && data.keyframe && data.keyframe.ocr_text) {
-          el.inspOcrText.textContent = data.keyframe.ocr_text;
+        // Preserve OCR evidence returned by the winning result.  The detail
+        // endpoint is allowed to fill an empty card field, but must never
+        // replace the text that actually contributed to ranking.
+        const nestedOcrEvidence = active.retrieval_modality === "kis_fusion"
+          && active.branch_provenance?.ocr
+          && (
+            active.branch_provenance.ocr.ocr_best_query_role != null
+            || active.branch_provenance.ocr.ocr_stream_provenance != null
+            || active.branch_provenance.ocr.ocr_raw_score != null
+            || Object.prototype.hasOwnProperty.call(active.branch_provenance.ocr, "ocr_text")
+          );
+        const winningOcrEvidence = active.retrieval_modality === "ocr"
+          || active.ocr_best_query_role != null
+          || active.ocr_stream_provenance != null
+          || active.ocr_raw_score != null
+          || Boolean(nestedOcrEvidence);
+        if (el.inspOcrText && !winningOcrEvidence && !active.ocr_text && data.keyframe) {
+          const detailOcrText = resolveWinningOcrText(
+            active,
+            data.keyframe,
+            winningOcrEvidence,
+          );
+          if (detailOcrText) el.inspOcrText.textContent = detailOcrText;
         }
-        if (data.keyframe?.dam_summary_en) {
+        if (data.keyframe?.dam_summary_en && item.retrieval_modality !== "kis_fusion") {
           el.inspDamText.textContent = data.keyframe.dam_summary_en;
         }
         renderMatchedObjectsList(state.activeBBoxObjects);
@@ -3070,6 +4027,14 @@ function activeCandidateReservoir() {
   let candidates = [];
   if (state.activeWorkspace === "image") {
     candidates = state.imageResults;
+  } else if (state.activeWorkspace === "branch1") {
+    candidates = state.branch1Results;
+  } else if (state.activeWorkspace === "branch2") {
+    candidates = state.branch2Results;
+  } else if (state.activeWorkspace === "branch3_asr") {
+    candidates = state.branch3AsrResults;
+  } else if (state.activeWorkspace === "branch3_ocr") {
+    candidates = state.branch3OcrResults;
   } else if (state.activeWorkspace === "video") {
     candidates = state.watch.searchResults;
   } else if (state.temporalIntersection) {

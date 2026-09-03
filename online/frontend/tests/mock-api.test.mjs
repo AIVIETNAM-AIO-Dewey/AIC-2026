@@ -42,6 +42,48 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
   );
   assert(uniqueCandidates.size >= 120);
 
+  const kisResponse = await fetch(`${base}/api/search/fusion/kis`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(kisResponse.status, 200);
+  const kis = await kisResponse.json();
+  assert.equal(kis.schema_version, "kis.fusion.result.v1");
+  assert.equal(kis.result_count, 150);
+  assert.equal(kis.results.length, 150);
+  assert.equal(kis.results[0].beit3_query_scores.original.language, "en");
+  assert.equal(kis.results[0].rerank_formula.beit3_weight, 0.25);
+  assert.equal(kis.results[0].rerank_formula.previous_weight, 0.75);
+  assert.equal(
+    kis.results[0].final_score,
+    Number((0.25 * kis.results[0].beit3_normalized + 0.75 * kis.results[0].rrf_normalized).toFixed(6)),
+  );
+  assert(kis.results.slice(0, 100).some((item) => item.rank_delta !== 0));
+  for (const item of kis.results.slice(0, 100)) {
+    assert.equal(item.rank_delta, item.pre_rerank_rank - item.rank);
+    assert.equal(
+      item.rrf_score,
+      Number((
+        0.40 / (60 + item.pre_rerank_rank)
+        + 0.30 / (60 + item.pre_rerank_rank)
+        + 0.15 / (60 + item.pre_rerank_rank)
+        + 0.15 / (60 + item.pre_rerank_rank)
+      ).toFixed(8)),
+    );
+  }
+  assert(kis.results.slice(0, 99).every((item, index) => item.final_score >= kis.results[index + 1].final_score));
+  assert.equal("beit3_raw_cosine" in kis.results[100], false);
+  assert.equal("rank_delta" in kis.results[100], false);
+  assert.equal(kis.results[100].pre_rerank_rank, kis.results[100].rank);
+  assert.equal(kis.results[100].score, kis.results[100].rrf_score);
+  assert.equal(kis.results[100].score_type, "weighted_rrf");
+  assert.equal("asr_transcript" in kis.results[0], false);
+  assert.equal("ocr_text" in kis.results[0], false);
+  assert.equal("dam_summary" in kis.results[0], false);
+  assert.equal(kis.results[0].branch_provenance.branch2.dense_best_query_language, "en");
+  assert.equal("dense_query_scores" in kis.results[0].branch_provenance.branch2, false);
+
   const timelineResponse = await fetch(`${base}/api/video/L21_V001/timeline`);
   assert.equal(timelineResponse.status, 200);
   const timeline = await timelineResponse.json();

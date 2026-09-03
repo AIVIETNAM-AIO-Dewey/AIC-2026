@@ -1869,10 +1869,6 @@ select#select-top-k {
   color: var(--text-dim);
 }
 
-.video-ui-demo #btn-gemini-toggle {
-  display: none;
-}
-
 .meta-detail-box {
   background: var(--bg-input);
   border: 1px solid var(--bg-card-border);
@@ -2997,6 +2993,96 @@ kbd {
 
 .export-schema-warning {
   color: #fbbf24;
+}
+
+.branch1-control-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--bg-card-border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.branch1-editor-column,
+.branch1-settings {
+  min-width: 0;
+}
+
+.branch1-json-editor {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--bg-card-border);
+  border-radius: 6px;
+  background: #080c14;
+  color: var(--text-muted);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.branch1-validation,
+.branch1-normalized-weights,
+.branch1-fixed-setting {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.branch1-validation.error {
+  color: #fda4af;
+}
+
+.branch1-validation.warning {
+  color: #fbbf24;
+}
+
+.branch1-validation.ready {
+  color: #6ee7b7;
+}
+
+/* A successful search may still carry tokenizer truncation diagnostics.
+   Keep that quality warning visible instead of letting the generic ready
+   colour mask it. */
+.branch1-validation.ready.warning {
+  color: #fbbf24;
+}
+
+.branch1-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 7px;
+  background: rgba(3, 12, 24, 0.65);
+}
+
+.branch1-settings h2 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.branch1-settings label {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.branch1-settings output {
+  color: var(--accent-cyan);
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 900px) {
+  .branch1-control-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .submission-count {

@@ -15,6 +15,7 @@ const frames = Array.from({ length: MOCK_FRAME_COUNT }, (_, index) => {
     keyframe_n: keyframeN,
     frame_idx: frameIdx,
     pts_time_s: Number((frameIdx / 30).toFixed(4)),
+    fps: 30,
     filename,
     score: Number((0.99 - index * 0.003).toFixed(4)),
     video_id: MOCK_VIDEO_ID,
@@ -24,6 +25,300 @@ const frames = Array.from({ length: MOCK_FRAME_COUNT }, (_, index) => {
     asr_transcript: `Deterministic sample transcript for keyframe ${keyframeN}.`,
     dam_summary: `Synthetic ${MOCK_VIDEO_ID} keyframe ${keyframeN} returned by the lightweight mock API.`,
     ocr_text: `HTV TIN TUC ${keyframeN}`,
+  };
+});
+
+/**
+ * Keep mock pools at the same boundaries as the real API.  The generic
+ * ``frames`` fixture stays small for timeline/media routes, while these
+ * deterministic canonical-looking rows exercise the full fusion gates:
+ * 1,500 / 500 / 500 / 500.  All branch fixtures derive the same first 500
+ * identities so the RRF mock also exercises cross-branch agreement.
+ */
+const gateFrames = Array.from({ length: 1500 }, (_, index) => {
+  const keyframeN = index + 1;
+  const frameIdx = 4 + index * 47;
+  const filename = `${String(frameIdx).padStart(8, "0")}.jpg`;
+  const template = frames[index % frames.length];
+  return {
+    ...template,
+    keyframe_n: keyframeN,
+    frame_idx: frameIdx,
+    pts_time_s: Number((frameIdx / 30).toFixed(4)),
+    filename,
+    video_id: MOCK_VIDEO_ID,
+    image_relpath: `keyframes/${MOCK_VIDEO_ID}/${filename}`,
+    submission_string: `${MOCK_VIDEO_ID}, ${frameIdx}`,
+    asr_transcript: `Deterministic sample transcript for keyframe ${keyframeN}.`,
+    dam_summary: `Synthetic ${MOCK_VIDEO_ID} keyframe ${keyframeN} returned by the lightweight mock API.`,
+    ocr_text: `HTV TIN TUC ${keyframeN}`,
+  };
+});
+
+const branch1MockResults = gateFrames.map((frame, index) => {
+  const finalScore = Number((0.98 - index * 0.006).toFixed(6));
+  const provenance = Object.fromEntries(
+    [
+      ["siglip2", 0.45],
+      ["metaclip2", 0.30],
+      ["beit3", 0.25],
+    ].map(([model, weight], modelIndex) => [model, {
+      observed: true,
+      raw_cosine: Number((0.91 - index * 0.004 - modelIndex * 0.02).toFixed(6)),
+      normalized_score: Number((0.86 - index * 0.005).toFixed(6)),
+      best_query_role: ["original", "entity", "action", "context", "synonym", "keyword"][index % 6],
+      best_query_language: model === "beit3" ? "en" : (index % 2 === 0 ? "vi" : "en"),
+      best_query_rank: (index % 6) + 1,
+      query_scores: {},
+      normalization_mean: 0.6,
+      normalization_std: 0.1,
+      weight,
+    }]),
+  );
+  return {
+    ...frame,
+    frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+    point_id: index + 1,
+    global_idx: index + 1,
+    rank: index + 1,
+    final_score: finalScore,
+    score: finalScore,
+    score_type: "weighted_zsigmoid_fusion",
+    best_model: "siglip2",
+    best_stream_rank: index + 1,
+    model_provenance: provenance,
+  };
+});
+
+const branch2MockResults = gateFrames.slice(0, 500).map((frame, index) => {
+  const hybridScore = Number((0.94 - index * 0.005).toFixed(6));
+  const rerankedScore = Number((0.96 - ((index * 7) % 100) * 0.004).toFixed(6));
+  return {
+    ...frame,
+    frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+    point_id: index + 1,
+    global_idx: index + 1,
+    rank: index + 1,
+    hybrid_rank: index + 1,
+    pre_rerank_rank: index + 1,
+    hybrid_score: hybridScore,
+    dense_raw: hybridScore + 0.02,
+    dense_normalized: 0.8,
+    sparse_raw: 1 / (61 + index),
+    sparse_normalized: 0.6,
+    beit3_raw_cosine: 0.9 - index * 0.003,
+    beit3_normalized: 0.82,
+    previous_normalized: 0.78,
+    reranked_score: rerankedScore,
+    score: rerankedScore,
+    score_type: "beit3_coco_cosine_blend",
+    rerank_score_type: "beit3_coco_cosine_blend",
+    rank_delta: 0,
+    beit3_best_query_role: "original",
+    dense_best_query_language: "en",
+    sparse_best_query_language: "en",
+    beit3_best_query_language: "en",
+    dam_winner: {
+      point_id: index + 1,
+      region_id: `${frame.video_id}:${frame.frame_idx}:d000`,
+      bbox: [0.05, 0.05, 0.75, 0.9],
+      description_en: "A broadcast frame with a visible presenter and city background.",
+      best_query_role: "entity",
+    },
+    sparse_winner: {
+      region_id: `${frame.video_id}:${frame.frame_idx}:d000`,
+      description_en: "A broadcast frame with a visible presenter and city background.",
+      query_role: "keyword",
+      rank: index + 1,
+      bm25_raw: -1.0,
+    },
+  };
+});
+
+const branch3AsrMockResults = gateFrames.slice(0, 500).map((frame, index) => ({
+  ...frame,
+  frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+  point_id: index + 1,
+  global_idx: index + 1,
+  rank: index + 1,
+  score: Number((0.93 - index * 0.004).toFixed(6)),
+  asr_raw_score: Number((0.88 - index * 0.003).toFixed(6)),
+  asr_normalized_score: Number((0.93 - index * 0.004).toFixed(6)),
+  asr_best_query_role: ["original", "entity", "action", "context", "synonym", "keyword"][index % 6],
+  asr_best_query_language: index % 2 === 0 ? "vi" : "en",
+  asr_segment_id: `${frame.video_id}:seg_${index}`,
+  asr_start_s: Number((frame.pts_time_s - 0.5).toFixed(3)),
+  asr_end_s: Number((frame.pts_time_s + 0.5).toFixed(3)),
+  asr_transcript: frame.asr_transcript,
+  bm25_raw: Number((-1.0 + index * 0.003).toFixed(6)),
+  bm25_relevance: Number((0.88 - index * 0.003).toFixed(6)),
+  token_coverage: Number((0.80 - (index % 5) * 0.03).toFixed(6)),
+  ngram_coverage: Number((0.76 - (index % 7) * 0.025).toFixed(6)),
+  asr_stream_provenance: Object.fromEntries(
+    ["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => [`${role}:${language}`, {
+      role,
+      language,
+      stream: `${role}:${language}`,
+      rank: index + 1,
+      combined_score: Number((0.88 - index * 0.003).toFixed(6)),
+    }])),
+  ),
+  score_type: "asr_bm25_ngram",
+}));
+
+const branch3OcrMockResults = gateFrames.slice(0, 500).map((frame, index) => ({
+  ...frame,
+  frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+  point_id: index + 1,
+  rank: index + 1,
+  score: Number((0.91 - index * 0.004).toFixed(6)),
+  ocr_raw_score: Number((0.86 - index * 0.003).toFixed(6)),
+  ocr_combined_score: Number((0.86 - index * 0.003).toFixed(6)),
+  ocr_normalized_score: Number((0.91 - index * 0.004).toFixed(6)),
+  ocr_best_query_role: ["original", "entity", "action", "context", "synonym", "keyword"][index % 6],
+  ocr_best_query_language: index % 2 === 0 ? "vi" : "en",
+  ocr_text: frame.ocr_text,
+  full_text: frame.ocr_text,
+  bm25_raw: Number((-1.0 + index * 0.003).toFixed(6)),
+  bm25_relevance: Number((0.86 - index * 0.003).toFixed(6)),
+  ocr_bm25_raw: Number((-1.0 + index * 0.003).toFixed(6)),
+  ocr_bm25_relevance: Number((0.86 - index * 0.003).toFixed(6)),
+  token_coverage: Number((0.80 - (index % 5) * 0.03).toFixed(6)),
+  ocr_token_coverage: Number((0.80 - (index % 5) * 0.03).toFixed(6)),
+  ngram_coverage: Number((0.76 - (index % 7) * 0.025).toFixed(6)),
+  adjacent_bigram_coverage: Number((0.76 - (index % 7) * 0.025).toFixed(6)),
+  matched_keywords: ["htv"],
+  matched_terms: ["htv"],
+  ocr_stream_provenance: Object.fromEntries(
+    ["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => [`${role}:${language}`, {
+      role,
+      language,
+      stream: `${role}:${language}`,
+      rank: index + 1,
+      combined_score: Number((0.86 - index * 0.003).toFixed(6)),
+      bm25_raw: Number((-1.0 + index * 0.003).toFixed(6)),
+      bm25_relevance: Number((0.86 - index * 0.003).toFixed(6)),
+      token_coverage: Number((0.80 - (index % 5) * 0.03).toFixed(6)),
+      ngram_coverage: Number((0.76 - (index % 7) * 0.025).toFixed(6)),
+    }])),
+  ),
+  score_type: "ocr_bm25_ngram",
+}));
+
+// The lightweight mock also exposes the final KIS contract so the workspace
+// can be exercised without a Qdrant container.  Keep identity fields
+// canonical and make the synthetic evidence obey the same rank-only formula
+// as the production service.
+const kisFusionMockResults = gateFrames.slice(0, 150).map((frame, index) => {
+  const rank = index + 1;
+  const frameUid = `${frame.video_id}:${frame.frame_idx}`;
+  const isReranked = index < 100;
+  // Model a deterministic adjacent-pair swap in the final BEiT window.
+  // The RRF fields retain their pre-rerank positions while the array order is
+  // the final rank, so rank_delta is mathematically meaningful in mock UI.
+  const preRerankRank = isReranked
+    ? (rank % 2 === 0 ? rank - 1 : rank + 1)
+    : rank;
+  const rrfContributions = {
+    branch1: 0.40 / (60 + preRerankRank),
+    branch2: 0.30 / (60 + preRerankRank),
+    ocr: 0.15 / (60 + preRerankRank),
+    asr: 0.15 / (60 + preRerankRank),
+  };
+  const rrfScore = Object.values(rrfContributions).reduce((sum, value) => sum + value, 0);
+  // The BEiT margin is intentionally larger than the paired RRF difference,
+  // which makes the final list ordered by the displayed final score.
+  const beit3Normalized = Number((0.996 - (rank - 1) * 0.004).toFixed(6));
+  const rrfNormalized = Number((0.75 - (preRerankRank - 1) * 0.0005).toFixed(6));
+  const finalScore = Number((0.25 * beit3Normalized + 0.75 * rrfNormalized).toFixed(6));
+  const publicScore = isReranked ? finalScore : Number(rrfScore.toFixed(8));
+  const beit3QueryScores = Object.fromEntries(
+    ["original", "entity", "action", "context", "synonym", "keyword"].map((role, roleIndex) => [
+      role,
+      { cosine: Number((0.78 - index * 0.001 - roleIndex * 0.004).toFixed(6)), rank: roleIndex + 1, role, language: "en" },
+    ]),
+  );
+  const canonical = {
+    frame_uid: frameUid,
+    point_id: rank,
+    global_idx: rank,
+    video_id: frame.video_id,
+    frame_idx: frame.frame_idx,
+    keyframe_n: frame.keyframe_n,
+    pts_time_s: frame.pts_time_s,
+    fps: frame.fps,
+    image_relpath: frame.image_relpath,
+    submission_string: frame.submission_string,
+  };
+  const rerankFields = isReranked
+    ? {
+      beit3_raw_cosine: Number((0.88 - index * 0.002).toFixed(6)),
+      beit3_normalized: beit3Normalized,
+      rrf_normalized: rrfNormalized,
+      beit3_best_query_role: "original",
+      beit3_best_query_language: "en",
+      beit3_query_scores: beit3QueryScores,
+      rank_delta: preRerankRank - rank,
+      rerank_formula: {
+        beit3_weight: 0.25,
+        previous_weight: 0.75,
+        previous_score_field: "rrf_score",
+        expression: "beit3_weight * normalized_beit3 + previous_weight * normalized_rrf",
+      },
+    }
+    : {};
+  return {
+    ...canonical,
+    rank,
+    pre_rerank_rank: preRerankRank,
+    rrf_score: Number(rrfScore.toFixed(8)),
+    final_score: publicScore,
+    score: publicScore,
+    score_type: isReranked ? "beit3_coco_cosine_blend" : "weighted_rrf",
+    branch_agreement_count: 4,
+    observed_branches: ["branch1", "branch2", "ocr", "asr"],
+    branch_ranks: { branch1: preRerankRank, branch2: preRerankRank, ocr: preRerankRank, asr: preRerankRank },
+    rrf_contributions: rrfContributions,
+    branch_normalized_scores: { branch1: 0.85, branch2: 0.8, ocr: 0.7, asr: 0.7 },
+    branch_provenance: {
+      branch1: {
+        final_score: 0.85,
+        best_model: "siglip2",
+        best_query_role: "original",
+        best_query_language: "vi",
+        model_provenance: {
+          siglip2: { observed: true, raw_cosine: 0.86, normalized_score: 0.85, best_query_role: "original", best_query_language: "vi", best_query_rank: 1 },
+          metaclip2: { observed: true, raw_cosine: 0.81, normalized_score: 0.78, best_query_role: "entity", best_query_language: "en", best_query_rank: 2 },
+          beit3: { observed: true, raw_cosine: 0.79, normalized_score: 0.76, best_query_role: "context", best_query_language: "en", best_query_rank: 3 },
+        },
+      },
+      branch2: {
+        dense_observed: true,
+        dense_raw: 0.79,
+        dense_normalized: 0.8,
+        dense_rank: preRerankRank,
+        dense_best_query_role: "entity",
+        dense_best_query_language: "en",
+        sparse_observed: true,
+        sparse_raw: 0.04,
+        sparse_normalized: 0.65,
+        sparse_rank: preRerankRank,
+        sparse_best_query_role: "keyword",
+        sparse_best_query_language: "en",
+        hybrid_score: 0.8,
+        hybrid_rank: preRerankRank,
+        pre_rerank_rank: preRerankRank,
+        reranked_score: 0.82,
+        beit3_raw_cosine: 0.78,
+        beit3_normalized: 0.76,
+        beit3_best_query_role: "original",
+        beit3_best_query_language: "en",
+        dam_winner: { description_en: "mock DAM region", bbox: [0.1, 0.1, 0.4, 0.4] },
+      },
+      ocr: { ocr_text: `HTV TIN TUC ${frame.keyframe_n}`, ocr_best_query_role: "keyword", ocr_best_query_language: "vi", bm25_relevance: 0.7, token_coverage: 0.8, adjacent_bigram_coverage: 0.6, matched_terms: ["htv", "tin", "tuc"] },
+      asr: { asr_transcript: `Deterministic sample transcript for keyframe ${frame.keyframe_n}.`, asr_best_query_role: "original", asr_best_query_language: "vi", bm25_relevance: 0.7, token_coverage: 0.8, adjacent_bigram_coverage: 0.6, asr_segment_id: `${frame.video_id}:s${frame.keyframe_n}`, asr_start_s: frame.pts_time_s, asr_end_s: frame.pts_time_s + 1.5 },
+    },
+    ...rerankFields,
   };
 });
 
@@ -119,17 +414,344 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
         if (pathname === "/api/config") {
           sendJson(response, {
             keyframes_root: path.join(workspaceRoot, "data", "keyframe"),
-            experiment_mode: "nofusion",
+            experiment_mode: "cpu_qdrant_workbench",
             task_types: ["KIS"],
             modalities: ["siglip", "dam", "ocr", "asr"],
-            fusion_enabled: false,
-            reranking_enabled: false,
+            fusion_enabled: true,
+            reranking_enabled: true,
             capabilities: {
               image_search: true,
               video_timeline: true,
               submission_prepare: true,
-              qwen_fallback_control: true,
+              parser_modes: ["local", "direct"],
+              qwen_fallback_control: false,
+              branch1_three_model: true,
+              branch2_dam_hybrid: true,
+              branch3_asr: true,
+              branch3_ocr: true,
+              kis_fusion: true,
             },
+            qwen_enabled: false,
+            gemini_enabled: false,
+          });
+          return;
+        }
+
+        if (pathname === "/api/health") {
+          sendJson(response, {
+            status: "ready",
+            device: "cpu",
+            production_ready: false,
+            qwen_enabled: false,
+            gemini_enabled: false,
+            optional_degraded_components: [],
+            components: {
+              api_process: { ready: true },
+              qdrant: { ready: true },
+              metadata: { ready: true },
+              branch1: { ready: true },
+              branch2: { ready: true },
+              branch3_asr: { ready: true, required: false },
+              branch3_ocr: { ready: true, required: false },
+              kis_fusion: { ready: true, required: false, production_ready: false },
+            },
+          });
+          return;
+        }
+
+        if (pathname === "/api/branch1/health") {
+          sendJson(response, {
+            status: "ready",
+            ready: true,
+            // The mock deliberately mirrors the real provenance policy: a
+            // green operational gate does not prove immutable offline
+            // checkpoint identity, so it must not advertise production
+            // readiness.
+            production_ready: false,
+            fail_closed: true,
+            models: {
+              siglip2: { data: { ready: true }, collection: { ready: true }, text_encoder: { ready: true } },
+              metaclip2: { data: { ready: true }, collection: { ready: true }, text_encoder: { ready: true } },
+              beit3: { data: { ready: true }, collection: { ready: true }, text_encoder: { ready: true } },
+            },
+          });
+          return;
+        }
+
+        if (pathname === "/api/branch2/health") {
+          sendJson(response, {
+            status: "ready",
+            ready: true,
+            production_ready: false,
+            fail_closed: true,
+            components: {
+              dam_data: { ready: true },
+              dam_collection: { ready: true },
+              bm25: { ready: true },
+              bge_text_encoder: { ready: true },
+              beit3_collection: { ready: true },
+              beit3_text_encoder: { ready: true },
+              frame_mapping: { ready: true },
+            },
+          });
+          return;
+        }
+
+        if (pathname === "/api/branch3/asr/health") {
+          sendJson(response, {
+            status: "ready",
+            ready: true,
+            production_ready: false,
+            required: false,
+            segments: 55168,
+            mapped_segments: 55168,
+            schema_version: "branch3.asr-index.v2",
+            revision_verified: false,
+            warnings: ["ASR offline model revision is not cryptographically verified"],
+          });
+          return;
+        }
+
+        if (pathname === "/api/branch3/ocr/health") {
+          sendJson(response, {
+            status: "ready",
+            ready: true,
+            production_ready: false,
+            required: false,
+            fail_closed: false,
+            schema_version: "branch3.ocr-index.v3",
+            sqlite_user_version: 3,
+            frames: 247956,
+            fts_frames: 247956,
+            fts_unmapped_rows: 0,
+            mapped_frames: 247956,
+            videos: 873,
+            distinct_point_ids: 247956,
+            min_point_id: 1,
+            max_point_id: 247956,
+            manifest_build_id: "mock-ocr-build",
+            internal_build_id: "mock-ocr-build",
+            opened_build_id: "mock-ocr-build",
+            fts_content_verified: true,
+            fts_content_fingerprint: "mock-ocr-fts-fingerprint",
+            lexical_contract_version: "branch3.ocr-lexical.v3",
+            source_audit_performed: true,
+            source_stale: false,
+            source_drift_is_blocking: false,
+            source_audit_age_s: 0,
+            database_matches_manifest: true,
+            source_matches_manifest: true,
+            source_stat_matches_manifest: true,
+            canonical_metadata_matches_manifest: true,
+            canonical_metadata_stat_matches_manifest: true,
+            canonical_fingerprint_matches: true,
+            source_fingerprint_matches_manifest: true,
+            source_file_count_matches_manifest: true,
+            source_directory_file_count: 873,
+            source_directory_matches_manifest: true,
+            database_stat_matches_manifest: true,
+            internal_metadata_matches: true,
+            build_id_matches: true,
+            connection_generation: 1,
+             connection_reopened: false,
+             connection_error: null,
+             source_validation_age_s: 0,
+             artifact_summary: {
+               source_total: 873,
+               source_verified: 873,
+               source_failed: 0,
+               hash_recomputed: 0,
+             },
+             artifact_diagnostics: [],
+            offline_identity: {
+              model_id: null,
+              engine: "OCR source export",
+              revision_verified: false,
+            },
+            revision_verified: false,
+            warnings: ["OCR offline model revision is not cryptographically verified"],
+          });
+          return;
+        }
+
+        if (pathname === "/api/fusion/kis/health") {
+          sendJson(response, {
+            schema_version: "kis.fusion.health.v1",
+            branch: "final_fusion",
+            task_type: "KIS",
+            status: "ready",
+            ready: true,
+            required: false,
+            production_ready: false,
+            fail_closed: true,
+            rrf_k: 60,
+            final_top_k: 150,
+            rerank_top_k: 100,
+            beit3_weight: 0.25,
+            rrf_weight: 0.75,
+            branch_weights: { branch1: 0.4, branch2: 0.3, ocr: 0.15, asr: 0.15 },
+            components: {
+              branch1: { ready: true, production_ready: false },
+              branch2: { ready: true, production_ready: false },
+              asr: { ready: true, required: false, production_ready: false },
+              ocr: { ready: true, required: false, production_ready: false },
+              canonical_frame_mapping: { ready: true },
+              beit3: { ready: true },
+              query_cache: { ready: true },
+              execution_contract: {
+                ready: true,
+                branches: { branch1: true, branch2: true, asr: true, ocr: true },
+              },
+              resource_qualification: { ready: false, production_ready: false },
+            },
+            api_rss_bytes: 0,
+            });
+          return;
+        }
+
+        if (pathname === "/api/search/branch1") {
+          await readJsonBody(request);
+          sendJson(response, {
+            schema_version: "branch1.result.v1",
+            fusion_applied: true,
+            reranking_applied: false,
+            weights: { siglip2: 0.45, metaclip2: 0.30, beit3: 0.25 },
+            per_stream_top_k: 2000,
+            final_top_k: 1500,
+            candidate_union_count: branch1MockResults.length,
+            result_count: branch1MockResults.length,
+            stream_count: 30,
+            tokenizer_diagnostics: {
+              siglip2: Array.from({ length: 12 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)], language: index % 2 === 0 ? "vi" : "en", token_count: 8, max_tokens: 64, truncated: false })),
+              metaclip2: Array.from({ length: 12 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)], language: index % 2 === 0 ? "vi" : "en", token_count: 8, max_tokens: 77, truncated: false })),
+              beit3: Array.from({ length: 6 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][index], language: "en", token_count: 8, max_tokens: 64, truncated: false })),
+            },
+            query_streams: {
+              siglip2: Array.from({ length: 12 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)], language: index % 2 === 0 ? "vi" : "en", stream: `${["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)]}:${index % 2 === 0 ? "vi" : "en"}` })),
+              metaclip2: Array.from({ length: 12 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)], language: index % 2 === 0 ? "vi" : "en", stream: `${["original", "entity", "action", "context", "synonym", "keyword"][Math.floor(index / 2)]}:${index % 2 === 0 ? "vi" : "en"}` })),
+              beit3: Array.from({ length: 6 }, (_, index) => ({ role: ["original", "entity", "action", "context", "synonym", "keyword"][index], language: "en", stream: `${["original", "entity", "action", "context", "synonym", "keyword"][index]}:en` })),
+            },
+            candidate_count_before_gate: branch1MockResults.length,
+            gate_top_k: 1500,
+            future_fusion_eligible: true,
+            timing: { models: {}, fusion_ms: 0.2, total_ms: 3.4 },
+            results: branch1MockResults,
+          });
+          return;
+        }
+
+        if (pathname === "/api/search/fusion/kis") {
+          await readJsonBody(request);
+          sendJson(response, {
+            schema_version: "kis.fusion.result.v1",
+            task_type: "KIS",
+            fusion_applied: true,
+            fusion_method: "weighted_rrf",
+            reranking_applied: true,
+            rrf_k: 60,
+            branch_weights: { branch1: 0.4, branch2: 0.3, ocr: 0.15, asr: 0.15 },
+            branch_pool_counts: { branch1: 1500, branch2: 500, ocr: 500, asr: 500 },
+            branch_pool_limits: { branch1: 1500, branch2: 500, ocr: 500, asr: 500 },
+            final_top_k: 150,
+            candidate_count_before_gate: 1500,
+            pre_rerank_top_k: 150,
+            rerank_top_k: 100,
+            beit3_weight: 0.25,
+            rrf_weight: 0.75,
+            result_count: kisFusionMockResults.length,
+            timing: { branches: {}, rrf_ms: 0.2, beit3_rerank_ms: 0.3, total_ms: 1.5 },
+            rerank: { candidate_count: 150, rerank_count: 100, weights: { beit3: 0.25, previous: 0.75 }, scoring: "cosine", checkpoint_task: "BEiT-3 COCO Retrieval" },
+            results: kisFusionMockResults,
+          });
+          return;
+        }
+
+        if (pathname === "/api/search/branch2") {
+          await readJsonBody(request);
+          sendJson(response, {
+            schema_version: "branch2.result.v1",
+            fusion_applied: true,
+            reranking_applied: true,
+            hybrid_weights: { dense: 0.70, sparse: 0.30 },
+            rerank_weights: { beit3: 0.40, previous: 0.60 },
+            per_stream_top_k: 2000,
+            pre_rerank_top_k: 500,
+            rerank_top_k: 100,
+            result_count: branch2MockResults.length,
+            candidate_count_before_gate: branch2MockResults.length,
+            gate_top_k: 500,
+            future_fusion_eligible: true,
+            dense_candidate_count: 80,
+            sparse_candidate_count: 80,
+            stream_count: 18,
+            query_streams: {
+              dam_dense: ["original", "entity", "action", "context", "synonym", "keyword"].map((role) => ({ role, language: "en", stream: `${role}:en` })),
+              bm25_sparse: ["original", "entity", "action", "context", "synonym", "keyword"].map((role) => ({ role, language: "en", stream: `${role}:en` })),
+              beit3_rerank: ["original", "entity", "action", "context", "synonym", "keyword"].map((role) => ({ role, language: "en", stream: `${role}:en` })),
+            },
+            timing: { bge_cache_hit: false, beit_cache_hit: false, dense_ms: 1.1, sparse_ms: 0.8, total_ms: 4.7 },
+            tokenizer_diagnostics: {
+              bge_m3: Array.from({ length: 6 }, () => ({ token_count: 8, max_tokens: 512, truncated: false })),
+              beit3: Array.from({ length: 6 }, () => ({ token_count: 8, max_tokens: 64, truncated: false })),
+            },
+            rerank: {
+              candidate_count: branch2MockResults.length,
+              rerank_count: 100,
+              weights: { beit3: 0.40, previous: 0.60 },
+              text_encoder_output: "language_head",
+              checkpoint_task: "BEiT-3 COCO Retrieval",
+              scoring: "cosine",
+            },
+            results: branch2MockResults,
+          });
+          return;
+        }
+
+        if (pathname === "/api/search/branch3/asr") {
+          await readJsonBody(request);
+          sendJson(response, {
+            schema_version: "branch3.asr.result.v1",
+            fusion_applied: false,
+            reranking_applied: false,
+            query_roles: ["original", "entity", "action", "context", "synonym", "keyword"],
+            per_stream_top_k: 2000,
+            final_top_k: 500,
+            candidate_segment_count: 100,
+            candidate_frame_count: 100,
+            query_languages: ["vi", "en"],
+            query_streams: ["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => ({ role, language, stream: `${role}:${language}` }))),
+            stream_count: 12,
+            stream_counts: Object.fromEntries(["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => [`${role}:${language}`, 100]))),
+            result_count: branch3AsrMockResults.length,
+            candidate_count_before_gate: branch3AsrMockResults.length,
+            gate_top_k: 500,
+            future_fusion_eligible: true,
+            timing: { asr_ms: 2.1, total_ms: 2.1 },
+            results: branch3AsrMockResults,
+          });
+          return;
+        }
+
+        if (pathname === "/api/search/branch3/ocr") {
+          await readJsonBody(request);
+          sendJson(response, {
+            schema_version: "branch3.ocr.result.v1",
+            fusion_applied: false,
+            reranking_applied: false,
+            query_roles: ["original", "entity", "action", "context", "synonym", "keyword"],
+            query_languages: ["vi", "en"],
+            query_streams: ["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => ({ role, language, stream: `${role}:${language}` }))),
+            stream_count: 12,
+            per_stream_top_k: 2000,
+            final_top_k: 500,
+            candidate_frame_count: 100,
+            stream_counts: Object.fromEntries(["original", "entity", "action", "context", "synonym", "keyword"].flatMap((role) => ["vi", "en"].map((language) => [`${role}:${language}`, 100]))),
+            result_count: branch3OcrMockResults.length,
+            candidate_count_before_gate: branch3OcrMockResults.length,
+            gate_top_k: 500,
+            future_fusion_eligible: true,
+            timing: { ocr_ms: 2.1, total_ms: 2.1 },
+            results: branch3OcrMockResults,
           });
           return;
         }

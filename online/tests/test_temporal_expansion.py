@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from online.src.retrieval.modality_search import IndependentModalitySearch
+from online.src.retrieval.modalities.workbench import IndependentModalitySearch
 
 
 def _unit(index: int) -> np.ndarray:
