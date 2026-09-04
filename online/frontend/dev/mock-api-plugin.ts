@@ -6,6 +6,9 @@ import type { Plugin } from "vite";
 const MOCK_VIDEO_ID = "L21_V001";
 const MOCK_FRAME_COUNT = 128;
 const MOCK_POOL_SIZE = 100;
+const MOCK_FPS = 30;
+const MOCK_DURATION_SECONDS = 240;
+const MOCK_MAX_FRAME_IDX = Math.ceil(MOCK_DURATION_SECONDS * MOCK_FPS) - 1;
 
 const frames = Array.from({ length: MOCK_FRAME_COUNT }, (_, index) => {
   const keyframeN = index + 1;
@@ -27,6 +30,39 @@ const frames = Array.from({ length: MOCK_FRAME_COUNT }, (_, index) => {
     ocr_text: `HTV TIN TUC ${keyframeN}`,
   };
 });
+
+function resolveMockSourceFrame(videoId: string, frameIdx: number) {
+  if (!/^[A-Z0-9]+_V\d+$/.test(videoId)
+    || !Number.isInteger(frameIdx)
+    || frameIdx < 0
+    || frameIdx > MOCK_MAX_FRAME_IDX) return null;
+  const exact = frames.find((frame) => frame.frame_idx === frameIdx) || null;
+  const preview = exact || [...frames].sort((left, right) => (
+    Math.abs(left.frame_idx - frameIdx) - Math.abs(right.frame_idx - frameIdx)
+    || left.frame_idx - right.frame_idx
+  ))[0];
+  return {
+    video_id: videoId,
+    frame_idx: frameIdx,
+    frame_uid: `${videoId}:${frameIdx}`,
+    keyframe_n: exact?.keyframe_n ?? null,
+    pts_time_s: Number((frameIdx / MOCK_FPS).toFixed(6)),
+    fps: MOCK_FPS,
+    image_relpath: exact ? `keyframes/${videoId}/${exact.filename}` : "",
+    indexed_keyframe: Boolean(exact),
+    validation: exact ? "canonical" : "source_timeline",
+    submission_string: `${videoId}, ${frameIdx}`,
+    frame_index_base: 0,
+    max_frame_idx: MOCK_MAX_FRAME_IDX,
+    duration_s: MOCK_DURATION_SECONDS,
+    timing_method: "exact-anchor-piecewise-linear-v1",
+    preview_frame_idx: preview.frame_idx,
+    preview_keyframe_n: preview.keyframe_n,
+    preview_pts_time_s: preview.pts_time_s,
+    preview_image_relpath: `keyframes/${videoId}/${preview.filename}`,
+    related_seed_frame_idx: preview.frame_idx,
+  };
+}
 
 /**
  * Keep mock pools at the same boundaries as the real API.  The generic
@@ -415,7 +451,7 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
           sendJson(response, {
             keyframes_root: path.join(workspaceRoot, "data", "keyframe"),
             experiment_mode: "cpu_qdrant_workbench",
-            task_types: ["KIS"],
+            task_types: ["KIS", "VQA", "TRAKE"],
             modalities: ["siglip", "dam", "ocr", "asr"],
             fusion_enabled: true,
             reranking_enabled: true,
@@ -430,6 +466,10 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
               branch3_asr: true,
               branch3_ocr: true,
               kis_fusion: true,
+              kis_query_planning: true,
+              kis_ordered_events: true,
+              video_visual_fusion: true,
+              related_frame_fill: true,
             },
             qwen_enabled: false,
             gemini_enabled: false,
@@ -666,6 +706,90 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
           return;
         }
 
+        if (pathname === "/api/search/fusion/kis/temporal") {
+          const body = await readJsonBody(request);
+          const suppliedEvents = Array.isArray(body.events) ? body.events : [];
+          const events = (suppliedEvents.length >= 2 ? suppliedEvents : [
+            { order: 1, description: "A cyclist crosses the finish line", en: "A cyclist crosses the finish line" },
+            { order: 2, description: "Another cyclist follows", en: "Another cyclist follows" },
+            { order: 3, description: "A third cyclist arrives", en: "A third cyclist arrives" },
+          ]).slice(0, 6) as Array<{ order?: number; description?: string; en?: string }>;
+          const matchedEvents = events.map((event, index) => {
+            const source = kisFusionMockResults[3 + index * 5];
+            return {
+              ...source,
+              rank: 4 + index * 5,
+              event_order: Number(event.order) || index + 1,
+              event_description: String(event.description || `Event ${index + 1}`),
+              event_query: String(event.en || event.description || `Event ${index + 1}`),
+              retrieval_modality: "kis_fusion",
+            };
+          });
+          const scores = matchedEvents.map((event) => Number(event.final_score));
+          const minimumEventScore = Math.min(...scores);
+          const meanEventScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+          const gapsSeconds = matchedEvents.slice(1).map((event, index) =>
+            Number((event.pts_time_s - matchedEvents[index].pts_time_s).toFixed(6))
+          );
+          sendJson(response, {
+            schema_version: "kis.temporal.result.v1",
+            task_type: String(body.task_type || "KIS"),
+            operation: "ordered_kis_fusion",
+            experiment_mode: "full_kis_per_event_with_temporal_linking",
+            modality: "kis_fusion",
+            events,
+            event_count: events.length,
+            top_k_per_event: 150,
+            top_k_sequences: Number(body.top_k_sequences) || 100,
+            event_candidate_reservoir_size: 150,
+            sequence_reservoir_size: 1,
+            sequence_reservoir_count: 1,
+            paths_per_video: 1,
+            max_gap_seconds: Number(body.max_gap_seconds) || 30,
+            anchor_query: "",
+            anchor_query_applied: false,
+            intersection_video_count: 1,
+            ordered_sequence_count: 1,
+            event_fusion_applied: true,
+            cross_modal_fusion_applied: true,
+            fusion_applied: true,
+            reranking_applied: true,
+            complete_sequence_required: true,
+            query_focus_policy: "event-specific text plus shared parent context only",
+            frame_index_base: 0,
+            frame_identity_policy: "canonical_indexed_source_frame_idx",
+            ordering_fields: ["frame_idx", "pts_time_s"],
+            event_pools: events.map((event, index) => ({
+              order: Number(event.order) || index + 1,
+              description: String(event.description || `Event ${index + 1}`),
+              query: String(event.en || event.description || `Event ${index + 1}`),
+              modality: "kis_fusion",
+              score_type: "kis_final_score",
+              result_count: 150,
+              candidate_video_count: 1,
+              branch_pool_counts: { branch1: 1500, branch2: 500, ocr: 500, asr: 500 },
+            })),
+            sequences: [{
+              rank: 1,
+              video_id: MOCK_VIDEO_ID,
+              minimum_event_score: Number(minimumEventScore.toFixed(6)),
+              mean_event_score: Number(meanEventScore.toFixed(6)),
+              sequence_score: Number(minimumEventScore.toFixed(6)),
+              score_type: "minimum_then_mean_kis_final_score",
+              global_rank_sum: matchedEvents.reduce((sum, event) => sum + event.rank, 0),
+              span_seconds: Number((matchedEvents.at(-1)!.pts_time_s - matchedEvents[0].pts_time_s).toFixed(6)),
+              gaps_seconds: gapsSeconds,
+              matched_frames: matchedEvents.map((event) => event.frame_idx),
+              timestamps: matchedEvents.map((event) => event.pts_time_s),
+              matched_events: matchedEvents,
+              submission_string: matchedEvents[0].submission_string,
+            }],
+            reserve_sequences: [],
+            execution_time_ms: 6.4,
+          });
+          return;
+        }
+
         if (pathname === "/api/search/branch2") {
           await readJsonBody(request);
           sendJson(response, {
@@ -796,6 +920,47 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
               ],
               vqa_question: "",
             },
+          });
+          return;
+        }
+
+        if (pathname === "/api/query/kis/plan") {
+          const body = await readJsonBody(request);
+          const query = String(body.query || "Local sample query").replace(/\s+/g, " ").trim();
+          const marked = query.replace(/(?:^|\s)E\s*\d+\s*[:.)-]\s*/gi, " | ");
+          const eventParts = marked.split(/\s*(?:\||\bthen\b|\bnext\b|\bfinally\b|\bsau đó\b|\btiếp theo\b|\bcuối cùng\b)\s*/i)
+            .map((value) => value.trim().replace(/^[,.;:-]+|[,.;:-]+$/g, ""))
+            .filter((value) => value.split(/\s+/).length >= 2)
+            .slice(0, 6);
+          const roles = ["original", "entity", "action", "context", "synonym", "keyword"];
+          const suppliedBundle = body.query_bundle as { schema_version?: string; queries?: Array<{ role?: string; vi?: string; en?: string }> } | undefined;
+          const original = suppliedBundle?.queries?.find((item) => item.role === "original");
+          const suppliedMatches = suppliedBundle?.schema_version === "branch1.query.v1"
+            && [original?.vi, original?.en].some((value) => String(value || "").replace(/\s+/g, " ").trim().toLocaleLowerCase() === query.toLocaleLowerCase());
+          const queryBundle = suppliedMatches ? suppliedBundle : {
+            schema_version: "branch1.query.v1",
+            queries: roles.map((role) => ({ role, vi: query, en: query })),
+          };
+          const events = eventParts.length >= 2 ? eventParts.map((value, index) => ({
+            order: index + 1,
+            description: value,
+            vi: value,
+            en: value,
+          })) : [];
+          sendJson(response, {
+            schema_version: "kis.query-plan.v1",
+            task_type: String(body.task_type || "KIS"),
+            source_query: query,
+            query_bundle: queryBundle,
+            bundle_source: suppliedMatches ? "preserved_matching_bundle" : "local_deterministic",
+            bundle_preserved: suppliedMatches,
+            events,
+            event_count: events.length,
+            is_temporal: events.length >= 2,
+            shared_context: { vi: query, en: query },
+            translation_generated: false,
+            external_llm_used: false,
+            retrieval_invoked: false,
           });
           return;
         }
@@ -980,11 +1145,88 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
           return;
         }
 
+        if (pathname === "/api/submission/related-frames") {
+          const body = await readJsonBody(request);
+          const videoId = String(body.video_id || "").toUpperCase().replaceAll("-", "_");
+          const frameIdx = Number(body.frame_idx);
+          const limit = Math.min(99, Math.max(1, Number(body.limit) || 99));
+          const requestedSeed = resolveMockSourceFrame(videoId, frameIdx);
+          if (!requestedSeed) {
+            sendJson(response, { detail: "Seed frame is outside the verified mock timeline" }, 404);
+            return;
+          }
+          const embeddingSeedFrameIdx = requestedSeed.related_seed_frame_idx;
+          const seedIndex = gateFrames.findIndex(
+            (frame) => frame.video_id === videoId && frame.frame_idx === embeddingSeedFrameIdx,
+          );
+          if (seedIndex < 0) {
+            sendJson(response, { detail: "Nearest indexed seed is unavailable" }, 404);
+            return;
+          }
+          const seed = gateFrames[seedIndex];
+          const results = gateFrames
+            .map((frame, index) => ({ frame, index }))
+            .filter(({ index }) => index !== seedIndex)
+            .sort((left, right) => (
+              Math.abs(left.index - seedIndex) - Math.abs(right.index - seedIndex)
+              || left.index - right.index
+            ))
+            .slice(0, limit)
+            .map(({ frame, index }, resultIndex) => {
+              const relatedRank = resultIndex + 1;
+              const relatedScore = Number((1 / (60 + relatedRank)).toFixed(8));
+              return {
+                ...frame,
+                frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+                point_id: index + 1,
+                global_idx: index + 1,
+                rank: relatedRank,
+                related_rank: relatedRank,
+                related_score: relatedScore,
+                score: relatedScore,
+                score_type: "visual_neighbor_weighted_rrf",
+                retrieval_modality: "related_frame",
+                source: "auto-related",
+                validation: "canonical",
+                related_ranks: {
+                  siglip2: relatedRank,
+                  metaclip2: relatedRank,
+                  beit3: relatedRank,
+                },
+              };
+            });
+          sendJson(response, {
+            schema_version: "submission.related-frames.v1",
+            algorithm: "stored-vector weighted RRF",
+            query_pipeline_invoked: false,
+            rrf_k: 60,
+            weights: { siglip2: 0.45, metaclip2: 0.30, beit3: 0.25 },
+            seed: {
+              ...seed,
+              frame_uid: `${seed.video_id}:${seed.frame_idx}`,
+              point_id: seedIndex + 1,
+              global_idx: seedIndex + 1,
+              validation: "canonical",
+            },
+            requested_seed: requestedSeed,
+            embedding_seed: {
+              video_id: videoId,
+              frame_idx: embeddingSeedFrameIdx,
+              reason: requestedSeed.indexed_keyframe
+                ? "exact indexed embedding"
+                : "nearest indexed embedding to the exact source frame",
+            },
+            result_count: results.length,
+            results,
+          });
+          return;
+        }
+
         if (pathname === "/api/submission/prepare") {
           const body = await readJsonBody(request);
           const taskType = String(body.task_type || "KIS").toUpperCase();
           const queryId = String(body.query_id || "1");
-          const canonicalFrameKeys = new Set(frames.map((frame) => `${frame.video_id}:${frame.frame_idx}`));
+          const canonicalFrameKeys = new Set(gateFrames.map((frame) => `${frame.video_id}:${frame.frame_idx}`));
           if (taskType === "TRAKE") {
             type SubmittedSequence = { video_id?: string; events?: Array<{ event_order?: number; frame_idx?: number; pts_time_s?: number }> };
             const manualSequences = (Array.isArray(body.manual_sequences) ? body.manual_sequences : []) as SubmittedSequence[];
@@ -997,9 +1239,9 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
               if (!sequenceVideoId || events.length !== expected || expected < 1) return null;
               events.sort((left, right) => Number(left.event_order) - Number(right.event_order));
               const canonicalEvents = events.map((event, index) => {
-                const canonical = frames.find((frame) => frame.video_id === sequenceVideoId && frame.frame_idx === Number(event.frame_idx));
-                if (!canonical || Number(event.event_order || index + 1) !== index + 1) return null;
-                return { ...event, event_order: index + 1, pts_time_s: event.pts_time_s ?? canonical.pts_time_s };
+                const verified = resolveMockSourceFrame(sequenceVideoId, Number(event.frame_idx));
+                if (!verified || Number(event.event_order || index + 1) !== index + 1) return null;
+                return { ...verified, event_order: index + 1 };
               });
               if (canonicalEvents.some((event) => event === null)) return null;
               const typedEvents = canonicalEvents as Array<{ event_order: number; frame_idx?: number; pts_time_s?: number }>;
@@ -1020,7 +1262,7 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
                 rows: [],
                 official_csv: officialCsvPayload("TRAKE", []),
                 warnings: [],
-                errors: ["A manual TRAKE frame is not present in the canonical mock timeline."],
+                errors: ["A manual TRAKE frame is outside the verified mock source timeline."],
               }, 400);
               return;
             }
@@ -1060,7 +1302,7 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
             if (!value || typeof value !== "object") return true;
             const item = value as { video_id?: string; frame_idx?: number };
             const videoId = String(item.video_id || "").toUpperCase().replaceAll("-", "_");
-            return !canonicalFrameKeys.has(`${videoId}:${Number(item.frame_idx)}`);
+            return resolveMockSourceFrame(videoId, Number(item.frame_idx)) === null;
           });
           if (invalidManual) {
             sendJson(response, {
@@ -1072,22 +1314,28 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
               missing_rows: 100,
               rows: [],
               warnings: [],
-              errors: ["A manual frame is not present in the canonical mock timeline."],
+              errors: ["A manual frame is outside the verified mock source timeline."],
             }, 400);
             return;
           }
           const seen = new Set<string>();
           const chosen: Array<{ video_id: string; frame_idx: number }> = [];
-          [...manual, ...candidates, ...frames].forEach((value) => {
+          const addFrame = (value: unknown, allowSourceFrame: boolean) => {
             if (chosen.length >= 100 || !value || typeof value !== "object") return;
             const item = value as { video_id?: string; frame_idx?: number };
             const videoId = String(item.video_id || MOCK_VIDEO_ID).toUpperCase().replaceAll("-", "_");
             const frameIdx = Number(item.frame_idx);
             const key = `${videoId}:${frameIdx}`;
-            if (!Number.isInteger(frameIdx) || frameIdx < 0 || !canonicalFrameKeys.has(key) || seen.has(key)) return;
+            const verified = allowSourceFrame
+              ? resolveMockSourceFrame(videoId, frameIdx) !== null
+              : canonicalFrameKeys.has(key);
+            if (!Number.isInteger(frameIdx) || frameIdx < 0 || !verified || seen.has(key)) return;
             seen.add(key);
             chosen.push({ video_id: videoId, frame_idx: frameIdx });
-          });
+          };
+          manual.forEach((value) => addFrame(value, true));
+          candidates.forEach((value) => addFrame(value, false));
+          frames.forEach((value) => addFrame(value, false));
           const answerMissing = taskType === "VQA" && !answer.trim();
           const targetRows = Math.min(100, Math.max(1, Number(body.target_rows) || 100));
           const limited = chosen.slice(0, targetRows);
@@ -1152,6 +1400,54 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
               fusion_applied: false,
               reranking_applied: false,
               results: resultFrames,
+            },
+          });
+          return;
+        }
+
+        const visualFusionMatch = pathname.match(/^\/api\/video\/([^/]+)\/search\/visual-fusion$/);
+        if (visualFusionMatch) {
+          const body = await readJsonBody(request);
+          const videoId = decodeURIComponent(visualFusionMatch[1]).toUpperCase().replaceAll("-", "_");
+          const topK = Math.min(100, Math.max(1, Number(body.top_k) || 50));
+          const results = branch1MockResults.slice(0, topK).map((frame, index) => ({
+            ...frame,
+            video_id: videoId,
+            frame_uid: `${videoId}:${frame.frame_idx}`,
+            image_relpath: `keyframes/${videoId}/${frame.filename}`,
+            submission_string: `${videoId}, ${frame.frame_idx}`,
+            rank: index + 1,
+          }));
+          sendJson(response, {
+            schema_version: "video.visual-fusion.result.v1",
+            experiment_mode: "native_visual_video_fusion",
+            operation: "visual_video_drilldown",
+            video_id: videoId,
+            scope_selected_by_user: true,
+            evaluated_frames: frames.length,
+            models: ["siglip2", "metaclip2", "beit3"],
+            model_weights: { siglip2: 0.45, metaclip2: 0.30, beit3: 0.25 },
+            fusion_applied: true,
+            cross_modal_fusion_applied: false,
+            reranking_applied: false,
+            execution_time_ms: 2.1,
+            modality_result: {
+              modality: "visual_fusion",
+              display_name: `Visual fusion inside ${videoId}`,
+              status: "ok",
+              reason: "",
+              query: String(body.query || "visual query"),
+              query_source: "scoped_visual_query",
+              score_type: "weighted_zsigmoid_fusion",
+              score_description: "45% SigLIP2 + 30% MetaCLIP2 + 25% BEIT3, restricted to this video",
+              result_count: results.length,
+              evaluated_frames: frames.length,
+              scope: "video",
+              video_id: videoId,
+              fusion_applied: true,
+              reranking_applied: false,
+              weights: { siglip2: 0.45, metaclip2: 0.30, beit3: 0.25 },
+              results,
             },
           });
           return;
@@ -1240,7 +1536,7 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
           } catch {
             sendJson(response, {
               author: "AIC local mock",
-              length: 240,
+              length: MOCK_DURATION_SECONDS,
               title: `${videoId} mock video`,
               watch_url: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
             });
@@ -1258,10 +1554,61 @@ export function mockApiPlugin(workspaceRoot: string): Plugin {
         if (timelineMatch) {
           const videoId = decodeURIComponent(timelineMatch[1]).toUpperCase().replaceAll("-", "_");
           sendJson(response, {
+            schema_version: "video.frame-timeline.v1",
             video_id: videoId,
-            fps: 30,
+            frame_index_base: 0,
+            fps: MOCK_FPS,
+            duration_s: MOCK_DURATION_SECONDS,
+            max_frame_idx: MOCK_MAX_FRAME_IDX,
+            frame_count: MOCK_MAX_FRAME_IDX + 1,
             keyframe_count: frames.length,
+            timing_method: "exact-anchor-piecewise-linear-v1",
             keyframes: frames.map((frame) => ({ ...frame, video_id: videoId })),
+          });
+          return;
+        }
+
+        const sourceFrameMatch = pathname.match(/^\/api\/video\/([^/]+)\/source-frame\/(\d+)$/);
+        if (sourceFrameMatch) {
+          const videoId = decodeURIComponent(sourceFrameMatch[1]).toUpperCase().replaceAll("-", "_");
+          const frameIdx = Number(sourceFrameMatch[2]);
+          const sourceFrame = resolveMockSourceFrame(videoId, frameIdx);
+          if (!sourceFrame) {
+            sendJson(response, {
+              detail: `Frame index must be between 0 and ${MOCK_MAX_FRAME_IDX}`,
+            }, 404);
+            return;
+          }
+          sendJson(response, {
+            schema_version: "video.source-frame.v1",
+            exact_match: true,
+            source_frame: sourceFrame,
+          });
+          return;
+        }
+
+        const exactFrameMatch = pathname.match(/^\/api\/frame\/([^/]+)\/(\d+)$/);
+        if (exactFrameMatch) {
+          const videoId = decodeURIComponent(exactFrameMatch[1]).toUpperCase().replaceAll("-", "_");
+          const frameIdx = Number(exactFrameMatch[2]);
+          const index = gateFrames.findIndex(
+            (frame) => frame.video_id === videoId && frame.frame_idx === frameIdx,
+          );
+          if (index < 0) {
+            sendJson(response, { detail: "Exact indexed frame not found" }, 404);
+            return;
+          }
+          const frame = gateFrames[index];
+          sendJson(response, {
+            schema_version: "frame.identity.v1",
+            exact_match: true,
+            keyframe: {
+              ...frame,
+              frame_uid: `${frame.video_id}:${frame.frame_idx}`,
+              point_id: index + 1,
+              global_idx: index + 1,
+              validation: "canonical",
+            },
           });
           return;
         }

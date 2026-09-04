@@ -8,17 +8,24 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from online.src.retrieval.infrastructure import resources
 from online.src.retrieval.infrastructure.resources import (
     MAX_PRODUCTION_RSS_BYTES,
     RESOURCE_QUALIFICATION_SCHEMA,
+    current_process_rss_bytes,
+    peak_process_rss_bytes,
     resource_qualification,
 )
 
 
 def write_runtime_fingerprint(root: Path) -> str:
-    material = {"compose": {"sha256": "a" * 64}, "images": {"api": "sha256:api", "qdrant": "sha256:qdrant"}}
+    material = {
+        "compose": {"sha256": "a" * 64},
+        "images": {"api": "sha256:api", "qdrant": "sha256:qdrant"},
+    }
     canonical = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     (root / "runtime_fingerprint.json").write_text(
@@ -35,6 +42,32 @@ def write_runtime_fingerprint(root: Path) -> str:
 
 
 class ResourceQualificationTests(unittest.TestCase):
+    def test_macos_current_rss_uses_ps_kib_units(self) -> None:
+        completed = SimpleNamespace(stdout="12345\n")
+        with (
+            patch.object(resources.sys, "platform", "darwin"),
+            patch.object(resources.Path, "read_text", side_effect=OSError),
+            patch.object(resources.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(current_process_rss_bytes(), 12345 * 1024)
+        run.assert_called_once()
+
+    def test_macos_peak_rss_is_already_bytes(self) -> None:
+        usage = SimpleNamespace(ru_maxrss=987_654_321)
+        with (
+            patch.object(resources.sys, "platform", "darwin"),
+            patch.object(resources.resource, "getrusage", return_value=usage),
+        ):
+            self.assertEqual(peak_process_rss_bytes(), 987_654_321)
+
+    def test_linux_peak_rss_converts_kib_to_bytes(self) -> None:
+        usage = SimpleNamespace(ru_maxrss=12345)
+        with (
+            patch.object(resources.sys, "platform", "linux"),
+            patch.object(resources.resource, "getrusage", return_value=usage),
+        ):
+            self.assertEqual(peak_process_rss_bytes(), 12345 * 1024)
+
     def test_missing_report_is_not_production_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = resource_qualification(Path(directory))
@@ -64,9 +97,7 @@ class ResourceQualificationTests(unittest.TestCase):
                 "compose_fingerprint": fingerprint,
                 "measured_at": "2026-08-30T00:00:00+00:00",
             }
-            (root / "resource_qualification.json").write_text(
-                json.dumps(report), encoding="utf-8"
-            )
+            (root / "resource_qualification.json").write_text(json.dumps(report), encoding="utf-8")
             with patch.dict(os.environ, {"AIC_COMPOSE_FINGERPRINT": fingerprint}, clear=False):
                 self.assertTrue(resource_qualification(root)["production_ready"])
                 report["stack_peak_rss_bytes"] = MAX_PRODUCTION_RSS_BYTES + 1
@@ -87,7 +118,10 @@ class ResourceQualificationTests(unittest.TestCase):
                 "api_peak_rss_bytes": 1,
                 "worker_peak_rss_bytes": 0,
                 "qdrant_peak_rss_bytes": 0,
-                "coverage": {name: True for name in ("branch1", "branch2", "siglip2", "metaclip2", "bge_m3", "beit3")},
+                "coverage": {
+                    name: True
+                    for name in ("branch1", "branch2", "siglip2", "metaclip2", "bge_m3", "beit3")
+                },
                 "compose_fingerprint": fingerprint,
                 "measured_at": "2026-08-30T00:00:00+00:00",
             }
@@ -108,7 +142,10 @@ class ResourceQualificationTests(unittest.TestCase):
                 "api_peak_rss_bytes": 1,
                 "worker_peak_rss_bytes": 0,
                 "qdrant_peak_rss_bytes": 0,
-                "coverage": {name: True for name in ("branch1", "branch2", "siglip2", "metaclip2", "bge_m3", "beit3")},
+                "coverage": {
+                    name: True
+                    for name in ("branch1", "branch2", "siglip2", "metaclip2", "bge_m3", "beit3")
+                },
                 "compose_fingerprint": "test-image-config",
             }
             (root / "resource_qualification.json").write_text(json.dumps(report), encoding="utf-8")

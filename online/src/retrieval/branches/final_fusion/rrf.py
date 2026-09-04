@@ -14,7 +14,6 @@ from .contracts import (
     normalize_branch_weights,
 )
 
-
 _IDENTITY_FIELDS = (
     "point_id",
     "global_idx",
@@ -54,9 +53,8 @@ def _canonical_int(value: Any, field: str) -> int:
 
     if isinstance(value, bool):
         raise ValueError(f"{field} must be an integer")
-    if isinstance(value, float):
-        if not math.isfinite(value) or value != math.trunc(value):
-            raise ValueError(f"{field} must be an integer")
+    if isinstance(value, float) and (not math.isfinite(value) or value != math.trunc(value)):
+        raise ValueError(f"{field} must be an integer")
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError) as error:
@@ -95,8 +93,7 @@ def _validate_identity(item: dict[str, Any], branch: str, rank: int) -> str:
             if isinstance(raw_global_idx, bool):
                 raise ValueError("global_idx must be an integer")
             if isinstance(raw_global_idx, float) and (
-                not math.isfinite(raw_global_idx)
-                or raw_global_idx != math.trunc(raw_global_idx)
+                not math.isfinite(raw_global_idx) or raw_global_idx != math.trunc(raw_global_idx)
             ):
                 raise ValueError("global_idx must be an integer")
             global_idx = _canonical_int(raw_global_idx, "global_idx")
@@ -194,9 +191,7 @@ def validate_branch_pool(branch: str, payload: dict[str, Any]) -> list[dict[str,
         except (TypeError, ValueError, OverflowError) as error:
             raise ValueError(f"{branch} branch gate_top_k is invalid") from error
         if gate_top_k != BRANCH_POOL_LIMITS[branch]:
-            raise ValueError(
-                f"{branch} branch gate_top_k must be {BRANCH_POOL_LIMITS[branch]}"
-            )
+            raise ValueError(f"{branch} branch gate_top_k must be {BRANCH_POOL_LIMITS[branch]}")
     if "result_count" in payload:
         try:
             reported_count = _canonical_int(payload["result_count"], "result_count")
@@ -219,8 +214,7 @@ def validate_branch_pool(branch: str, payload: dict[str, Any]) -> list[dict[str,
         previous_uid = seen_point_ids.get(point_id)
         if previous_uid is not None and previous_uid != uid:
             raise ValueError(
-                f"{branch} branch reuses canonical point_id {point_id} "
-                f"for {previous_uid} and {uid}"
+                f"{branch} branch reuses canonical point_id {point_id} for {previous_uid} and {uid}"
             )
         seen_point_ids[point_id] = uid
         if "rank" not in item:
@@ -255,8 +249,7 @@ def fuse_branch_pools(
     try:
         weights = normalize_branch_weights(weights)
         branch_results = {
-            branch: validate_branch_pool(branch, pools[branch])
-            for branch in BRANCH_POOL_LIMITS
+            branch: validate_branch_pool(branch, pools[branch]) for branch in BRANCH_POOL_LIMITS
         }
     except KeyError as error:
         raise ValueError(f"fusion is missing required branch pool: {error.args[0]}") from error

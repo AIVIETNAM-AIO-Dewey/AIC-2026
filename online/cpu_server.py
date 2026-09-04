@@ -1,17 +1,19 @@
-"""CPU-only workbench server backed by local Qdrant and deterministic parsing."""
+"""Native workbench server backed by local Qdrant and deterministic parsing."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
 import math
 import os
+import platform
 import re
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -23,33 +25,41 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from online.src.contracts.query import ParsedQuery, TaskType
-from online.src.retrieval.encoders.worker_manager import (
-    EncoderWorkerManager,
-    ProcessBranch1Encoders,
-    ProcessCpuTextEncoders,
-)
-from online.src.retrieval.branches.branch1.health import branch1_health
-from online.src.retrieval.branches.branch1.service import Branch1Search
-from online.src.retrieval.infrastructure.persistent_cache import PersistentQueryEmbeddingCache
 from online.src.retrieval.branches.branch1.contracts import (
     BRANCH1_FINAL_TOP_K,
     MODEL_SPECS,
     QUERY_ROLES,
 )
+from online.src.retrieval.branches.branch1.health import branch1_health
+from online.src.retrieval.branches.branch1.service import Branch1Search
 from online.src.retrieval.branches.branch2.service import Branch2Search
 from online.src.retrieval.branches.branch3.service import Branch3AsrSearch, Branch3OcrSearch
-from online.src.retrieval.branches.final_fusion.service import KisFusionSearch
 from online.src.retrieval.branches.final_fusion.contracts import DEFAULT_BRANCH_WEIGHTS
-from online.src.retrieval.infrastructure.query_parser import LocalQueryParser
-from online.src.retrieval.modalities.temporal import IndependentModalitySearch
-from online.src.retrieval.infrastructure.qdrant import QdrantHttpClient
-from online.src.retrieval.modalities.asr import AsrFtsIndex
-from online.src.retrieval.modalities.visual import CpuQdrantSearch
+from online.src.retrieval.branches.final_fusion.query_plan import build_kis_query_plan
+from online.src.retrieval.branches.final_fusion.service import KisFusionSearch
+from online.src.retrieval.branches.final_fusion.temporal import (
+    KisTemporalFusionSearch,
+    focus_event_query_bundle,
+)
+from online.src.retrieval.encoders.device import device_contract
+from online.src.retrieval.encoders.worker_manager import (
+    EncoderWorkerManager,
+    ProcessBranch1Encoders,
+    ProcessCpuTextEncoders,
+)
 from online.src.retrieval.infrastructure.metadata import FrameMetadataStore
-from online.src.retrieval.infrastructure.resources import current_process_rss_bytes, resource_qualification
+from online.src.retrieval.infrastructure.persistent_cache import PersistentQueryEmbeddingCache
+from online.src.retrieval.infrastructure.qdrant import QdrantHttpClient
+from online.src.retrieval.infrastructure.query_parser import LocalQueryParser
+from online.src.retrieval.infrastructure.resources import (
+    current_process_rss_bytes,
+    resource_qualification,
+)
+from online.src.retrieval.modalities.asr import AsrFtsIndex
 from online.src.retrieval.modalities.ocr import OcrFtsIndex
-from online.src.submission import prepare_submission
-
+from online.src.retrieval.modalities.temporal import IndependentModalitySearch
+from online.src.retrieval.modalities.visual import CpuQdrantSearch
+from online.src.submission import RelatedFrameSearch, SourceFrameIndex, prepare_submission
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("aic_cpu_workbench")
@@ -57,7 +67,20 @@ DATA_ROOT = Path(os.environ.get("AIC_DATA_ROOT", "/data"))
 STATE_ROOT = Path(os.environ.get("AIC_STATE_ROOT", "/state"))
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 KEYFRAMES_ROOT = DATA_ROOT / "keyframes"
-MEDIA_INFO_ROOT = Path(os.environ.get("AIC_MEDIA_INFO_ROOT", str(DATA_ROOT / "media_info")))
+
+
+def _resolve_media_info_root(data_root: Path, configured: str | None = None) -> Path:
+    if configured:
+        return Path(configured)
+    canonical = data_root / "media-info"
+    legacy = data_root / "media_info"
+    return legacy if not canonical.is_dir() and legacy.is_dir() else canonical
+
+
+MEDIA_INFO_ROOT = _resolve_media_info_root(
+    DATA_ROOT,
+    os.environ.get("AIC_MEDIA_INFO_ROOT"),
+)
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
 MAX_IMAGE_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000
@@ -81,9 +104,12 @@ branch3_ocr_searcher: Branch3OcrSearch | None = None
 kis_fusion_searcher: KisFusionSearch | None = None
 qdrant_client: QdrantHttpClient | None = None
 query_cache: PersistentQueryEmbeddingCache | None = None
+related_frame_searcher: RelatedFrameSearch | None = None
+source_frame_index: SourceFrameIndex | None = None
 heavy_search_lock = threading.Lock()
 _health_cache_lock = threading.RLock()
 _health_cache: tuple[float, tuple[tuple[str, int, int], ...], dict[str, Any]] | None = None
+_health_build_lock = asyncio.Lock()
 HEALTH_CACHE_SECONDS = 5.0
 
 
@@ -125,7 +151,9 @@ class Branch1QueryBundle(BaseModel):
     def require_exact_roles(self):
         roles = [query.role for query in self.queries]
         if len(set(roles)) != 6 or set(roles) != set(QUERY_ROLES):
-            raise ValueError(f"queries must contain each role exactly once: {', '.join(QUERY_ROLES)}")
+            raise ValueError(
+                f"queries must contain each role exactly once: {', '.join(QUERY_ROLES)}"
+            )
         return self
 
 
@@ -284,9 +312,70 @@ class KisFusionSearchRequest(BaseModel):
     branch_weights: KisBranchWeights = Field(default_factory=KisBranchWeights)
 
 
+class KisQueryPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4096)
+    task_type: Literal["KIS", "VQA", "TRAKE"] = "KIS"
+    query_bundle: Branch1QueryBundle | None = None
+
+
+class KisTemporalEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(ge=1, le=6)
+    description: str = Field(min_length=1, max_length=4096)
+    vi: str | None = Field(default=None, max_length=4096)
+    en: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("description", "vi", "en")
+    @classmethod
+    def clean_event_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must not be empty")
+        return cleaned
+
+
+class KisTemporalSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_type: Literal["KIS", "VQA", "TRAKE"] = "KIS"
+    query_bundle: Branch1QueryBundle
+    events: list[KisTemporalEventRequest] = Field(min_length=2, max_length=6)
+    branch_weights: KisBranchWeights = Field(default_factory=KisBranchWeights)
+    top_k_sequences: int = Field(default=100, ge=1, le=100)
+    max_gap_seconds: float | None = Field(default=30.0, gt=0)
+
+    @model_validator(mode="after")
+    def require_contiguous_event_order(self):
+        orders = sorted(event.order for event in self.events)
+        if orders != list(range(1, len(self.events) + 1)):
+            raise ValueError("event orders must be contiguous from 1")
+        return self
+
+
 class VideoVisualSearchRequest(BaseModel):
     parsed_query: ParsedQuery
     top_k: int = Field(default=50, ge=1, le=100)
+
+
+class VideoVisualFusionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4096)
+    query_bundle: Branch1QueryBundle | None = None
+    top_k: int = Field(default=50, ge=1, le=100)
+
+    @field_validator("query")
+    @classmethod
+    def require_visual_query(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must not be empty")
+        return cleaned
 
 
 class DiscoveryCascadeRequest(BaseModel):
@@ -328,7 +417,10 @@ class TemporalIntersectionRequest(BaseModel):
             raise ValueError("event orders must be unique")
         if self.anchor_event_order is not None and self.anchor_event_order not in set(orders):
             raise ValueError("anchor_event_order must identify one supplied event")
-        if self.sequence_reservoir_size is not None and self.sequence_reservoir_size < self.top_k_sequences:
+        if (
+            self.sequence_reservoir_size is not None
+            and self.sequence_reservoir_size < self.top_k_sequences
+        ):
             raise ValueError("sequence_reservoir_size cannot be smaller than top_k_sequences")
         if self.path_diversity_min_events > len(self.events):
             raise ValueError("path_diversity_min_events cannot exceed the event count")
@@ -357,11 +449,37 @@ class SubmissionPrepareRequest(BaseModel):
         return cleaned
 
 
+class RelatedFramesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video_id: str = Field(min_length=1, max_length=32)
+    frame_idx: int = Field(ge=0)
+    limit: int = Field(default=99, ge=1, le=99)
+
+
 def _canonical_video_id(value: str) -> str:
     canonical = value.strip().upper().replace("-", "_")
     if not re.fullmatch(r"[A-Z0-9]+_V\d+", canonical):
         raise HTTPException(status_code=400, detail="Invalid video ID")
     return canonical
+
+
+def _visual_query_bundle(
+    query: str,
+    context_bundle: Branch1QueryBundle | None,
+) -> dict[str, Any]:
+    """Build a deterministic three-model visual bundle for one scoped query."""
+
+    text = query.strip()
+    if context_bundle is None:
+        return {
+            "schema_version": "branch1.query.v1",
+            "queries": [{"role": role, "vi": text, "en": text} for role in QUERY_ROLES],
+        }
+    return focus_event_query_bundle(
+        context_bundle.model_dump(),
+        {"description": text, "vi": text, "en": text},
+    )
 
 
 def _pool(
@@ -446,35 +564,45 @@ def _execute_search(parsed: ParsedQuery, top_k: int) -> dict[str, dict[str, Any]
     speech_query = parsed.speech_vi.strip()
     return {
         "siglip": _pool(
-            "siglip", "SigLIP2 visual scene (CPU + Qdrant)", visual_query,
-            "global_scene_en", "cosine",
+            "siglip",
+            "SigLIP2 visual scene (local accelerator + Qdrant)",
+            visual_query,
+            "global_scene_en",
+            "cosine",
             "Qdrant cosine between multilingual SigLIP2 text and full-frame embeddings",
             (lambda: searcher.search_siglip(visual_query, top_k)) if visual_query else None,
             "The query is empty.",
         ),
         "dam": _pool(
-            "dam", "DAM regions (CPU BGE-M3 + Qdrant)", object_queries,
-            "objects_en", "mean_best_region_cosine",
+            "dam",
+            "DAM regions (local accelerator + Qdrant)",
+            object_queries,
+            "objects_en",
+            "mean_best_region_cosine",
             "Best DAM region per phrase, aggregated at parent-frame level",
-            (lambda: searcher.search_dam_queries(object_queries, top_k)) if object_queries else None,
+            (lambda: searcher.search_dam_queries(object_queries, top_k))
+            if object_queries
+            else None,
             "No object query is available.",
         ),
         "ocr": _pool(
-            "ocr", "OCR text (local SQLite FTS5)", ocr_keywords,
-            "ocr_keywords", "keyword_match_ratio",
+            "ocr",
+            "OCR text (local SQLite FTS5)",
+            ocr_keywords,
+            "ocr_keywords",
+            "keyword_match_ratio",
             "Local FTS5 candidates ranked by exact keyword coverage and BM25",
-            (
-                lambda: branch3_ocr_searcher.execute_single(
-                    " ".join(ocr_keywords), top_k
-                )
-            )
+            (lambda: branch3_ocr_searcher.execute_single(" ".join(ocr_keywords), top_k))
             if ocr_keywords
             else None,
             "No OCR keyword could be extracted locally.",
         ),
         "asr": _pool(
-            "asr", "ASR spoken speech (local BM25 + n-gram)", speech_query,
-            "speech_vi", "bm25_ngram",
+            "asr",
+            "ASR spoken speech (local BM25 + n-gram)",
+            speech_query,
+            "speech_vi",
+            "bm25_ngram",
             "SQLite FTS5 Okapi BM25 combined with token and adjacent n-gram coverage",
             (lambda: searcher.search_speech(speech_query, top_k=top_k)) if speech_query else None,
             "No speech query is available.",
@@ -492,15 +620,27 @@ def _decode_image(payload: bytes, content_type: str | None) -> tuple[Image.Image
     try:
         with Image.open(io.BytesIO(payload)) as source:
             source.load()
-            if max(source.size) > MAX_IMAGE_DIMENSION or source.width * source.height > MAX_IMAGE_PIXELS:
-                raise HTTPException(status_code=413, detail="Uploaded image dimensions are too large")
+            if (
+                max(source.size) > MAX_IMAGE_DIMENSION
+                or source.width * source.height > MAX_IMAGE_PIXELS
+            ):
+                raise HTTPException(
+                    status_code=413, detail="Uploaded image dimensions are too large"
+                )
             image = ImageOps.exif_transpose(source).convert("RGB").copy()
             image_format = (source.format or "unknown").lower()
     except HTTPException:
         raise
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as error:
-        raise HTTPException(status_code=400, detail="Uploaded image could not be decoded") from error
-    return image, {"format": image_format, "width": image.width, "height": image.height, "byte_count": len(payload)}
+        raise HTTPException(
+            status_code=400, detail="Uploaded image could not be decoded"
+        ) from error
+    return image, {
+        "format": image_format,
+        "width": image.width,
+        "height": image.height,
+        "byte_count": len(payload),
+    }
 
 
 def _normalize_frame(value: Any) -> Any:
@@ -536,7 +676,19 @@ def _normalize_submission(payload: dict[str, Any]) -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global encoders, searcher, workbench_search, ocr_index, asr_index, metadata_store
-    global encoder_workers, branch1_encoders, branch1_searcher, branch1_qdrant, branch2_searcher, branch3_asr_searcher, branch3_ocr_searcher, kis_fusion_searcher, qdrant_client, query_cache
+    global \
+        encoder_workers, \
+        branch1_encoders, \
+        branch1_searcher, \
+        branch1_qdrant, \
+        branch2_searcher, \
+        branch3_asr_searcher, \
+        branch3_ocr_searcher, \
+        kis_fusion_searcher, \
+        qdrant_client, \
+        query_cache, \
+        related_frame_searcher, \
+        source_frame_index
     global _health_cache
     started = time.perf_counter()
     qdrant = QdrantHttpClient(QDRANT_URL)
@@ -550,6 +702,8 @@ async def lifespan(_app: FastAPI):
         ),
     )
     metadata_store = FrameMetadataStore(DATA_ROOT, ocr_index)
+    source_frame_index = SourceFrameIndex(metadata_store, MEDIA_INFO_ROOT)
+    related_frame_searcher = RelatedFrameSearch(qdrant, metadata_store)
     ocr_index.metadata = metadata_store
     asr_index = AsrFtsIndex(
         DATA_ROOT / "asr_segments",
@@ -571,7 +725,9 @@ async def lifespan(_app: FastAPI):
         asr_service=branch3_asr_searcher,
         ocr_service=branch3_ocr_searcher,
     )
-    workbench_search = IndependentModalitySearch(searcher=searcher, registry=encoders, dam_match_threshold=0.50)
+    workbench_search = IndependentModalitySearch(
+        searcher=searcher, registry=encoders, dam_match_threshold=0.50
+    )
     branch1_qdrant = qdrant
     branch1_encoders = ProcessBranch1Encoders(encoder_workers)
     query_cache = PersistentQueryEmbeddingCache(STATE_ROOT / "query_embeddings.sqlite3")
@@ -601,7 +757,11 @@ async def lifespan(_app: FastAPI):
     )
     with _health_cache_lock:
         _health_cache = None
-    LOGGER.info("CPU workbench server ready in %.1fs", time.perf_counter() - started)
+    LOGGER.info(
+        "Native workbench server ready on %s in %.1fs",
+        device_contract()["preferred"],
+        time.perf_counter() - started,
+    )
     try:
         yield
     finally:
@@ -613,13 +773,38 @@ async def lifespan(_app: FastAPI):
             asr_index.close()
         if ocr_index is not None:
             ocr_index.close()
-        try:
+        with suppress(AttributeError):
             qdrant.close()
-        except AttributeError:
-            pass
 
 
-app = FastAPI(title="AIC-2026 CPU-only retrieval workbench", lifespan=lifespan)
+app = FastAPI(title="AIC-2026 native retrieval workbench", lifespan=lifespan)
+
+
+def _execution_device_health() -> dict[str, Any]:
+    neural = encoder_workers.device_health() if encoder_workers is not None else device_contract()
+    dense_retriever = getattr(branch2_searcher, "dense", None)
+    dense_health = getattr(dense_retriever, "device_health", None)
+    default_device = device_contract()
+    dense = (
+        dense_health()
+        if callable(dense_health)
+        else {**default_device, "actual": default_device["preferred"]}
+    )
+    return {
+        "preferred": str(neural.get("preferred") or "cpu"),
+        "neural_encoders": neural,
+        "dam_exact_scoring": dense,
+        "qdrant": {
+            "actual": "cpu",
+            "backend": "native-arm64" if platform.machine() == "arm64" else "native",
+            "metal_supported": False,
+        },
+        "lexical": {
+            "actual": "cpu",
+            "backend": "sqlite-fts5",
+            "metal_supported": False,
+        },
+    }
 
 
 def _qdrant_health() -> dict[str, Any]:
@@ -643,7 +828,11 @@ def _qdrant_health() -> dict[str, Any]:
 async def _safe_health_call(function: Any, *args: Any) -> dict[str, Any]:
     try:
         value = await run_in_threadpool(function, *args)
-        return value if isinstance(value, dict) else {"ready": False, "error": "invalid health response"}
+        return (
+            value
+            if isinstance(value, dict)
+            else {"ready": False, "error": "invalid health response"}
+        )
     except Exception as error:
         return {"ready": False, "status": "not_ready", "error": str(error), "fail_closed": True}
 
@@ -688,7 +877,10 @@ def _health_cache_signature() -> tuple[tuple[str, int, int], ...]:
     for manifest_path in manifest_paths:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            groups = [manifest.get("models") or {}, {"branch1": {"files": list((manifest.get("assets") or {}).values())}}]
+            groups = [
+                manifest.get("models") or {},
+                {"branch1": {"files": list((manifest.get("assets") or {}).values())}},
+            ]
             for group in groups:
                 for model in group.values():
                     for item in model.get("files") or []:
@@ -726,23 +918,13 @@ def _fusion_production_ready(
     if resource_state.get("production_ready") is not True:
         return False
     return all(
-        isinstance(state, dict) and state.get("production_ready") is True
-        for state in branch_states
+        isinstance(state, dict) and state.get("production_ready") is True for state in branch_states
     )
 
 
-async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
-    global _health_cache
-    now = time.monotonic()
-    signature = _health_cache_signature()
-    with _health_cache_lock:
-        if (
-            not force
-            and _health_cache is not None
-            and now - _health_cache[0] < HEALTH_CACHE_SECONDS
-            and _health_cache[1] == signature
-        ):
-            return _health_cache[2]
+async def _build_dependency_health(
+    signature: tuple[tuple[str, int, int], ...],
+) -> dict[str, Any]:
     # The aggregate snapshot can be built from the canonical branch services;
     # the legacy CpuQdrantSearch object is not a prerequisite for KIS fusion
     # health.  Treat the process as starting only before any canonical service
@@ -757,15 +939,35 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
             kis_fusion_searcher,
         )
     )
+    execution_devices = _execution_device_health()
     if not runtime_initialized:
         snapshot = {
             "status": "starting",
-            "device": "cpu",
+            "device": execution_devices["preferred"],
+            "execution_devices": execution_devices,
             "ready": False,
             "production_ready": False,
-            "ocr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
-            "asr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
-            "branch3_ocr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
+            "ocr": {
+                "status": "starting",
+                "ready": False,
+                "production_ready": False,
+                "required": False,
+                "fail_closed": True,
+            },
+            "asr": {
+                "status": "starting",
+                "ready": False,
+                "production_ready": False,
+                "required": False,
+                "fail_closed": True,
+            },
+            "branch3_ocr": {
+                "status": "starting",
+                "ready": False,
+                "production_ready": False,
+                "required": False,
+                "fail_closed": True,
+            },
             "kis_fusion": {
                 "schema_version": "kis.fusion.health.v1",
                 "branch": "final_fusion",
@@ -786,14 +988,38 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
                 "api_process": {"ready": False},
                 "qdrant": {"ready": False},
                 "metadata": {"ready": False},
-                "ocr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
-                "asr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
+                "ocr": {
+                    "status": "starting",
+                    "ready": False,
+                    "production_ready": False,
+                    "required": False,
+                    "fail_closed": True,
+                },
+                "asr": {
+                    "status": "starting",
+                    "ready": False,
+                    "production_ready": False,
+                    "required": False,
+                    "fail_closed": True,
+                },
                 "image_search": {"ready": False},
                 "siglip_text": {"ready": False},
                 "branch1": {"ready": False},
                 "branch2": {"ready": False},
-                "branch3_asr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
-                "branch3_ocr": {"status": "starting", "ready": False, "production_ready": False, "required": False, "fail_closed": True},
+                "branch3_asr": {
+                    "status": "starting",
+                    "ready": False,
+                    "production_ready": False,
+                    "required": False,
+                    "fail_closed": True,
+                },
+                "branch3_ocr": {
+                    "status": "starting",
+                    "ready": False,
+                    "production_ready": False,
+                    "required": False,
+                    "fail_closed": True,
+                },
                 "kis_fusion": {
                     "schema_version": "kis.fusion.health.v1",
                     "branch": "final_fusion",
@@ -805,6 +1031,7 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
                     "fail_closed": True,
                 },
                 "resource_qualification": {"ready": False},
+                "execution_devices": execution_devices,
             },
         }
     else:
@@ -834,27 +1061,16 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
                 siglip_state.get("text_encoder", {}),
             )
         )
-        siglip_text_ready = all(
-            section.get("ready") is True
-            for section in siglip_sections
+        siglip_text_ready = all(section.get("ready") is True for section in siglip_sections)
+        siglip_image_ready = siglip_text_ready and (siglip_sections[-1].get("image_ready") is True)
+        canonical_metadata = (
+            DATA_ROOT / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
         )
-        siglip_image_ready = siglip_text_ready and (
-            siglip_sections[-1].get("image_ready") is True
-        )
-        canonical_metadata = DATA_ROOT / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
         video_metadata_dir = getattr(metadata_store, "video_metadata_dir", None)
-        video_metadata_dir = (
-            video_metadata_dir if isinstance(video_metadata_dir, Path) else None
-        )
+        video_metadata_dir = video_metadata_dir if isinstance(video_metadata_dir, Path) else None
         metadata_ready = bool(
             metadata_store is not None
             and canonical_metadata.is_file()
-            and video_metadata_dir is not None
-            and video_metadata_dir.is_dir()
-            and any(video_metadata_dir.glob("*.jsonl"))
-        )
-        timeline_ready = bool(
-            metadata_store is not None
             and video_metadata_dir is not None
             and video_metadata_dir.is_dir()
             and any(video_metadata_dir.glob("*.jsonl"))
@@ -916,8 +1132,7 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
             )
         )
         cache_ready = query_cache is not None and all(
-            callable(getattr(query_cache, method, None))
-            for method in ("key", "get", "put")
+            callable(getattr(query_cache, method, None)) for method in ("key", "get", "put")
         )
         fusion_ready = (
             fusion_execution_ready
@@ -997,9 +1212,7 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
         fusion_state["resource_qualification"] = resource_state
         fusion_state["api_rss_bytes"] = current_process_rss_bytes()
         fusion_state["warnings"] = (
-            ["KIS fusion requires all four branch pools to be ready"]
-            if not fusion_ready
-            else []
+            ["KIS fusion requires all four branch pools to be ready"] if not fusion_ready else []
         )
         resource_ready = bool(resource_state.get("production_ready") is True)
         fusion_production_ready = _fusion_production_ready(
@@ -1027,24 +1240,20 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
             "resource_qualification": {
                 **resource_state,
                 "estimated_peak_total_rss_bytes": (
-                    0
-                    if encoder_workers is None
-                    else encoder_workers.estimated_peak_total_rss_bytes
+                    0 if encoder_workers is None else encoder_workers.estimated_peak_total_rss_bytes
                 ),
                 "api_rss_bytes": current_process_rss_bytes(),
                 "peak_worker_rss_bytes": (
                     0 if encoder_workers is None else encoder_workers.peak_worker_rss_bytes
                 ),
             },
+            "execution_devices": execution_devices,
         }
         core_ready = all(
-            components[name].get("ready") is True
-            for name in ("api_process", "qdrant", "metadata")
+            components[name].get("ready") is True for name in ("api_process", "qdrant", "metadata")
         )
         search_ready = (
-            core_ready
-            and branch1_state.get("ready") is True
-            and branch2_state.get("ready") is True
+            core_ready and branch1_state.get("ready") is True and branch2_state.get("ready") is True
         )
         # A green required search path is not sufficient for production
         # qualification.  Branch health carries the immutable provenance and
@@ -1052,27 +1261,27 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
         # old resource report to make the overall stack appear production
         # ready while an embedding revision remains unverified.
         provenance_ready = all(
-            state.get("production_ready") is True
-            for state in (branch1_state, branch2_state)
+            state.get("production_ready") is True for state in (branch1_state, branch2_state)
         )
         production_ready = search_ready and resource_ready and provenance_ready
         optional_degraded_components = [
-            name for name in ("branch3_asr", "branch3_ocr")
+            name
+            for name in ("branch3_asr", "branch3_ocr")
             if components.get(name, {}).get("ready") is not True
         ]
         if not fusion_ready:
             optional_degraded_components.append("kis_fusion")
         snapshot = {
             "status": "ready" if search_ready else "degraded",
-            "device": "cpu",
+            "device": execution_devices["preferred"],
+            "execution_devices": execution_devices,
+            "ready": search_ready,
             "production_ready": production_ready,
             "ocr": ocr_state,
             "asr": asr_state,
             "kis_fusion": fusion_state,
             "estimated_peak_total_rss_bytes": (
-                0
-                if encoder_workers is None
-                else encoder_workers.estimated_peak_total_rss_bytes
+                0 if encoder_workers is None else encoder_workers.estimated_peak_total_rss_bytes
             ),
             "api_rss_bytes": current_process_rss_bytes(),
             "peak_worker_rss_bytes": (
@@ -1083,9 +1292,48 @@ async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
             "optional_degraded_components": optional_degraded_components,
             "components": components,
         }
-    with _health_cache_lock:
-        _health_cache = (time.monotonic(), signature, snapshot)
     return snapshot
+
+
+async def _dependency_health(*, force: bool = False) -> dict[str, Any]:
+    """Return one shared dependency snapshot for each cache generation.
+
+    Health construction loads local tokenizer/config metadata and checks all
+    Qdrant collections.  Coalescing cache misses prevents two browser or
+    launcher requests from repeating that work concurrently and contending for
+    the Python GIL during startup.
+    """
+
+    global _health_cache
+
+    signature = _health_cache_signature()
+    now = time.monotonic()
+    with _health_cache_lock:
+        if (
+            not force
+            and _health_cache is not None
+            and now - _health_cache[0] < HEALTH_CACHE_SECONDS
+            and _health_cache[1] == signature
+        ):
+            return _health_cache[2]
+
+    async with _health_build_lock:
+        # A request may have completed the same generation while this caller
+        # waited.  Recompute the cheap stat signature and reuse its result.
+        signature = _health_cache_signature()
+        now = time.monotonic()
+        with _health_cache_lock:
+            if (
+                not force
+                and _health_cache is not None
+                and now - _health_cache[0] < HEALTH_CACHE_SECONDS
+                and _health_cache[1] == signature
+            ):
+                return _health_cache[2]
+        snapshot = await _build_dependency_health(signature)
+        with _health_cache_lock:
+            _health_cache = (time.monotonic(), signature, snapshot)
+        return snapshot
 
 
 async def _require_component(component_name: str, message: str) -> None:
@@ -1098,36 +1346,77 @@ async def _require_component(component_name: str, message: str) -> None:
         )
 
 
+def _compact_health(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep only readiness fields needed by the UI's initial status gate."""
+
+    scalar_fields = (
+        "schema_version",
+        "branch",
+        "modality",
+        "task_type",
+        "status",
+        "ready",
+        "production_ready",
+        "required",
+        "fail_closed",
+        "device",
+        "error",
+    )
+    compact = {field: value[field] for field in scalar_fields if field in value}
+    components = value.get("components")
+    if isinstance(components, dict):
+        compact["components"] = {
+            str(name): _compact_health(component)
+            for name, component in components.items()
+            if isinstance(component, dict)
+        }
+    return compact
+
+
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
-    return await _dependency_health()
+async def health(compact: bool = False) -> dict[str, Any]:
+    snapshot = await _dependency_health()
+    return _compact_health(snapshot) if compact else snapshot
 
 
 @app.get("/api/branch1/health")
-async def get_branch1_health() -> dict[str, Any]:
+async def get_branch1_health(compact: bool = False) -> dict[str, Any]:
     if branch1_qdrant is None or branch1_encoders is None:
         return {"status": "starting", "ready": False, "fail_closed": True}
-    return await _safe_health_call(
-        branch1_health, DATA_ROOT, branch1_qdrant, branch1_encoders, STATE_ROOT
+    snapshot = await _dependency_health()
+    value = (snapshot.get("components") or {}).get("branch1")
+    result = (
+        dict(value)
+        if isinstance(value, dict)
+        else {"status": "not_ready", "ready": False, "fail_closed": True}
     )
+    return _compact_health(result) if compact else result
 
 
 @app.get("/api/branch2/health")
-async def get_branch2_health() -> dict[str, Any]:
+async def get_branch2_health(compact: bool = False) -> dict[str, Any]:
     if branch2_searcher is None:
         return {"status": "starting", "ready": False, "fail_closed": True}
-    return await _safe_health_call(branch2_searcher.health)
+    snapshot = await _dependency_health()
+    value = (snapshot.get("components") or {}).get("branch2")
+    result = (
+        dict(value)
+        if isinstance(value, dict)
+        else {"status": "not_ready", "ready": False, "fail_closed": True}
+    )
+    return _compact_health(result) if compact else result
 
 
 @app.get("/api/branch3/asr/health")
-async def get_branch3_asr_health() -> dict[str, Any]:
+async def get_branch3_asr_health(compact: bool = False) -> dict[str, Any]:
     if branch3_asr_searcher is None:
         return {"status": "starting", "ready": False, "fail_closed": True}
-    return await _safe_health_call(branch3_asr_searcher.health)
+    result = await _safe_health_call(branch3_asr_searcher.health)
+    return _compact_health(result) if compact else result
 
 
 @app.get("/api/branch3/ocr/health")
-async def get_branch3_ocr_health() -> dict[str, Any]:
+async def get_branch3_ocr_health(compact: bool = False) -> dict[str, Any]:
     # The dedicated OCR health route may perform the cached, non-blocking raw
     # source audit.  Overall health/config and search use the fast snapshot so
     # they never scan the 873 source JSONL files on their hot path.
@@ -1149,13 +1438,14 @@ async def get_branch3_ocr_health() -> dict[str, Any]:
     try:
         if branch3_ocr_searcher is None:
             return unavailable
-        return await _safe_health_call(branch3_ocr_searcher.health, True)
+        result = await _safe_health_call(branch3_ocr_searcher.health, not compact)
+        return _compact_health(result) if compact else result
     except Exception as error:
         return {**unavailable, "status": "not_ready", "error": str(error)}
 
 
 @app.get("/api/fusion/kis/health")
-async def get_kis_fusion_health() -> dict[str, Any]:
+async def get_kis_fusion_health(compact: bool = False) -> dict[str, Any]:
     # Reuse the same short-lived dependency snapshot as /api/health and
     # /api/config.  Calling the aggregate service directly here would issue
     # another complete Branch-1/2/Qdrant health pass for every browser poll
@@ -1183,8 +1473,8 @@ async def get_kis_fusion_health() -> dict[str, Any]:
         result.setdefault("production_ready", False)
         result.setdefault("status", "ready" if result["ready"] is True else "not_ready")
         result.setdefault("fail_closed", result["ready"] is not True)
-        return result
-    return {
+        return _compact_health(result) if compact else result
+    result = {
         "schema_version": "kis.fusion.health.v1",
         "branch": "final_fusion",
         "task_type": "KIS",
@@ -1195,6 +1485,7 @@ async def get_kis_fusion_health() -> dict[str, Any]:
         "fail_closed": True,
         "error": "KIS fusion health snapshot is malformed",
     }
+    return _compact_health(result) if compact else result
 
 
 def _kis_runtime_error_code(message: str) -> str:
@@ -1239,13 +1530,9 @@ async def config() -> dict[str, Any]:
     timeline_ready = metadata_ready
     branch2_snapshot = components.get("branch2") or {}
     raw_branch2_components = (
-        branch2_snapshot.get("components")
-        if isinstance(branch2_snapshot, dict)
-        else None
+        branch2_snapshot.get("components") if isinstance(branch2_snapshot, dict) else None
     )
-    branch2_components = (
-        raw_branch2_components if isinstance(raw_branch2_components, dict) else {}
-    )
+    branch2_components = raw_branch2_components if isinstance(raw_branch2_components, dict) else {}
     # The legacy discovery endpoint still embeds object phrases with BGE-M3,
     # so advertising it with only a green DAM collection would create a
     # capability that immediately fails at request time.  Keep the explicit
@@ -1256,46 +1543,74 @@ async def config() -> dict[str, Any]:
         for name in ("dam_collection", "bge_text_encoder", "frame_mapping")
     )
     return {
-        "keyframes_root": str(KEYFRAMES_ROOT), "experiment_mode": "cpu_qdrant_workbench",
-        "task_types": ["KIS"], "modalities": ["siglip", "dam", "ocr", "asr"],
-        "default_top_k": 20, "max_top_k": 100, "dam_match_threshold": 0.50,
+        "keyframes_root": str(KEYFRAMES_ROOT),
+        "experiment_mode": "cpu_qdrant_workbench",
+        "task_types": ["KIS", "VQA", "TRAKE"],
+        "modalities": ["siglip", "dam", "ocr", "asr"],
+        "default_top_k": 20,
+        "max_top_k": 100,
+        "dam_match_threshold": 0.50,
         "fusion_enabled": kis_fusion_ready,
-        "reranking_enabled": kis_fusion_ready, "query_parser": "deterministic_local",
-        "parser_engines": ["local", "direct"], "allow_qwen_fallback_default": False,
-        "device": "cpu",
-        "qwen_enabled": False, "gemini_enabled": False,
-        "qwen_model_id": None, "gemini_model_id": None,
+        "reranking_enabled": kis_fusion_ready,
+        "query_parser": "deterministic_local",
+        "parser_engines": ["local", "direct"],
+        "allow_qwen_fallback_default": False,
+        "device": dependency.get("device", "cpu"),
+        "execution_devices": dependency.get("execution_devices", {}),
+        "qwen_enabled": False,
+        "gemini_enabled": False,
+        "qwen_model_id": None,
+        "gemini_model_id": None,
         "siglip_model_id": "google/siglip2-base-patch16-224",
         "siglip_revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
         "bge_model_id": "BAAI/bge-m3",
         "capabilities": {
-            "video_timeline": timeline_ready, "image_search": image_search_ready, "submission_prepare": True,
-            "submission_modes": ["KIS", "VQA", "TRAKE"], "ordered_search_expansion": True,
-            "discovery_cascade": siglip_text_ready and dam_ready, "media_info": MEDIA_INFO_ROOT.is_dir(),
+            "video_timeline": timeline_ready,
+            "video_visual_fusion": branch1_ready,
+            "image_search": image_search_ready,
+            "submission_prepare": True,
+            "related_frame_fill": metadata_ready and branch1_ready,
+            "submission_modes": ["KIS", "VQA", "TRAKE"],
+            "ordered_search_expansion": True,
+            "discovery_cascade": siglip_text_ready and dam_ready,
+            "media_info": MEDIA_INFO_ROOT.is_dir(),
             "ocr": branch3_ocr_ready,
             "asr": branch3_asr_ready,
-            "parser_modes": ["local", "direct"], "qwen_fallback_control": False,
+            "parser_modes": ["local", "direct"],
+            "qwen_fallback_control": False,
             "branch1_three_model": branch1_ready,
             "branch2_dam_hybrid": branch2_ready,
             "branch3_asr": branch3_asr_ready,
             "branch3_ocr": branch3_ocr_ready,
             "kis_fusion": kis_fusion_ready,
+            "kis_query_planning": True,
+            "kis_ordered_events": kis_fusion_ready,
         },
         "image_search": {
-            "enabled": image_search_ready, "max_upload_bytes": MAX_IMAGE_UPLOAD_BYTES,
-            "max_pixels": MAX_IMAGE_PIXELS, "max_dimension": MAX_IMAGE_DIMENSION,
-            "content_types": sorted(ALLOWED_IMAGE_CONTENT_TYPES), "max_top_k": 100,
+            "enabled": image_search_ready,
+            "max_upload_bytes": MAX_IMAGE_UPLOAD_BYTES,
+            "max_pixels": MAX_IMAGE_PIXELS,
+            "max_dimension": MAX_IMAGE_DIMENSION,
+            "content_types": sorted(ALLOWED_IMAGE_CONTENT_TYPES),
+            "max_top_k": 100,
         },
         "ordered_search": {
-            "default_top_k_per_event": 300, "max_top_k_per_event": 1000,
-            "default_paths_per_video": 1, "max_paths_per_video": 10,
+            "default_top_k_per_event": 300,
+            "max_top_k_per_event": 1000,
+            "default_paths_per_video": 1,
+            "max_paths_per_video": 10,
             "max_sequence_reservoir_size": 500,
         },
         "submission": {
-            "modes": ["KIS", "VQA", "TRAKE"], "default_target_rows": 100,
-            "max_target_rows": 100, "canonical_validation": True,
-            "fabricated_frames_allowed": False, "csv_has_header": False, "csv_encoding": "UTF-8",
-            "csv_delimiter": ",", "csv_line_endings": ["CRLF", "LF"],
+            "modes": ["KIS", "VQA", "TRAKE"],
+            "default_target_rows": 100,
+            "max_target_rows": 100,
+            "canonical_validation": True,
+            "fabricated_frames_allowed": False,
+            "csv_has_header": False,
+            "csv_encoding": "UTF-8",
+            "csv_delimiter": ",",
+            "csv_line_endings": ["CRLF", "LF"],
             "formats": {
                 "KIS": ["video_id", "frame_idx"],
                 "VQA": ["video_id", "frame_idx", "answer"],
@@ -1317,11 +1632,7 @@ async def config() -> dict[str, Any]:
 async def search_branch1(request: Branch1SearchRequest) -> dict[str, Any]:
     if branch1_searcher is None or branch1_qdrant is None or branch1_encoders is None:
         raise HTTPException(status_code=503, detail="Branch-1 services are starting")
-    readiness = await _safe_health_call(
-        branch1_health, DATA_ROOT, branch1_qdrant, branch1_encoders, STATE_ROOT
-    )
-    if not readiness["ready"]:
-        raise HTTPException(status_code=503, detail={"message": "Branch-1 is not ready", "health": readiness})
+    await _require_component("branch1", "Branch-1 is not ready")
     try:
         return await run_in_threadpool(
             branch1_searcher.execute,
@@ -1332,21 +1643,25 @@ async def search_branch1(request: Branch1SearchRequest) -> dict[str, Any]:
         )
     except RuntimeError as error:
         if str(error) == "BRANCH1_SEARCH_BUSY":
-            raise HTTPException(status_code=429, detail="Another Branch-1 search is already running") from error
-        raise HTTPException(status_code=503, detail=f"Branch-1 execution failed: {error}") from error
+            raise HTTPException(
+                status_code=429, detail="Another Branch-1 search is already running"
+            ) from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-1 execution failed: {error}"
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Branch-1 execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-1 execution failed: {error}"
+        ) from error
 
 
 @app.post("/api/search/branch2")
 async def search_branch2(request: Branch2SearchRequest) -> dict[str, Any]:
     if branch2_searcher is None:
         raise HTTPException(status_code=503, detail="Branch-2 services are starting")
-    readiness = await _safe_health_call(branch2_searcher.health)
-    if not readiness["ready"]:
-        raise HTTPException(status_code=503, detail={"message": "Branch-2 is not ready", "health": readiness})
+    await _require_component("branch2", "Branch-2 is not ready")
     try:
         return await run_in_threadpool(
             branch2_searcher.execute,
@@ -1359,12 +1674,18 @@ async def search_branch2(request: Branch2SearchRequest) -> dict[str, Any]:
         )
     except RuntimeError as error:
         if str(error) == "BRANCH2_SEARCH_BUSY":
-            raise HTTPException(status_code=429, detail="Another heavy retrieval search is already running") from error
-        raise HTTPException(status_code=503, detail=f"Branch-2 execution failed: {error}") from error
+            raise HTTPException(
+                status_code=429, detail="Another heavy retrieval search is already running"
+            ) from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-2 execution failed: {error}"
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Branch-2 execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-2 execution failed: {error}"
+        ) from error
 
 
 @app.post("/api/search/branch3/asr")
@@ -1384,11 +1705,15 @@ async def search_branch3_asr(request: Branch3AsrSearchRequest) -> dict[str, Any]
                 status_code=429,
                 detail="Another heavy retrieval search is already running",
             ) from error
-        raise HTTPException(status_code=503, detail=f"Branch-3 ASR execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-3 ASR execution failed: {error}"
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Branch-3 ASR execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-3 ASR execution failed: {error}"
+        ) from error
 
 
 @app.post("/api/search/branch3/ocr")
@@ -1408,11 +1733,15 @@ async def search_branch3_ocr(request: Branch3OcrSearchRequest) -> dict[str, Any]
                 status_code=429,
                 detail="Another heavy retrieval search is already running",
             ) from error
-        raise HTTPException(status_code=503, detail=f"Branch-3 OCR execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-3 OCR execution failed: {error}"
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Branch-3 OCR execution failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Branch-3 OCR execution failed: {error}"
+        ) from error
 
 
 @app.post("/api/search/fusion/kis")
@@ -1427,9 +1756,15 @@ async def search_kis_fusion(request: KisFusionSearchRequest) -> dict[str, Any]:
                 "message": "KIS fusion service is starting",
             },
         )
+    await _require_component("kis_fusion", "KIS fusion is not ready")
     try:
-        return await run_in_threadpool(
+        execute = getattr(
+            kis_fusion_searcher,
+            "_execute_prechecked",
             kis_fusion_searcher.execute,
+        )
+        return await run_in_threadpool(
+            execute,
             request.query_bundle.model_dump(),
             request.branch_weights.normalized(),
         )
@@ -1439,7 +1774,10 @@ async def search_kis_fusion(request: KisFusionSearchRequest) -> dict[str, Any]:
         if error_code == "KIS_FUSION_SEARCH_BUSY":
             raise HTTPException(
                 status_code=429,
-                detail={"code": "KIS_FUSION_SEARCH_BUSY", "message": "Another heavy KIS search is already running"},
+                detail={
+                    "code": "KIS_FUSION_SEARCH_BUSY",
+                    "message": "Another heavy KIS search is already running",
+                },
             ) from error
         raise HTTPException(
             status_code=503,
@@ -1457,10 +1795,70 @@ async def search_kis_fusion(request: KisFusionSearchRequest) -> dict[str, Any]:
         ) from error
 
 
+@app.post("/api/search/fusion/kis/temporal")
+async def search_kis_temporal(request: KisTemporalSearchRequest) -> dict[str, Any]:
+    """Run the unchanged full KIS pipeline once per event, then order frames."""
+
+    if kis_fusion_searcher is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "KIS_FUSION_NOT_READY",
+                "message": "KIS fusion service is starting",
+            },
+        )
+    await _require_component("kis_fusion", "KIS fusion is not ready")
+    temporal_searcher = KisTemporalFusionSearch(kis_fusion_searcher)
+    try:
+        return await run_in_threadpool(
+            temporal_searcher.execute,
+            query_bundle=request.query_bundle.model_dump(),
+            events=[event.model_dump() for event in request.events],
+            branch_weights=request.branch_weights.normalized(),
+            top_k_sequences=request.top_k_sequences,
+            max_gap_seconds=request.max_gap_seconds,
+            task_type=request.task_type,
+            health_already_checked=True,
+        )
+    except RuntimeError as error:
+        message = str(error)
+        error_code = _kis_runtime_error_code(message)
+        status_code = 429 if error_code == "KIS_FUSION_SEARCH_BUSY" else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": error_code, "message": message},
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "KIS_FUSION_EXECUTION_FAILED",
+                "message": f"Ordered KIS fusion failed: {error}",
+            },
+        ) from error
+
+
+@app.post("/api/query/kis/plan")
+async def plan_kis_query(request: KisQueryPlanRequest) -> dict[str, Any]:
+    """Prepare one linked KIS bundle/event plan without running retrieval."""
+
+    try:
+        return build_kis_query_plan(
+            query=request.query,
+            task_type=request.task_type,
+            parser=parser,
+            query_bundle=(request.query_bundle.model_dump() if request.query_bundle else None),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.post("/api/parse")
 async def parse_query(request: ParseRequest) -> dict[str, Any]:
     if request.task_type != "KIS":
-        raise HTTPException(status_code=400, detail="CPU-only mode supports KIS retrieval only")
+        raise HTTPException(status_code=400, detail="Local mode supports KIS retrieval only")
     started = time.perf_counter()
     try:
         parsed = parser.parse(request.query, task_type="KIS")
@@ -1478,10 +1876,10 @@ async def parse_query(request: ParseRequest) -> dict[str, Any]:
 @app.post("/api/search")
 async def search(request: SearchRequest) -> dict[str, Any]:
     if searcher is None:
-        raise HTTPException(status_code=503, detail="CPU encoders are not ready")
+        raise HTTPException(status_code=503, detail="Local encoders are not ready")
     await _require_component("qdrant", "Qdrant is not ready")
     if request.parsed_query.task_type != "KIS":
-        raise HTTPException(status_code=400, detail="CPU-only mode supports KIS retrieval only")
+        raise HTTPException(status_code=400, detail="Local mode supports KIS retrieval only")
     if request.parsed_query.ocr_keywords:
         await _require_component("branch3_ocr", "OCR index is not prepared")
     started = time.perf_counter()
@@ -1500,15 +1898,23 @@ async def search(request: SearchRequest) -> dict[str, Any]:
                 status_code=429,
                 detail="Another heavy retrieval search is already running",
             ) from error
-        raise HTTPException(status_code=503, detail=f"Search dependencies failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Search dependencies failed: {error}"
+        ) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Search dependencies failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Search dependencies failed: {error}"
+        ) from error
     session_id = request.session_id or request.parsed_query.session_id or str(uuid.uuid4())
     return {
-        "session_id": session_id, "task_type": "KIS", "experiment_mode": "cpu_qdrant_workbench",
-        "fusion_applied": False, "reranking_applied": False,
+        "session_id": session_id,
+        "task_type": "KIS",
+        "experiment_mode": "cpu_qdrant_workbench",
+        "fusion_applied": False,
+        "reranking_applied": False,
         "total_candidates": sum(item["result_count"] for item in pools.values()),
-        "modality_results": pools, "execution_time_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        "modality_results": pools,
+        "execution_time_ms": round((time.perf_counter() - started) * 1000.0, 2),
     }
 
 
@@ -1519,7 +1925,7 @@ async def search_image(
     video_id: Annotated[str | None, Form(max_length=64)] = None,
 ) -> dict[str, Any]:
     if searcher is None or encoders is None:
-        raise HTTPException(status_code=503, detail="CPU encoders are not ready")
+        raise HTTPException(status_code=503, detail="Local encoders are not ready")
     await _require_component("image_search", "Image search dependencies are not ready")
     try:
         payload = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
@@ -1534,7 +1940,9 @@ async def search_image(
             evaluated = searcher.get_video_frame_count(canonical)
             if evaluated == 0:
                 raise HTTPException(status_code=404, detail=f"Video {canonical} not found")
-            results = await run_in_threadpool(searcher.search_visual_in_video, vector, canonical, top_k=top_k)
+            results = await run_in_threadpool(
+                searcher.search_visual_in_video, vector, canonical, top_k=top_k
+            )
         else:
             results = await run_in_threadpool(searcher.search_visual, vector, top_k=top_k)
             evaluated = 247_956
@@ -1545,24 +1953,42 @@ async def search_image(
     finally:
         image.close()
     elapsed = round((time.perf_counter() - started) * 1000.0, 2)
-    result_pool = _pool("siglip", "SigLIP2 image similarity (CPU + Qdrant)", "<uploaded image>", "uploaded_image", "cosine", "Raw SigLIP2 image-to-image cosine", lambda: results)
-    result_pool["provenance"].update({
-        "query_tower": "siglip_image",
-        "index_modality": "siglip_visual",
-    })
+    result_pool = _pool(
+        "siglip",
+        "SigLIP2 image similarity (local accelerator + Qdrant)",
+        "<uploaded image>",
+        "uploaded_image",
+        "cosine",
+        "Raw SigLIP2 image-to-image cosine",
+        lambda: results,
+    )
+    result_pool["provenance"].update(
+        {
+            "query_tower": "siglip_image",
+            "index_modality": "siglip_visual",
+        }
+    )
     result_pool["execution_time_ms"] = elapsed
     return {
-        "task_type": "KIS", "experiment_mode": "cpu_qdrant_workbench", "operation": "image_query",
-        "query_modality": "image", "scope": "video" if canonical else "global", "video_id": canonical,
-        "evaluated_frames": evaluated, "image_info": image_info, "fusion_applied": False,
-        "reranking_applied": False, "modality_result": result_pool, "execution_time_ms": elapsed,
+        "task_type": "KIS",
+        "experiment_mode": "cpu_qdrant_workbench",
+        "operation": "image_query",
+        "query_modality": "image",
+        "scope": "video" if canonical else "global",
+        "video_id": canonical,
+        "evaluated_frames": evaluated,
+        "image_info": image_info,
+        "fusion_applied": False,
+        "reranking_applied": False,
+        "modality_result": result_pool,
+        "execution_time_ms": elapsed,
     }
 
 
 @app.post("/api/video/{video_id}/search/siglip")
 async def search_video(video_id: str, request: VideoVisualSearchRequest) -> dict[str, Any]:
     if searcher is None or workbench_search is None:
-        raise HTTPException(status_code=503, detail="CPU encoders are not ready")
+        raise HTTPException(status_code=503, detail="Local encoders are not ready")
     await _require_component("siglip_text", "SigLIP text search dependencies are not ready")
     try:
         canonical = _canonical_video_id(video_id)
@@ -1581,11 +2007,90 @@ async def search_video(video_id: str, request: VideoVisualSearchRequest) -> dict
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Video visual search failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Video visual search failed: {error}"
+        ) from error
     return {
-        "experiment_mode": "cpu_qdrant_workbench", "operation": "manual_video_drilldown",
-        "video_id": canonical, "scope_selected_by_user": True, "evaluated_frames": evaluated,
-        "fusion_applied": False, "reranking_applied": False, "modality_result": pool,
+        "experiment_mode": "cpu_qdrant_workbench",
+        "operation": "manual_video_drilldown",
+        "video_id": canonical,
+        "scope_selected_by_user": True,
+        "evaluated_frames": evaluated,
+        "fusion_applied": False,
+        "reranking_applied": False,
+        "modality_result": pool,
+        "execution_time_ms": round((time.perf_counter() - started) * 1000.0, 2),
+    }
+
+
+@app.post("/api/video/{video_id}/search/visual-fusion")
+async def search_video_visual_fusion(
+    video_id: str,
+    request: VideoVisualFusionRequest,
+) -> dict[str, Any]:
+    """Search one video with SigLIP2, MetaCLIP2 and BEIT3 only."""
+
+    if branch1_searcher is None or searcher is None:
+        raise HTTPException(status_code=503, detail="Visual fusion search is starting")
+    await _require_component("branch1", "Three-model visual search is not ready")
+    started = time.perf_counter()
+    try:
+        canonical = _canonical_video_id(video_id)
+        evaluated = searcher.get_video_frame_count(canonical)
+        if evaluated == 0:
+            raise HTTPException(status_code=404, detail=f"Video {canonical} not found")
+        query_bundle = _visual_query_bundle(request.query, request.query_bundle)
+        result = await run_in_threadpool(
+            branch1_searcher.execute_in_video,
+            query_bundle,
+            canonical,
+            request.top_k,
+        )
+    except HTTPException:
+        raise
+    except RuntimeError as error:
+        if str(error) == "BRANCH1_SEARCH_BUSY":
+            raise HTTPException(
+                status_code=429,
+                detail="Another heavy retrieval search is already running",
+            ) from error
+        raise HTTPException(
+            status_code=503,
+            detail=f"Visual in-video search failed: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Visual in-video search failed: {error}",
+        ) from error
+
+    pool = {
+        **result,
+        "modality": "visual_fusion",
+        "display_name": f"Visual fusion inside {canonical}",
+        "status": "ok",
+        "reason": "",
+        "query": request.query,
+        "query_source": "scoped_visual_query",
+        "score_type": "weighted_zsigmoid_fusion",
+        "score_description": ("45% SigLIP2 + 30% MetaCLIP2 + 25% BEIT3, restricted to this video"),
+        "evaluated_frames": evaluated,
+    }
+    return {
+        "schema_version": "video.visual-fusion.result.v1",
+        "experiment_mode": "native_visual_video_fusion",
+        "operation": "visual_video_drilldown",
+        "video_id": canonical,
+        "scope_selected_by_user": True,
+        "evaluated_frames": evaluated,
+        "models": ["siglip2", "metaclip2", "beit3"],
+        "model_weights": result.get("weights"),
+        "fusion_applied": True,
+        "cross_modal_fusion_applied": False,
+        "reranking_applied": False,
+        "modality_result": pool,
         "execution_time_ms": round((time.perf_counter() - started) * 1000.0, 2),
     }
 
@@ -1593,11 +2098,16 @@ async def search_video(video_id: str, request: VideoVisualSearchRequest) -> dict
 @app.post("/api/discover/dam-to-siglip")
 async def discover(request: DiscoveryCascadeRequest) -> dict[str, Any]:
     if workbench_search is None:
-        raise HTTPException(status_code=503, detail="CPU encoders are not ready")
+        raise HTTPException(status_code=503, detail="Local encoders are not ready")
     await _require_component("siglip_text", "SigLIP text search dependencies are not ready")
     await _require_component("qdrant", "Qdrant is not ready")
     try:
-        return await run_in_threadpool(workbench_search.discover_dam_to_siglip, request.parsed_query, dam_top_frames_per_object=request.dam_top_frames_per_object, siglip_top_frames_per_video=request.siglip_top_frames_per_video)
+        return await run_in_threadpool(
+            workbench_search.discover_dam_to_siglip,
+            request.parsed_query,
+            dam_top_frames_per_object=request.dam_top_frames_per_object,
+            siglip_top_frames_per_video=request.siglip_top_frames_per_video,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
@@ -1607,17 +2117,22 @@ async def discover(request: DiscoveryCascadeRequest) -> dict[str, Any]:
 @app.post("/api/search/temporal-intersection")
 async def temporal(request: TemporalIntersectionRequest) -> dict[str, Any]:
     if workbench_search is None:
-        raise HTTPException(status_code=503, detail="CPU encoders are not ready")
+        raise HTTPException(status_code=503, detail="Local encoders are not ready")
     await _require_component("siglip_text", "SigLIP text search dependencies are not ready")
     await _require_component("qdrant", "Qdrant is not ready")
     try:
         return await run_in_threadpool(
             workbench_search.search_temporal_intersection,
-            events=[event.model_dump() for event in request.events], anchor_query=request.anchor_query,
-            top_k_per_event=request.top_k_per_event, top_k_sequences=request.top_k_sequences,
-            max_gap_seconds=request.max_gap_seconds, anchor_event_order=request.anchor_event_order,
-            paths_per_video=request.paths_per_video, sequence_reservoir_size=request.sequence_reservoir_size,
-            path_beam_width=request.path_beam_width, path_diversity_min_events=request.path_diversity_min_events,
+            events=[event.model_dump() for event in request.events],
+            anchor_query=request.anchor_query,
+            top_k_per_event=request.top_k_per_event,
+            top_k_sequences=request.top_k_sequences,
+            max_gap_seconds=request.max_gap_seconds,
+            anchor_event_order=request.anchor_event_order,
+            paths_per_video=request.paths_per_video,
+            sequence_reservoir_size=request.sequence_reservoir_size,
+            path_beam_width=request.path_beam_width,
+            path_diversity_min_events=request.path_diversity_min_events,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1627,19 +2142,114 @@ async def temporal(request: TemporalIntersectionRequest) -> dict[str, Any]:
 
 @app.post("/api/submission/prepare")
 async def submission(request: SubmissionPrepareRequest) -> dict[str, Any]:
-    if metadata_store is None:
-        raise HTTPException(status_code=503, detail="Metadata is not ready")
+    if metadata_store is None or source_frame_index is None:
+        raise HTTPException(status_code=503, detail="Source-frame metadata is not ready")
     try:
         result = await run_in_threadpool(
-            prepare_submission, _normalize_submission(request.model_dump()),
-            frame_lookup=metadata_store.frame_by_idx, video_frames_lookup=metadata_store.video_frames,
+            prepare_submission,
+            _normalize_submission(request.model_dump()),
+            frame_lookup=source_frame_index.resolve,
+            video_frames_lookup=metadata_store.video_frames,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Submission preparation failed: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"Submission preparation failed: {error}"
+        ) from error
     result["server_verified"] = True
     return result
+
+
+@app.post("/api/submission/related-frames")
+async def related_frames(request: RelatedFramesRequest) -> dict[str, Any]:
+    """Recommend frames from stored visual vectors; no query model is invoked."""
+
+    if related_frame_searcher is None or source_frame_index is None:
+        raise HTTPException(status_code=503, detail="Related-frame search is starting")
+    canonical = _canonical_video_id(request.video_id)
+    try:
+        requested_seed = await run_in_threadpool(
+            source_frame_index.resolve,
+            canonical,
+            request.frame_idx,
+        )
+        if requested_seed is None:
+            raise ValueError(
+                f"Source frame {canonical}:{request.frame_idx} is outside the verified timeline"
+            )
+        embedding_seed_idx = int(requested_seed["related_seed_frame_idx"])
+        result = await run_in_threadpool(
+            related_frame_searcher.execute,
+            canonical,
+            embedding_seed_idx,
+            request.limit,
+        )
+        result["requested_seed"] = requested_seed
+        result["embedding_seed"] = {
+            "video_id": canonical,
+            "frame_idx": embedding_seed_idx,
+            "reason": (
+                "exact indexed embedding"
+                if bool(requested_seed["indexed_keyframe"])
+                else "nearest indexed embedding to the exact source frame"
+            ),
+        }
+        return result
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Related-frame search failed: {error}",
+        ) from error
+
+
+@app.get("/api/frame/{video_id}/{frame_idx}")
+async def exact_frame(video_id: str, frame_idx: int) -> dict[str, Any]:
+    """Return only the exact organizer-indexed frame; never substitute a neighbour."""
+
+    if metadata_store is None:
+        raise HTTPException(status_code=503, detail="Metadata is not ready")
+    if frame_idx < 0:
+        raise HTTPException(status_code=400, detail="Frame index must be non-negative")
+    canonical = _canonical_video_id(video_id)
+    frame = await run_in_threadpool(metadata_store.frame_by_idx, canonical, frame_idx)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="Exact indexed frame not found")
+    return {
+        "schema_version": "frame.identity.v1",
+        "exact_match": True,
+        "keyframe": {**frame, "validation": "canonical"},
+    }
+
+
+@app.get("/api/video/{video_id}/source-frame/{frame_idx}")
+async def source_frame(video_id: str, frame_idx: int) -> dict[str, Any]:
+    """Verify one exact zero-based source-frame index and its seek timestamp."""
+
+    if source_frame_index is None:
+        raise HTTPException(status_code=503, detail="Source-frame metadata is not ready")
+    if frame_idx < 0:
+        raise HTTPException(status_code=400, detail="Frame index must be non-negative")
+    canonical = _canonical_video_id(video_id)
+    frame = await run_in_threadpool(source_frame_index.resolve, canonical, frame_idx)
+    if frame is None:
+        timeline = await run_in_threadpool(source_frame_index.timeline, canonical)
+        if timeline is None:
+            raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Frame index must be between {timeline['frame_index_base']} "
+                f"and {timeline['max_frame_idx']}"
+            ),
+        )
+    return {
+        "schema_version": SourceFrameIndex.frame_schema_version,
+        "exact_match": True,
+        "source_frame": frame,
+    }
 
 
 @app.get("/api/keyframe/{video_id}/{keyframe_n}")
@@ -1656,7 +2266,9 @@ async def keyframe_detail(video_id: str, keyframe_n: int) -> dict[str, Any]:
             searcher.qdrant.dam_for_frame, canonical, int(detail["frame_idx"])
         )
     except Exception as error:
-        raise HTTPException(status_code=503, detail=f"DAM detail is unavailable: {error}") from error
+        raise HTTPException(
+            status_code=503, detail=f"DAM detail is unavailable: {error}"
+        ) from error
     macro_audio_transcript = ""
     if asr_index is not None:
         macro_audio_transcript = await run_in_threadpool(
@@ -1682,9 +2294,12 @@ async def video_keyframes(video_id: str) -> dict[str, Any]:
 
 @app.get("/api/video/{video_id}/timeline")
 async def video_timeline(video_id: str) -> dict[str, Any]:
-    if metadata_store is None:
-        raise HTTPException(status_code=503, detail="Metadata is not ready")
-    timeline = await run_in_threadpool(metadata_store.timeline, _canonical_video_id(video_id))
+    if source_frame_index is None:
+        raise HTTPException(status_code=503, detail="Source-frame metadata is not ready")
+    timeline = await run_in_threadpool(
+        source_frame_index.timeline,
+        _canonical_video_id(video_id),
+    )
     if timeline is None:
         raise HTTPException(status_code=404, detail="Video not found")
     return timeline

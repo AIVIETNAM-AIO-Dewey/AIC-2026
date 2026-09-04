@@ -14,10 +14,9 @@ from typing import Any
 
 import numpy as np
 
-from ...infrastructure.qdrant import QdrantHttpClient
 from ...branches.branch1.contracts import QUERY_ROLES
+from ...infrastructure.qdrant import QdrantHttpClient
 from ...infrastructure.scoring import normalize_scores, normalize_weights
-
 
 MAX_RERANK_CANDIDATES = 100
 
@@ -27,9 +26,8 @@ def _strict_int(value: Any, field: str) -> int:
 
     if isinstance(value, bool):
         raise ValueError(f"{field} must be an integer")
-    if isinstance(value, float):
-        if not math.isfinite(value) or value != math.trunc(value):
-            raise ValueError(f"{field} must be an integer")
+    if isinstance(value, float) and (not math.isfinite(value) or value != math.trunc(value)):
+        raise ValueError(f"{field} must be an integer")
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError) as error:
@@ -68,9 +66,7 @@ class Beit3CosineReranker:
             raise ValueError("BEiT-3 reranking query variants must not be empty")
         requested_top_k = _strict_int(top_k, "top_k")
         if not 1 <= requested_top_k <= MAX_RERANK_CANDIDATES:
-            raise ValueError(
-                f"BEiT-3 rerank top_k must be in 1..{MAX_RERANK_CANDIDATES}"
-            )
+            raise ValueError(f"BEiT-3 rerank top_k must be in 1..{MAX_RERANK_CANDIDATES}")
         # Validate the weight contract even for an empty candidate pool.  This
         # keeps direct callers from bypassing the fixed 25/75 (or Branch-2's
         # normalized equivalent) blend merely because there is nothing to
@@ -216,7 +212,7 @@ class Beit3CosineReranker:
             evidence = scores.get(point_id or -1)
             beit_raw = float(evidence["best"]) if evidence else None
             beit_norm = float(score_items.get(str(point_id), {}).get("normalized_score", 0.0))
-            previous_norm = float(previous[str(item["frame_uid"])] ["normalized_score"])
+            previous_norm = float(previous[str(item["frame_uid"])]["normalized_score"])
             final_score = (
                 normalized_weights["beit3"] * beit_norm
                 + normalized_weights["previous"] * previous_norm

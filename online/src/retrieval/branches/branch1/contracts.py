@@ -37,16 +37,14 @@ def normalize_model_weights(values: dict[str, float]) -> dict[str, float]:
     applying percentages (``45/30/25``) as raw multipliers.
     """
 
-    clean = {
-        name: float(values.get(name, 0.0))
-        for name in MODEL_SPECS
-    }
+    clean = {name: float(values.get(name, 0.0)) for name in MODEL_SPECS}
     if any(not math.isfinite(value) or value < 0 for value in clean.values()):
         raise ValueError("model weights must be finite and non-negative")
     total = sum(clean.values())
     if total <= 0:
         raise ValueError("model weight sum must be greater than zero")
     return {name: value / total for name, value in clean.items()}
+
 
 __all__ = [
     "BRANCH1_FINAL_TOP_K",

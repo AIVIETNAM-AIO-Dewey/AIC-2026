@@ -49,14 +49,30 @@ class SparseCanonicalMetadataTests(unittest.TestCase):
                 },
             ]
             frame_path = canonical / "keyframes_metadata.jsonl"
-            frame_path.write_text("".join(json.dumps(row) + "\n" for row in frames), encoding="utf-8")
+            frame_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in frames), encoding="utf-8"
+            )
             dam_path = dense / "dam_metadata.jsonl"
             dam_path.write_text(
                 "".join(
                     json.dumps(row) + "\n"
                     for row in (
-                        {"video_id": "L01_V001", "frame_idx": 4, "region_id": "r1", "class_entity": "sky", "bbox": [0, 0, 1, 1], "description_en": "blue sky"},
-                        {"video_id": "L01_V001", "frame_idx": 31, "region_id": "r2", "class_entity": "car", "bbox": [0, 0, 1, 1], "description_en": "red car"},
+                        {
+                            "video_id": "L01_V001",
+                            "frame_idx": 4,
+                            "region_id": "r1",
+                            "class_entity": "sky",
+                            "bbox": [0, 0, 1, 1],
+                            "description_en": "blue sky",
+                        },
+                        {
+                            "video_id": "L01_V001",
+                            "frame_idx": 31,
+                            "region_id": "r2",
+                            "class_entity": "car",
+                            "bbox": [0, 0, 1, 1],
+                            "description_en": "red car",
+                        },
                     )
                 ),
                 encoding="utf-8",
@@ -73,8 +89,9 @@ class SparseCanonicalMetadataTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(sparse_module, "EXPECTED_FRAMES", 2), patch.object(
-                sparse_module, "EXPECTED_DAM_REGIONS", 2
+            with (
+                patch.object(sparse_module, "EXPECTED_FRAMES", 2),
+                patch.object(sparse_module, "EXPECTED_DAM_REGIONS", 2),
             ):
                 DamBm25Index.prepare(root, state, sha256(dam_path), sha256(frame_path))
                 results = DamBm25Index(root, state).search(["sky"] * 6, 2)

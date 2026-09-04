@@ -1,0 +1,14 @@
+accelerate==1.9.0
+fastapi==0.116.1
+httpx==0.28.1
+huggingface-hub==0.36.0
+python-dotenv==1.1.1
+python-multipart==0.0.20
+qdrant-client==1.19.0
+sentencepiece==0.2.0
+timm==0.4.12
+torch==2.7.1
+torchscale==0.2.0
+torchvision==0.22.1
+transformers==4.57.1
+uvicorn==0.35.0

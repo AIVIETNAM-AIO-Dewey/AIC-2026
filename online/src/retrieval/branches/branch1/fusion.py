@@ -24,7 +24,12 @@ def normalize_model_candidates(candidates: dict[str, dict[str, Any]]) -> dict[st
     mean = float(scores.mean())
     std = float(scores.std())
     for item in candidates.values():
-        normalized = 0.5 if std < 1e-6 else 1.0 / (1.0 + math.exp(-max(-4.0, min(4.0, (float(item["raw_score"]) - mean) / std))))
+        normalized = (
+            0.5
+            if std < 1e-6
+            else 1.0
+            / (1.0 + math.exp(-max(-4.0, min(4.0, (float(item["raw_score"]) - mean) / std))))
+        )
         item["normalized_score"] = normalized
         item["normalization_mean"] = mean
         item["normalization_std"] = std
@@ -115,7 +120,11 @@ def aggregate_model_streams(
     return normalize_model_candidates(candidates)
 
 
-def fuse_model_candidates(model_candidates: dict[str, dict[str, dict[str, Any]]], weights: dict[str, float], final_top_k: int) -> list[dict[str, Any]]:
+def fuse_model_candidates(
+    model_candidates: dict[str, dict[str, dict[str, Any]]],
+    weights: dict[str, float],
+    final_top_k: int,
+) -> list[dict[str, Any]]:
     weights = normalize_model_weights(weights)
     frame_uids = set().union(*(set(values) for values in model_candidates.values()))
     results: list[dict[str, Any]] = []
@@ -184,31 +193,35 @@ def fuse_model_candidates(model_candidates: dict[str, dict[str, dict[str, Any]]]
                 "normalization_mean": float(item["normalization_mean"]),
                 "normalization_std": float(item["normalization_std"]),
             }
-        results.append({
-            **payload,
-            "frame_uid": frame_uid,
-            "global_idx": next(
-                (
-                    int(model_candidates[model_name][frame_uid]["point_id"])
-                    for model_name in MODEL_SPECS
-                    if frame_uid in model_candidates.get(model_name, {})
+        results.append(
+            {
+                **payload,
+                "frame_uid": frame_uid,
+                "global_idx": next(
+                    (
+                        int(model_candidates[model_name][frame_uid]["point_id"])
+                        for model_name in MODEL_SPECS
+                        if frame_uid in model_candidates.get(model_name, {})
+                    ),
+                    None,
                 ),
-                None,
-            ),
-            "final_score": final_score,
-            "score": final_score,
-            "score_type": "weighted_zsigmoid_fusion",
-            "best_stream_rank": None if math.isinf(best_rank) else int(best_rank),
-            "best_model": best_model,
-            "best_query_role": best_query_role,
-            "best_query_language": best_query_language,
-            "model_provenance": provenance,
-        })
+                "final_score": final_score,
+                "score": final_score,
+                "score_type": "weighted_zsigmoid_fusion",
+                "best_stream_rank": None if math.isinf(best_rank) else int(best_rank),
+                "best_model": best_model,
+                "best_query_role": best_query_role,
+                "best_query_language": best_query_language,
+                "model_provenance": provenance,
+            }
+        )
     results.sort(
         key=lambda item: (
             -item["final_score"],
             item["best_stream_rank"] if item["best_stream_rank"] is not None else math.inf,
-            list(MODEL_SPECS).index(item["best_model"]) if item["best_model"] in MODEL_SPECS else math.inf,
+            list(MODEL_SPECS).index(item["best_model"])
+            if item["best_model"] in MODEL_SPECS
+            else math.inf,
             item["frame_uid"],
         )
     )
@@ -217,5 +230,6 @@ def fuse_model_candidates(model_candidates: dict[str, dict[str, dict[str, Any]]]
         item["final_score"] = round(float(item["final_score"]), 8)
         item["score"] = item["final_score"]
     return results[:final_top_k]
+
 
 __all__ = ["aggregate_model_streams", "fuse_model_candidates", "normalize_model_candidates"]

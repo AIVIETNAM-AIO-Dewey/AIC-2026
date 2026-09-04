@@ -14,13 +14,15 @@ import math
 import os
 import shutil
 import sqlite3
-import threading
 import tempfile
+import threading
 import time
 import unicodedata
+from collections.abc import Iterable
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..infrastructure.qdrant import base_frame
 from .lexical import (
@@ -35,7 +37,6 @@ from .lexical import (
     query_tokens,
 )
 
-
 EXPECTED_FRAMES = 247_956
 EXPECTED_ASR_SEGMENTS = 55_168
 EXPECTED_ASR_VIDEOS = 873
@@ -46,6 +47,7 @@ ASR_SOURCE_SCHEMA_VERSION = "aic26.asr_segments.v1"
 ASR_MAPPING_STRATEGY = "nearest_keyframe_to_segment_midpoint"
 ASR_HEALTH_CACHE_TTL_S = 30.0
 
+
 def _safe_int(value: Any, default: int = -1) -> int:
     try:
         return int(value)
@@ -54,7 +56,9 @@ def _safe_int(value: Any, default: int = -1) -> int:
 
 
 def _canonical_fingerprint(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -116,7 +120,9 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def artifact_record(path: Path, *, relative_to: Path | None = None, include_hash: bool = True) -> dict[str, Any]:
+def artifact_record(
+    path: Path, *, relative_to: Path | None = None, include_hash: bool = True
+) -> dict[str, Any]:
     stat = path.stat()
     record: dict[str, Any] = {
         "path": path.relative_to(relative_to).as_posix() if relative_to is not None else str(path),
@@ -226,9 +232,7 @@ def validate_asr_sources(segments_dir: Path) -> dict[str, Any]:
     if not paths:
         raise ValueError(f"No ASR JSONL files found in {segments_dir}")
     if len(paths) != EXPECTED_ASR_VIDEOS:
-        raise ValueError(
-            f"Expected {EXPECTED_ASR_VIDEOS} ASR segment files, found {len(paths)}"
-        )
+        raise ValueError(f"Expected {EXPECTED_ASR_VIDEOS} ASR segment files, found {len(paths)}")
     source_files: list[dict[str, Any]] = []
     segment_ids: set[str] = set()
     source_video_ids: set[str] = set()
@@ -245,7 +249,10 @@ def validate_asr_sources(segments_dir: Path) -> dict[str, Any]:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as error:
             raise ValueError(f"Missing or invalid ASR manifest: {manifest_path}") from error
-        if manifest.get("schema_version") != "aic26.asr_manifest.v1" or manifest.get("status") != "completed":
+        if (
+            manifest.get("schema_version") != "aic26.asr_manifest.v1"
+            or manifest.get("status") != "completed"
+        ):
             raise ValueError(f"ASR manifest is not completed: {manifest_path}")
         manifest_video_id = str(manifest.get("video_id") or "").upper().replace("-", "_").strip()
         expected_video_id = path.stem.upper().replace("-", "_").strip()
@@ -346,9 +353,7 @@ class AsrFtsIndex:
         # (monotonic timestamp, manifest stat identity, immutable snapshot).
         # Keep the annotation aligned with the compact tuple actually stored;
         # the snapshot dictionary carries the detailed inventory diagnostics.
-        self._source_inventory_cache: tuple[
-            float, tuple[Any, ...], dict[str, Any]
-        ] | None = None
+        self._source_inventory_cache: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
         if auto_prepare:
             database_path.parent.mkdir(parents=True, exist_ok=True)
             self._connection = sqlite3.connect(database_path, check_same_thread=False)
@@ -385,8 +390,10 @@ class AsrFtsIndex:
         try:
             db_stat = self.database_path.stat()
             manifest_database_path = (
-                self.database_path.parent / str(db_record.get("path") or "")
-            ).resolve() if isinstance(db_record, dict) else None
+                (self.database_path.parent / str(db_record.get("path") or "")).resolve()
+                if isinstance(db_record, dict)
+                else None
+            )
             db_stat_matches = (
                 manifest_database_path == self.database_path.resolve()
                 and int(db_record.get("size", -1)) == int(db_stat.st_size)
@@ -474,25 +481,23 @@ class AsrFtsIndex:
         if len(rows) != 1:
             raise ValueError("ASR SQLite asr_meta must contain exactly one row")
         row = rows[0]
-        return {str(key): row[key] for key in row.keys()}
+        # sqlite3.Row iterates values, unlike dict; its keys() API is required
+        # here even though the generic mapping lint prefers direct iteration.
+        return {str(key): row[key] for key in row.keys()}  # noqa: SIM118
 
     def _close_connection_locked(self) -> None:
         if self._connection is not None:
-            try:
+            with suppress(sqlite3.Error):
                 self._connection.close()
-            except sqlite3.Error:
-                pass
         self._connection = None
         snapshot = self._runtime_snapshot_path
         self._runtime_snapshot_path = None
         self._connection_path = None
         if snapshot is not None:
-            try:
+            # A failed cleanup must not leave a stale connection state; the
+            # next health call remains fail-closed and can retry.
+            with suppress(OSError):
                 snapshot.unlink(missing_ok=True)
-            except OSError:
-                # A failed cleanup must not leave a stale connection state;
-                # the next health call remains fail-closed and can retry.
-                pass
         self._opened_file_identity = None
         self._opened_build_id = None
 
@@ -581,16 +586,12 @@ class AsrFtsIndex:
             self._connection_reopened = True
             self._connection_error = None
         except (OSError, sqlite3.Error, ValueError, TypeError) as error:
-            try:
-                if connection is not None:
+            if connection is not None:
+                with suppress(sqlite3.Error):
                     connection.close()
-            except sqlite3.Error:
-                pass
             if snapshot_path is not None:
-                try:
+                with suppress(OSError):
                     snapshot_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
             self._close_connection_locked()
             self._connection_error = str(error)
         return {
@@ -624,18 +625,26 @@ class AsrFtsIndex:
                 "SUM(CASE WHEN frame_uid <> '' AND point_id > 0 THEN 1 ELSE 0 END) AS mapped "
                 "FROM asr_segments"
             ).fetchone()
-            fts_count = int(
-                self._connection.execute("SELECT COUNT(*) FROM asr_fts").fetchone()[0]
-            )
+            fts_count = int(self._connection.execute("SELECT COUNT(*) FROM asr_fts").fetchone()[0])
             user_version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
             meta = self._read_database_meta(self._connection)
             count = int(row["count"] or 0) if row else 0
             videos = int(row["videos"] or 0) if row else 0
             mapped = int(row["mapped"] or 0) if row else 0
             expected_columns = {
-                "segment_id", "video_id", "start_ms", "end_ms", "transcript",
-                "transcript_search", "frame_uid", "point_id", "keyframe_n",
-                "frame_idx", "pts_time_s", "fps", "image_relpath",
+                "segment_id",
+                "video_id",
+                "start_ms",
+                "end_ms",
+                "transcript",
+                "transcript_search",
+                "frame_uid",
+                "point_id",
+                "keyframe_n",
+                "frame_idx",
+                "pts_time_s",
+                "fps",
+                "image_relpath",
             }
             return {
                 "ready": (
@@ -702,7 +711,9 @@ class AsrFtsIndex:
                 ):
                     cached = dict(self._health_cache[2])
                     cached.update(connection_state)
-                    cached["connection_reopened"] = bool(connection_state.get("connection_reopened"))
+                    cached["connection_reopened"] = bool(
+                        connection_state.get("connection_reopened")
+                    )
                     if self._source_inventory_cache is not None:
                         cached["source_validation_age_s"] = round(
                             max(0.0, now - self._source_inventory_cache[0]), 3
@@ -810,7 +821,10 @@ class AsrFtsIndex:
             self._path_stat_signature(self.manifest_path),
             self._path_stat_signature(self.database_path),
             self._path_stat_signature(
-                self.segments_dir.parent / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
+                self.segments_dir.parent
+                / "visual_embeddings"
+                / "metaclip2"
+                / "keyframes_metadata.jsonl"
             ),
             self._path_stat_signature(self.segments_dir),
             source_inventory.get("inventory_signature", ()),
@@ -855,10 +869,9 @@ class AsrFtsIndex:
                 self._artifact_diagnostics[diagnostic_key] = diagnostic
                 return False, False, False
             stat = expected_path.stat()
-            stat_matches = (
-                int(record.get("size", -1)) == int(stat.st_size)
-                and int(record.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
-            )
+            stat_matches = int(record.get("size", -1)) == int(stat.st_size) and int(
+                record.get("mtime_ns", -1)
+            ) == int(stat.st_mtime_ns)
             diagnostic["stat_matches"] = stat_matches
             expected_sha = str(record.get("sha256") or "")
             if len(expected_sha) != 64 or any(
@@ -867,10 +880,7 @@ class AsrFtsIndex:
                 diagnostic["error"] = "artifact sha256 is missing or malformed"
                 self._artifact_diagnostics[diagnostic_key] = diagnostic
                 return False, stat_matches, False
-            identity = (
-                int(stat.st_size),
-                int(stat.st_mtime_ns), int(getattr(stat, "st_ino", 0))
-            )
+            identity = (int(stat.st_size), int(stat.st_mtime_ns), int(getattr(stat, "st_ino", 0)))
             cache_key = str(expected_path.resolve())
             cached = self._fingerprint_cache.get(cache_key)
             hash_required = verify_hash or not stat_matches
@@ -899,19 +909,25 @@ class AsrFtsIndex:
         db_state = self._database_state()
         warnings: list[str] = []
         identity = manifest.get("offline_identity") or {}
-        revision_verified = bool(isinstance(identity, dict) and identity.get("revision_verified") is True)
+        revision_verified = bool(
+            isinstance(identity, dict) and identity.get("revision_verified") is True
+        )
         if not revision_verified:
             warnings.append("ASR offline model revision is not cryptographically verified")
         db_record = manifest.get("database") or {}
         try:
             manifest_database_path = (
-                self.database_path.parent / str(db_record.get("path") or "")
-            ).resolve() if isinstance(db_record, dict) else None
+                (self.database_path.parent / str(db_record.get("path") or "")).resolve()
+                if isinstance(db_record, dict)
+                else None
+            )
             database_path_matches = manifest_database_path == self.database_path.resolve()
         except (OSError, TypeError, ValueError):
             database_path_matches = False
-        database_matches, database_stat_matches, database_fingerprint_present = self._artifact_status(
-            db_record, relative_root=self.database_path.parent, verify_hash=False
+        database_matches, database_stat_matches, database_fingerprint_present = (
+            self._artifact_status(
+                db_record, relative_root=self.database_path.parent, verify_hash=False
+            )
         )
         source_inventory = self._source_inventory_snapshot(manifest)
         for diagnostic in source_inventory.get("diagnostics", []):
@@ -929,12 +945,19 @@ class AsrFtsIndex:
                 manifest_source_fingerprint = source_fingerprint(source_files)
             except (TypeError, ValueError, KeyError):
                 manifest_source_fingerprint = ""
-        canonical_path = self.segments_dir.parent / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
+        canonical_path = (
+            self.segments_dir.parent
+            / "visual_embeddings"
+            / "metaclip2"
+            / "keyframes_metadata.jsonl"
+        )
         canonical_record = manifest.get("canonical_metadata") or {}
         if not isinstance(canonical_record, dict):
             canonical_record = {}
-        canonical_matches, canonical_stat_matches, canonical_fingerprint_present = self._artifact_status(
-            canonical_record, relative_root=canonical_path.parent, verify_hash=False
+        canonical_matches, canonical_stat_matches, canonical_fingerprint_present = (
+            self._artifact_status(
+                canonical_record, relative_root=canonical_path.parent, verify_hash=False
+            )
         )
         expected_build_id = ""
         if manifest_source_fingerprint and canonical_fingerprint_present:
@@ -992,8 +1015,10 @@ class AsrFtsIndex:
             and manifest.get("source_fingerprint") == manifest_source_fingerprint
             and manifest.get("canonical_fingerprint") == canonical_record.get("sha256")
             and manifest.get("build_id") == expected_build_id
-            and manifest.get("source_fingerprint") == db_state.get("meta", {}).get("source_fingerprint")
-            and manifest.get("canonical_fingerprint") == db_state.get("meta", {}).get("canonical_fingerprint")
+            and manifest.get("source_fingerprint")
+            == db_state.get("meta", {}).get("source_fingerprint")
+            and manifest.get("canonical_fingerprint")
+            == db_state.get("meta", {}).get("canonical_fingerprint")
             and manifest.get("build_id") == db_state.get("meta", {}).get("build_id")
             and db_state.get("meta", {}).get("mapping_strategy") == ASR_MAPPING_STRATEGY
         )
@@ -1030,12 +1055,16 @@ class AsrFtsIndex:
             "database_stat_matches_manifest": database_stat_matches,
             "database_path_matches_manifest": database_path_matches,
             "source_matches_manifest": source_matches,
-            "source_fingerprint_matches_manifest": manifest.get("source_fingerprint") == manifest_source_fingerprint,
+            "source_fingerprint_matches_manifest": manifest.get("source_fingerprint")
+            == manifest_source_fingerprint,
             "source_file_count_matches_manifest": source_file_count_matches,
             "canonical_metadata_matches_manifest": canonical_matches,
             "canonical_metadata_stat_matches_manifest": canonical_stat_matches,
-            "canonical_fingerprint_matches_manifest": manifest.get("canonical_fingerprint") == canonical_record.get("sha256"),
-            "build_id_matches_expected": bool(manifest.get("build_id") and manifest.get("build_id") == expected_build_id),
+            "canonical_fingerprint_matches_manifest": manifest.get("canonical_fingerprint")
+            == canonical_record.get("sha256"),
+            "build_id_matches_expected": bool(
+                manifest.get("build_id") and manifest.get("build_id") == expected_build_id
+            ),
             "fingerprints_recorded": (
                 database_fingerprint_present
                 and source_fingerprints_present
@@ -1044,8 +1073,10 @@ class AsrFtsIndex:
             "build_id": manifest.get("build_id"),
             "manifest_build_id": manifest.get("build_id"),
             "internal_build_id": db_state.get("meta", {}).get("build_id"),
-            "source_fingerprint_matches": manifest.get("source_fingerprint") == db_state.get("meta", {}).get("source_fingerprint"),
-            "canonical_fingerprint_matches": manifest.get("canonical_fingerprint") == db_state.get("meta", {}).get("canonical_fingerprint"),
+            "source_fingerprint_matches": manifest.get("source_fingerprint")
+            == db_state.get("meta", {}).get("source_fingerprint"),
+            "canonical_fingerprint_matches": manifest.get("canonical_fingerprint")
+            == db_state.get("meta", {}).get("canonical_fingerprint"),
             "internal_metadata_matches": bool(
                 manifest.get("build_id")
                 and manifest.get("build_id") == db_state.get("meta", {}).get("build_id")
@@ -1160,10 +1191,18 @@ class AsrFtsIndex:
                         )
                         rows.append(
                             (
-                                parsed["segment_id"], parsed["video_id"], parsed["start_ms"], parsed["end_ms"],
-                                parsed["transcript"], parsed["transcript_search"], str(frame["frame_uid"]),
-                                int(frame["point_id"]), int(frame["keyframe_n"]), int(frame["frame_idx"]),
-                                float(frame.get("pts_time_s", 0.0)), float(frame.get("fps", 0.0)),
+                                parsed["segment_id"],
+                                parsed["video_id"],
+                                parsed["start_ms"],
+                                parsed["end_ms"],
+                                parsed["transcript"],
+                                parsed["transcript_search"],
+                                str(frame["frame_uid"]),
+                                int(frame["point_id"]),
+                                int(frame["keyframe_n"]),
+                                int(frame["frame_idx"]),
+                                float(frame.get("pts_time_s", 0.0)),
+                                float(frame.get("fps", 0.0)),
                                 str(frame.get("image_relpath") or ""),
                             )
                         )
@@ -1233,8 +1272,10 @@ class AsrFtsIndex:
                 "integrity_ok": integrity.casefold() == "ok",
                 "state_ready": state.get("ready") is True,
                 "build_id_matches": meta.get("build_id") == build_context.get("build_id"),
-                "source_fingerprint_matches": meta.get("source_fingerprint") == build_context.get("source_fingerprint"),
-                "canonical_fingerprint_matches": meta.get("canonical_fingerprint") == build_context.get("canonical_fingerprint"),
+                "source_fingerprint_matches": meta.get("source_fingerprint")
+                == build_context.get("source_fingerprint"),
+                "canonical_fingerprint_matches": meta.get("canonical_fingerprint")
+                == build_context.get("canonical_fingerprint"),
             }
             if not all(checks.values()):
                 raise ValueError(
@@ -1290,8 +1331,7 @@ class AsrFtsIndex:
             expected_role_count = 1 if _allow_single else 6
             expected_stream_count = 1 if _allow_single else 12
             stream_queries = {
-                str(stream): str(value).strip()
-                for stream, value in query_by_role.items()
+                str(stream): str(value).strip() for stream, value in query_by_role.items()
             }
             if _allow_single:
                 valid_streams = len(stream_queries) == expected_stream_count
@@ -1304,9 +1344,7 @@ class AsrFtsIndex:
                     and all(language in {"vi", "en"} for _role, language in identities)
                     and len(set(identities)) == expected_stream_count
                 )
-            if not valid_streams or any(
-                not value for value in stream_queries.values()
-            ):
+            if not valid_streams or any(not value for value in stream_queries.values()):
                 if _allow_single:
                     raise ValueError("ASR requires one non-empty query")
                 raise ValueError("ASR requires six bilingual query variants")
@@ -1316,7 +1354,9 @@ class AsrFtsIndex:
                 role, language = _stream_identity(stream)
                 rows, tokens = self._query_stream(str(query), per_stream_top_k)
                 stream_counts[stream] = len(rows)
-                max_relevance = max((max(0.0, -float(row["bm25_score"])) for row in rows), default=0.0) or 1.0
+                max_relevance = (
+                    max((max(0.0, -float(row["bm25_score"])) for row in rows), default=0.0) or 1.0
+                )
                 ordered_tokens = ordered_lexical_tokens(str(query))
                 query_bigrams = _ordered_lexical_bigrams(str(query))
                 search_token_set = set(tokens)
@@ -1343,12 +1383,16 @@ class AsrFtsIndex:
                     combined = 0.55 * bm25_relevance + 0.30 * token_coverage + 0.15 * ngram_coverage
                     segment_id = str(row["segment_id"])
                     stream_evidence = {
-                        "role": role, "language": language, "stream": stream,
-                        "rank": rank, "bm25_raw": round(bm25_raw, 8),
+                        "role": role,
+                        "language": language,
+                        "stream": stream,
+                        "rank": rank,
+                        "bm25_raw": round(bm25_raw, 8),
                         "bm25_relevance": round(bm25_relevance, 8),
                         "token_coverage": round(token_coverage, 8),
                         "ngram_coverage": round(ngram_coverage, 8),
-                        "combined_score": round(combined, 8), "matched_terms": matched,
+                        "combined_score": round(combined, 8),
+                        "matched_terms": matched,
                         "query_tokens": tokens,
                         "ordered_query_tokens": ordered_tokens,
                         "query_bigrams": [list(value) for value in query_bigrams],
@@ -1356,13 +1400,20 @@ class AsrFtsIndex:
                     segment = segment_hits.setdefault(
                         segment_id,
                         {
-                            "segment_id": segment_id, "video_id": str(row["video_id"]),
-                            "start_ms": int(row["start_ms"]), "end_ms": int(row["end_ms"]),
-                            "transcript": str(row["transcript"]), "frame_uid": str(row["frame_uid"]),
-                            "point_id": int(row["point_id"]), "keyframe_n": int(row["keyframe_n"]),
-                            "frame_idx": int(row["frame_idx"]), "pts_time_s": float(row["pts_time_s"]),
-                            "fps": float(row["fps"]), "image_relpath": str(row["image_relpath"]),
-                            "query_scores": {}, "stream_provenance": {},
+                            "segment_id": segment_id,
+                            "video_id": str(row["video_id"]),
+                            "start_ms": int(row["start_ms"]),
+                            "end_ms": int(row["end_ms"]),
+                            "transcript": str(row["transcript"]),
+                            "frame_uid": str(row["frame_uid"]),
+                            "point_id": int(row["point_id"]),
+                            "keyframe_n": int(row["keyframe_n"]),
+                            "frame_idx": int(row["frame_idx"]),
+                            "pts_time_s": float(row["pts_time_s"]),
+                            "fps": float(row["fps"]),
+                            "image_relpath": str(row["image_relpath"]),
+                            "query_scores": {},
+                            "stream_provenance": {},
                         },
                     )
                     # Keep VI and EN evidence in separate stream slots.  A
@@ -1373,7 +1424,9 @@ class AsrFtsIndex:
                     segment["stream_provenance"][stream] = stream_evidence
         if not segment_hits:
             return {
-                "results": [], "candidate_segment_count": 0, "candidate_frame_count": 0,
+                "results": [],
+                "candidate_segment_count": 0,
+                "candidate_frame_count": 0,
                 "stream_counts": stream_counts,
                 "timing": {"total_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             }
@@ -1382,7 +1435,9 @@ class AsrFtsIndex:
             best_stream, best_score = max(
                 segment["query_scores"].items(),
                 key=lambda pair: (
-                    float(pair[1]), -int(segment["stream_provenance"][pair[0]]["rank"]), pair[0]
+                    float(pair[1]),
+                    -int(segment["stream_provenance"][pair[0]]["rank"]),
+                    pair[0],
                 ),
             )
             best_role, best_language = _stream_identity(best_stream)
@@ -1394,7 +1449,9 @@ class AsrFtsIndex:
             frame_uid = segment["frame_uid"]
             current = frame_hits.get(frame_uid)
             if current is None or (
-                segment["raw_score"], -segment["best_rank"], segment["segment_id"]
+                segment["raw_score"],
+                -segment["best_rank"],
+                segment["segment_id"],
             ) > (current["raw_score"], -current["best_rank"], current["segment_id"]):
                 frame_hits[frame_uid] = segment
         values = [float(item["raw_score"]) for item in frame_hits.values()]
@@ -1432,8 +1489,7 @@ class AsrFtsIndex:
                     "token_coverage": winner["token_coverage"],
                     "ngram_coverage": winner["ngram_coverage"],
                     "asr_query_scores": {
-                        role: round(float(role_scores.get(role, 0.0)), 8)
-                        for role in QUERY_ROLES
+                        role: round(float(role_scores.get(role, 0.0)), 8) for role in QUERY_ROLES
                     },
                     "asr_language_scores": language_scores,
                     "asr_stream_provenance": {
@@ -1446,16 +1502,21 @@ class AsrFtsIndex:
             ranked_frames.append(frame)
         ranked_frames.sort(
             key=lambda item: (
-                -float(item["asr_normalized_score"]), -float(item["asr_raw_score"]),
-                int(item.get("asr_best_rank", 2_000_001)), str(item["video_id"]),
-                int(item["frame_idx"]), str(item.get("asr_segment_id", "")),
+                -float(item["asr_normalized_score"]),
+                -float(item["asr_raw_score"]),
+                int(item.get("asr_best_rank", 2_000_001)),
+                str(item["video_id"]),
+                int(item["frame_idx"]),
+                str(item.get("asr_segment_id", "")),
             )
         )
         for rank, frame in enumerate(ranked_frames[:final_top_k], 1):
             frame["rank"] = rank
         return {
-            "results": ranked_frames[:final_top_k], "candidate_segment_count": len(segment_hits),
-            "candidate_frame_count": len(frame_hits), "stream_counts": stream_counts,
+            "results": ranked_frames[:final_top_k],
+            "candidate_segment_count": len(segment_hits),
+            "candidate_frame_count": len(frame_hits),
+            "stream_counts": stream_counts,
             "timing": {"total_ms": round((time.perf_counter() - started) * 1000.0, 2)},
         }
 
@@ -1464,7 +1525,8 @@ class AsrFtsIndex:
 
         result = self.search_many(
             {"original": query},
-            per_stream_top_k=min(2_000, max(1, top_k * 30)), final_top_k=top_k,
+            per_stream_top_k=min(2_000, max(1, top_k * 30)),
+            final_top_k=top_k,
             _allow_single=True,
         )
         return result["results"]
@@ -1476,7 +1538,10 @@ class AsrFtsIndex:
             frames = self.metadata.video_frames(video_id)
             if not frames:
                 return ""
-            target = next((frame for frame in frames if int(frame.get("frame_idx", -1)) == int(frame_idx)), None)
+            target = next(
+                (frame for frame in frames if int(frame.get("frame_idx", -1)) == int(frame_idx)),
+                None,
+            )
             if target is None:
                 return ""
             fps = float(target.get("fps") or 0.0) or 30.0
@@ -1484,9 +1549,17 @@ class AsrFtsIndex:
             half_window_ms = max(1, int(round(abs(window_frames) / fps * 1000.0)))
             rows = self._connection.execute(
                 "SELECT transcript FROM asr_segments WHERE video_id = ? AND end_ms >= ? AND start_ms <= ? ORDER BY start_ms",
-                (str(video_id).upper().replace("-", "_"), int(center_ms - half_window_ms), int(center_ms + half_window_ms)),
+                (
+                    str(video_id).upper().replace("-", "_"),
+                    int(center_ms - half_window_ms),
+                    int(center_ms + half_window_ms),
+                ),
             ).fetchall()
-        return " ".join(dict.fromkeys(str(row["transcript"]).strip() for row in rows if str(row["transcript"]).strip()))
+        return " ".join(
+            dict.fromkeys(
+                str(row["transcript"]).strip() for row in rows if str(row["transcript"]).strip()
+            )
+        )
 
 
 def build_asr_manifest(
@@ -1513,12 +1586,14 @@ def build_asr_manifest(
         }
     return {
         "schema_version": ASR_INDEX_SCHEMA_VERSION,
-        "status": "ready", "passed": True,
+        "status": "ready",
+        "passed": True,
         "build_id": str(build_context["build_id"]),
         "source_fingerprint": str(build_context["source_fingerprint"]),
         "canonical_fingerprint": str(build_context["canonical_fingerprint"]),
         "database": artifact_record(database_path, relative_to=state_root),
-        "source_directory": "asr_segments", "source_files": source_facts["source_files"],
+        "source_directory": "asr_segments",
+        "source_files": source_facts["source_files"],
         "segment_count": int(source_facts["segment_count"]),
         "video_count": int(source_facts["video_count"]),
         "indexed_video_count": int(source_facts["indexed_video_count"]),
@@ -1527,14 +1602,16 @@ def build_asr_manifest(
         "source_file_count": len(source_facts["source_files"]),
         "source_segment_file_count": int(source_facts["source_segment_file_count"]),
         "source_manifest_file_count": int(source_facts["source_manifest_file_count"]),
-        "model_ids": source_facts["model_ids"], "engines": source_facts["engines"],
+        "model_ids": source_facts["model_ids"],
+        "engines": source_facts["engines"],
         "canonical_metadata": artifact_record(canonical_path),
         "mapping": {
             "mapped_segments": int(source_facts["segment_count"]),
             "strategy": ASR_MAPPING_STRATEGY,
         },
         "offline_identity": {
-            "model_id": source_facts["model_ids"][0], "engine": source_facts["engines"][0],
+            "model_id": source_facts["model_ids"][0],
+            "engine": source_facts["engines"][0],
             "revision_verified": False,
             "evidence": "per-video ASR manifests; immutable checkpoint revision is not recorded",
         },
@@ -1543,8 +1620,21 @@ def build_asr_manifest(
 
 
 __all__ = [
-    "ASR_INDEX_SCHEMA_VERSION", "ASR_SQLITE_USER_VERSION", "EXPECTED_ASR_SEGMENTS", "EXPECTED_ASR_VIDEOS",
-    "ASR_MAPPING_STRATEGY", "AsrFtsIndex", "artifact_record", "build_asr_manifest", "build_id_for",
-    "fold_text", "load_canonical_frame_index", "normalize_text", "ordered_lexical_tokens",
-    "query_tokens", "source_fingerprint", "validate_asr_sources", "_ordered_lexical_bigrams",
+    "ASR_INDEX_SCHEMA_VERSION",
+    "ASR_SQLITE_USER_VERSION",
+    "EXPECTED_ASR_SEGMENTS",
+    "EXPECTED_ASR_VIDEOS",
+    "ASR_MAPPING_STRATEGY",
+    "AsrFtsIndex",
+    "artifact_record",
+    "build_asr_manifest",
+    "build_id_for",
+    "fold_text",
+    "load_canonical_frame_index",
+    "normalize_text",
+    "ordered_lexical_tokens",
+    "query_tokens",
+    "source_fingerprint",
+    "validate_asr_sources",
+    "_ordered_lexical_bigrams",
 ]

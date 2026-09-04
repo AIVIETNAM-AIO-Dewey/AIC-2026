@@ -8,25 +8,26 @@ standalone request cannot interleave with a partially-built fusion pool.
 
 from __future__ import annotations
 
-from copy import deepcopy
 import gc
 import json
 import math
 import threading
 import time
+from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from ..branch1.contracts import QUERY_ROLES, BRANCH1_FINAL_TOP_K
-from ..branch1.health import branch1_health
-from ..rerankers.beit3_cosine import Beit3CosineReranker
 from ...infrastructure.resources import current_process_rss_bytes, resource_qualification
 from ...infrastructure.scoring import normalize_scores
+from ..branch1.contracts import BRANCH1_FINAL_TOP_K, QUERY_ROLES
+from ..branch1.health import branch1_health
+from ..rerankers.beit3_cosine import Beit3CosineReranker
 from .contracts import (
-    BRANCH_POOL_LIMITS,
     BRANCH2_PER_STREAM_TOP_K,
     BRANCH2_PRE_RERANK_TOP_K,
     BRANCH2_RERANK_TOP_K,
+    BRANCH_POOL_LIMITS,
     DEFAULT_BRANCH_WEIGHTS,
     FINAL_FUSION_RESULT_SCHEMA_VERSION,
     FINAL_RERANK_TOP_K,
@@ -136,10 +137,7 @@ class KisFusionSearch:
         ocr_state = self._safe_health(self.ocr)
 
         canonical_path = (
-            self.data_root
-            / "visual_embeddings"
-            / "metaclip2"
-            / "keyframes_metadata.jsonl"
+            self.data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
         )
         raw_branch2_components = branch2_state.get("components")
         # A malformed or absent component map must never be interpreted as a
@@ -149,6 +147,7 @@ class KisFusionSearch:
         branch2_components = (
             raw_branch2_components if isinstance(raw_branch2_components, dict) else {}
         )
+
         def component_is_ready(name: str) -> bool:
             value = branch2_components.get(name)
             return isinstance(value, dict) and value.get("ready") is True
@@ -168,9 +167,9 @@ class KisFusionSearch:
         if shared_cache is None:
             shared_cache = getattr(self.branch2, "cache", None)
         cache_state = {
-            "ready": shared_cache is not None and all(
-                callable(getattr(shared_cache, method, None))
-                for method in ("key", "get", "put")
+            "ready": shared_cache is not None
+            and all(
+                callable(getattr(shared_cache, method, None)) for method in ("key", "get", "put")
             ),
             "persistent": True,
         }
@@ -227,8 +226,14 @@ class KisFusionSearch:
         ready = all(
             states[name].get("ready") is True
             for name in (
-                "branch1", "branch2", "asr", "ocr", "canonical_frame_mapping",
-                "beit3", "query_cache", "execution_contract",
+                "branch1",
+                "branch2",
+                "asr",
+                "ocr",
+                "canonical_frame_mapping",
+                "beit3",
+                "query_cache",
+                "execution_contract",
             )
         )
         # ``ready`` is the operational search gate.  Production qualification
@@ -236,9 +241,13 @@ class KisFusionSearch:
         # own production state and the measured resource report must be valid.
         # Do not fall back to ``ready`` here; an adapter that omits provenance
         # must remain fail-closed.
-        production_ready = ready and resource_state.get("production_ready") is True and all(
-            states[name].get("production_ready") is True
-            for name in ("branch1", "branch2", "asr", "ocr")
+        production_ready = (
+            ready
+            and resource_state.get("production_ready") is True
+            and all(
+                states[name].get("production_ready") is True
+                for name in ("branch1", "branch2", "asr", "ocr")
+            )
         )
         return {
             "schema_version": "kis.fusion.health.v1",
@@ -259,9 +268,9 @@ class KisFusionSearch:
             "components": states,
             "api_rss_bytes": current_process_rss_bytes(),
             "resource_qualification": resource_state,
-            "warnings": [
-                "KIS fusion requires all four branch pools to be ready"
-            ] if not ready else [],
+            "warnings": ["KIS fusion requires all four branch pools to be ready"]
+            if not ready
+            else [],
         }
 
     @staticmethod
@@ -300,12 +309,7 @@ class KisFusionSearch:
         with self._resource_lock:
             if self._frame_point_ids is not None:
                 return self._frame_point_ids
-            path = (
-                self.data_root
-                / "visual_embeddings"
-                / "metaclip2"
-                / "keyframes_metadata.jsonl"
-            )
+            path = self.data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
             mapping: dict[str, int] = {}
             point_ids: set[int] = set()
             minimum = BRANCH_POOL_LIMITS["branch1"] + 1
@@ -322,7 +326,9 @@ class KisFusionSearch:
                     if not uid or uid != f"{video_id}:{frame_idx}" or point_id < 1:
                         raise ValueError(f"Invalid canonical frame at line {line_number}")
                     if uid in mapping or point_id in point_ids:
-                        raise ValueError(f"Duplicate canonical frame identity at line {line_number}")
+                        raise ValueError(
+                            f"Duplicate canonical frame identity at line {line_number}"
+                        )
                     mapping[uid] = point_id
                     point_ids.add(point_id)
                     minimum = min(minimum, point_id)
@@ -397,37 +403,60 @@ class KisFusionSearch:
         raw_revisions = getattr(encoder, "revisions", None)
         revisions = raw_revisions if isinstance(raw_revisions, dict) else {}
         revision = str(revisions.get("beit3", "unknown-revision"))
-        cache_key = None
-        if cache is not None:
-            cache_key = cache.key(
+        stream_contract = [
+            {"role": role, "language": "en", "text": text}
+            for role, text in zip(QUERY_ROLES, texts, strict=True)
+        ]
+
+        def cache_key_for(device: str) -> str:
+            if cache is None:
+                raise RuntimeError("Query cache is unavailable")
+            return cache.key(
                 "beit3",
                 revision,
                 texts,
                 tokenizer_config="languages=en;max_tokens=64;output=language_head;normalization=l2",
-                stream_contract=[
-                    {"role": role, "language": "en", "text": text}
-                    for role, text in zip(QUERY_ROLES, texts, strict=True)
-                ],
+                stream_contract=stream_contract,
+                device=device,
             )
-            cached = cache.get(cache_key)
+
+        if cache is not None:
+            cache_device_for_model = getattr(encoder, "cache_device_for_model", None)
+            lookup_device = (
+                str(cache_device_for_model("beit3"))
+                if callable(cache_device_for_model)
+                else str(getattr(encoder, "cache_device", "cpu"))
+            )
+            cached = cache.get(cache_key_for(lookup_device))
         else:
+            cache_device_for_model = None
+            lookup_device = "cpu"
             cached = None
         if cached is not None:
             vectors, diagnostics = cached
-            return vectors, self._tag_diagnostics(diagnostics), {
-                "cache_hit": True,
-                "model_loading_ms": 0.0,
-                "inference_ms": 0.0,
-                "worker_reused": False,
-                "worker_spawned": False,
-                "worker_pid": None,
-                "worker_load_count": 0,
-            }
+            return (
+                vectors,
+                self._tag_diagnostics(diagnostics),
+                {
+                    "cache_hit": True,
+                    "model_loading_ms": 0.0,
+                    "inference_ms": 0.0,
+                    "worker_reused": False,
+                    "worker_spawned": False,
+                    "worker_pid": None,
+                    "worker_load_count": 0,
+                },
+            )
         started = time.perf_counter()
         vectors, diagnostics = encoder.encode("beit3", texts)
         diagnostics = self._tag_diagnostics(diagnostics)
-        if cache is not None and cache_key is not None:
-            cache.put(cache_key, "beit3", vectors, diagnostics)
+        if cache is not None:
+            actual_device = (
+                str(cache_device_for_model("beit3"))
+                if callable(cache_device_for_model)
+                else lookup_device
+            )
+            cache.put(cache_key_for(actual_device), "beit3", vectors, diagnostics)
         timing = dict(getattr(getattr(encoder, "manager", None), "last_timing", {}))
         timing.update(
             {
@@ -498,34 +527,47 @@ class KisFusionSearch:
             raise ValueError("final BEiT reranker reported an invalid rerank count")
 
         canonical_fields = (
-            "frame_uid", "point_id", "global_idx", "video_id", "frame_idx",
-            "keyframe_n", "pts_time_s", "fps", "image_relpath",
+            "frame_uid",
+            "point_id",
+            "global_idx",
+            "video_id",
+            "frame_idx",
+            "keyframe_n",
+            "pts_time_s",
+            "fps",
+            "image_relpath",
             "submission_string",
         )
         rerank_fields = (
-            "beit3_raw_cosine", "beit3_normalized", "rrf_normalized",
-            "final_score", "score",
+            "beit3_raw_cosine",
+            "beit3_normalized",
+            "rrf_normalized",
+            "final_score",
+            "score",
         )
         final_beit_fields = (
-            "beit3_raw_cosine", "beit3_normalized", "rrf_normalized",
-            "beit3_best_query_role", "beit3_best_query_language",
-            "beit3_query_scores", "rank_delta", "rerank_formula",
+            "beit3_raw_cosine",
+            "beit3_normalized",
+            "rrf_normalized",
+            "beit3_best_query_role",
+            "beit3_best_query_language",
+            "beit3_query_scores",
+            "rank_delta",
+            "rerank_formula",
         )
         expected_formula = {
             "beit3_weight": 0.25,
             "previous_weight": 0.75,
             "previous_score_field": "rrf_score",
-            "expression": (
-                "beit3_weight * normalized_beit3 + "
-                "previous_weight * normalized_rrf"
-            ),
+            "expression": ("beit3_weight * normalized_beit3 + previous_weight * normalized_rrf"),
         }
 
         def canonical_identity(item: Any, source: str) -> tuple[Any, ...]:
             if not isinstance(item, dict):
                 raise ValueError(f"final BEiT reranker returned a non-object {source} candidate")
             missing = [
-                field for field in canonical_fields
+                field
+                for field in canonical_fields
                 if field not in item or item[field] is None or item[field] == ""
             ]
             if missing:
@@ -536,10 +578,16 @@ class KisFusionSearch:
             return tuple(item[field] for field in canonical_fields)
 
         rrf_snapshot_fields = canonical_fields + (
-            "pre_rerank_rank", "rrf_score", "branch_agreement_count",
-            "observed_branches", "branch_ranks", "rrf_contributions",
-            "branch_normalized_scores", "weighted_normalized_score",
-            "best_branch_rank", "branch_provenance",
+            "pre_rerank_rank",
+            "rrf_score",
+            "branch_agreement_count",
+            "observed_branches",
+            "branch_ranks",
+            "rrf_contributions",
+            "branch_normalized_scores",
+            "weighted_normalized_score",
+            "best_branch_rank",
+            "branch_provenance",
         )
         expected_by_uid: dict[str, tuple[Any, ...]] = {}
         snapshot_by_uid: dict[str, dict[str, Any]] = {}
@@ -581,7 +629,7 @@ class KisFusionSearch:
 
         def finite_number(item: dict[str, Any], field: str, source: str) -> float:
             value = item.get(field)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError(f"final BEiT reranker returned {source} {field} as a non-number")
             value = float(value)
             if not math.isfinite(value):
@@ -598,59 +646,91 @@ class KisFusionSearch:
             for field in rrf_snapshot_fields:
                 if field not in item or item[field] != snapshot[field]:
                     raise ValueError(
-                        "rrf_snapshot_mismatch: "
-                        f"{uid} changed immutable RRF field {field}"
+                        f"rrf_snapshot_mismatch: {uid} changed immutable RRF field {field}"
                     )
             pre_rank = item.get("pre_rerank_rank")
             if isinstance(pre_rank, bool) or not isinstance(pre_rank, int):
-                raise ValueError(f"final BEiT reranker returned {source} without an integer pre_rerank_rank")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} without an integer pre_rerank_rank"
+                )
             if not 1 <= pre_rank <= rerank_count:
-                raise ValueError(f"final BEiT reranker returned {source} pre_rerank_rank outside rerank window")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} pre_rerank_rank outside rerank window"
+                )
             if pre_rank != snapshot["pre_rerank_rank"]:
                 raise ValueError(
-                    "rrf_snapshot_mismatch: "
-                    f"{uid} pre_rerank_rank does not match its RRF snapshot"
+                    f"rrf_snapshot_mismatch: {uid} pre_rerank_rank does not match its RRF snapshot"
                 )
             observed_pre_ranks.add(pre_rank)
             if item.get("rank") != output_rank:
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid final rank")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid final rank"
+                )
             if item.get("rank_delta") != pre_rank - output_rank:
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid rank_delta")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid rank_delta"
+                )
 
             values = {field: finite_number(item, field, source) for field in rerank_fields}
             if not 0.0 <= values["beit3_normalized"] <= 1.0:
-                raise ValueError(f"final BEiT reranker returned {source} beit3_normalized outside [0, 1]")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} beit3_normalized outside [0, 1]"
+                )
             if not 0.0 <= values["rrf_normalized"] <= 1.0:
-                raise ValueError(f"final BEiT reranker returned {source} rrf_normalized outside [0, 1]")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} rrf_normalized outside [0, 1]"
+                )
             if item.get("score_type") != "beit3_coco_cosine_blend":
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid score_type")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid score_type"
+                )
             if not math.isclose(values["score"], values["final_score"], rel_tol=0.0, abs_tol=1e-7):
                 raise ValueError(f"final BEiT reranker returned {source} with score != final_score")
             expected_final = 0.25 * values["beit3_normalized"] + 0.75 * values["rrf_normalized"]
             if not math.isclose(values["final_score"], expected_final, rel_tol=0.0, abs_tol=1e-7):
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid 25/75 final_score")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid 25/75 final_score"
+                )
 
             best_role = item.get("beit3_best_query_role")
             if best_role not in QUERY_ROLES:
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid BEiT best role")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid BEiT best role"
+                )
             if item.get("beit3_best_query_language") != "en":
-                raise ValueError(f"final BEiT reranker returned {source} with a non-English BEiT best language")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with a non-English BEiT best language"
+                )
             query_scores = item.get("beit3_query_scores")
             if not isinstance(query_scores, dict) or set(query_scores) != set(QUERY_ROLES):
-                raise ValueError(f"final BEiT reranker returned {source} without exactly six BEiT query scores")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} without exactly six BEiT query scores"
+                )
             parsed_query_scores: dict[str, tuple[float, int]] = {}
             for role in QUERY_ROLES:
                 evidence = query_scores[role]
                 if not isinstance(evidence, dict):
-                    raise ValueError(f"final BEiT reranker returned {source} {role} evidence as a non-object")
+                    raise ValueError(
+                        f"final BEiT reranker returned {source} {role} evidence as a non-object"
+                    )
                 if evidence.get("role") != role:
-                    raise ValueError(f"final BEiT reranker returned {source} {role} evidence with a mismatched role")
+                    raise ValueError(
+                        f"final BEiT reranker returned {source} {role} evidence with a mismatched role"
+                    )
                 if evidence.get("language") != "en":
-                    raise ValueError(f"final BEiT reranker returned {source} {role} evidence with a non-English language")
+                    raise ValueError(
+                        f"final BEiT reranker returned {source} {role} evidence with a non-English language"
+                    )
                 finite_number(evidence, "cosine", f"{source} {role} evidence")
                 evidence_rank = evidence.get("rank")
-                if isinstance(evidence_rank, bool) or not isinstance(evidence_rank, int) or evidence_rank < 1:
-                    raise ValueError(f"final BEiT reranker returned {source} {role} evidence with an invalid rank")
+                if (
+                    isinstance(evidence_rank, bool)
+                    or not isinstance(evidence_rank, int)
+                    or evidence_rank < 1
+                ):
+                    raise ValueError(
+                        f"final BEiT reranker returned {source} {role} evidence with an invalid rank"
+                    )
                 parsed_query_scores[role] = (
                     finite_number(evidence, "cosine", f"{source} {role} evidence"),
                     evidence_rank,
@@ -667,19 +747,26 @@ class KisFusionSearch:
             if not math.isclose(
                 values["beit3_raw_cosine"], expected_beit_raw, rel_tol=0.0, abs_tol=1e-7
             ):
-                raise ValueError(f"final BEiT reranker returned {source} with a raw cosine not matching query evidence")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with a raw cosine not matching query evidence"
+                )
             if best_role != expected_best_role:
-                raise ValueError(f"final BEiT reranker returned {source} with a non-winning BEiT best role")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with a non-winning BEiT best role"
+                )
             if item.get("rerank_formula") != expected_formula:
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid rerank_formula")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid rerank_formula"
+                )
             top_numeric[uid] = values
             beit_raw_by_uid[uid] = expected_beit_raw
         if observed_pre_ranks != set(range(1, rerank_count + 1)):
-            raise ValueError("final BEiT reranker returned duplicate or missing pre_rerank_rank values")
+            raise ValueError(
+                "final BEiT reranker returned duplicate or missing pre_rerank_rank values"
+            )
 
         expected_beit_normalized = {
-            uid: {"raw": raw, "observed": True}
-            for uid, raw in beit_raw_by_uid.items()
+            uid: {"raw": raw, "observed": True} for uid, raw in beit_raw_by_uid.items()
         }
         expected_rrf_normalized = {
             str(item["frame_uid"]): {
@@ -696,13 +783,21 @@ class KisFusionSearch:
             values = top_numeric[uid]
             expected_beit = float(expected_beit_normalized[uid]["normalized_score"])
             expected_rrf = float(expected_rrf_normalized[uid]["normalized_score"])
-            if not math.isclose(values["beit3_normalized"], expected_beit, rel_tol=0.0, abs_tol=1e-7):
-                raise ValueError(f"final BEiT reranker returned {source} with invalid BEiT normalization")
+            if not math.isclose(
+                values["beit3_normalized"], expected_beit, rel_tol=0.0, abs_tol=1e-7
+            ):
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with invalid BEiT normalization"
+                )
             if not math.isclose(values["rrf_normalized"], expected_rrf, rel_tol=0.0, abs_tol=1e-7):
-                raise ValueError(f"final BEiT reranker returned {source} with invalid RRF normalization")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with invalid RRF normalization"
+                )
             expected_final = 0.25 * expected_beit + 0.75 * expected_rrf
             if not math.isclose(values["final_score"], expected_final, rel_tol=0.0, abs_tol=1e-7):
-                raise ValueError(f"final BEiT reranker returned {source} with an invalid recomputed 25/75 final_score")
+                raise ValueError(
+                    f"final BEiT reranker returned {source} with an invalid recomputed 25/75 final_score"
+                )
 
         expected_top_order = sorted(
             reranked[:rerank_count],
@@ -731,12 +826,16 @@ class KisFusionSearch:
                     f"final BEiT reranker leaked final BEiT fields into tail rank {tail_index}: {', '.join(leaked)}"
                 )
             if returned.get("rank") != returned.get("pre_rerank_rank"):
-                raise ValueError(f"final BEiT reranker returned tail rank {tail_index} with rank != pre_rerank_rank")
+                raise ValueError(
+                    f"final BEiT reranker returned tail rank {tail_index} with rank != pre_rerank_rank"
+                )
             if not (
                 returned.get("score") == returned.get("final_score") == returned.get("rrf_score")
                 and returned.get("score_type") == "weighted_rrf"
             ):
-                raise ValueError(f"final BEiT reranker returned tail rank {tail_index} with invalid RRF scoring")
+                raise ValueError(
+                    f"final BEiT reranker returned tail rank {tail_index} with invalid RRF scoring"
+                )
             if returned != expected:
                 raise ValueError(
                     "rrf_snapshot_mismatch: "
@@ -748,18 +847,25 @@ class KisFusionSearch:
         self,
         query_bundle: dict[str, Any],
         branch_weights: dict[str, float] | None = None,
+        *,
+        _health_already_checked: bool = False,
+        _lock_already_held: bool = False,
     ) -> dict[str, Any]:
         # Validate request contracts before taking the heavy lock so malformed
         # requests are reported as 422 even when another search is running.
         _by_role, en_texts = self._query_texts(query_bundle)
         weights = normalize_branch_weights(branch_weights)
-        if not self.search_lock.acquire(blocking=False):
-            raise RuntimeError("KIS_FUSION_SEARCH_BUSY")
+        acquired = False
+        if not _lock_already_held:
+            if not self.search_lock.acquire(blocking=False):
+                raise RuntimeError("KIS_FUSION_SEARCH_BUSY")
+            acquired = True
         started = time.perf_counter()
         try:
-            aggregate_health = self.health()
-            if aggregate_health.get("ready") is not True:
-                raise RuntimeError("KIS_FUSION_NOT_READY")
+            if not _health_already_checked:
+                aggregate_health = self.health()
+                if aggregate_health.get("ready") is not True:
+                    raise RuntimeError("KIS_FUSION_NOT_READY")
 
             branch_started = time.perf_counter()
             try:
@@ -826,8 +932,7 @@ class KisFusionSearch:
             # before BEiT so neither the first branch's full stream evidence
             # nor a large DAM/ASR/OCR payload can leak into the public result.
             fused = [
-                materialize_fusion_candidate(item, include_rerank_fields=False)
-                for item in fused
+                materialize_fusion_candidate(item, include_rerank_fields=False) for item in fused
             ]
 
             rerank_info: dict[str, Any] = {
@@ -851,9 +956,13 @@ class KisFusionSearch:
                     # phase.  Keep all of them behind the same error boundary
                     # so callers can distinguish a BEiT failure from a
                     # generic orchestration failure.
-                    beit_vectors, beit_diagnostics, beit_timing = self._encode_beit_queries(en_texts)
+                    beit_vectors, beit_diagnostics, beit_timing = self._encode_beit_queries(
+                        en_texts
+                    )
                     timing["beit3_cache_hit"] = bool(beit_timing.get("cache_hit", False))
-                    timing["beit3_model_loading_ms"] = float(beit_timing.get("model_loading_ms", 0.0))
+                    timing["beit3_model_loading_ms"] = float(
+                        beit_timing.get("model_loading_ms", 0.0)
+                    )
                     timing["beit3_encode_ms"] = float(
                         beit_timing.get("encoding_ms", beit_timing.get("inference_ms", 0.0))
                     )
@@ -966,7 +1075,60 @@ class KisFusionSearch:
             # Branch workers keep their bounded idle process where possible;
             # the shared lock is always released even when a dependency fails.
             gc.collect()
+            if acquired:
+                self.search_lock.release()
+
+    def execute_batch(
+        self,
+        query_bundles: list[dict[str, Any]],
+        branch_weights: dict[str, float] | None = None,
+        *,
+        _health_already_checked: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Run two to six complete KIS searches under one atomic lock.
+
+        Ordered-event retrieval must not interleave another heavy request
+        between E1 and E2.  Validate every event before locking, check health
+        once, and then reuse the unchanged single-query implementation while
+        the caller owns the shared lock.
+        """
+
+        if not 2 <= len(query_bundles) <= 6:
+            raise ValueError("Ordered KIS fusion requires between 2 and 6 event bundles")
+        for bundle in query_bundles:
+            self._query_texts(bundle)
+        weights = normalize_branch_weights(branch_weights)
+        if not self.search_lock.acquire(blocking=False):
+            raise RuntimeError("KIS_FUSION_SEARCH_BUSY")
+        try:
+            if not _health_already_checked:
+                aggregate_health = self.health()
+                if aggregate_health.get("ready") is not True:
+                    raise RuntimeError("KIS_FUSION_NOT_READY")
+            return [
+                self.execute(
+                    bundle,
+                    weights,
+                    _health_already_checked=True,
+                    _lock_already_held=True,
+                )
+                for bundle in query_bundles
+            ]
+        finally:
             self.search_lock.release()
+
+    def _execute_prechecked(
+        self,
+        query_bundle: dict[str, Any],
+        branch_weights: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Execute after the API admitted the same cached health generation."""
+
+        return self.execute(
+            query_bundle,
+            branch_weights,
+            _health_already_checked=True,
+        )
 
 
 __all__ = ["KisFusionSearch"]

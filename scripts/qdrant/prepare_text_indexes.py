@@ -17,8 +17,12 @@ from online.src.retrieval.modalities.ocr import build_ocr_index  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data")))
-    parser.add_argument("--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state")))
+    parser.add_argument(
+        "--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data"))
+    )
+    parser.add_argument(
+        "--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state"))
+    )
     args = parser.parse_args()
     # ASR is prepared independently by prepare_asr_index.py.  This command
     # owns OCR only and never opens, rebuilds, or reports the ASR database.

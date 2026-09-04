@@ -15,7 +15,6 @@ from typing import Any
 import numpy as np
 from safetensors.numpy import load_file
 
-
 EXPECTED_FRAMES = 247_956
 IDENTITY_FIELDS = ("point_id", "frame_uid", "video_id", "frame_idx", "keyframe_n")
 DATA_GATE_SCHEMA_VERSION = "branch1.data-gate.v4"
@@ -97,9 +96,7 @@ def validate_index(directory: Path) -> int:
         metadata_path.open("r", encoding="utf-8") as metadata_handle,
     ):
         rows = csv.DictReader(csv_handle)
-        for count, pair in enumerate(
-            itertools.zip_longest(rows, metadata_handle), start=1
-        ):
+        for count, pair in enumerate(itertools.zip_longest(rows, metadata_handle), start=1):
             row, metadata_line = pair
             if row is None or metadata_line is None:
                 raise ValueError(f"{path}: CSV and metadata row counts differ")
@@ -110,9 +107,7 @@ def validate_index(directory: Path) -> int:
                 raise ValueError(f"{path}: point_id mismatch at CSV row {count + 1}")
             for field in identity_fields:
                 if str(row.get(field)) != str(metadata.get(field)):
-                    raise ValueError(
-                        f"{path}: {field} mismatch at CSV row {count + 1}"
-                    )
+                    raise ValueError(f"{path}: {field} mismatch at CSV row {count + 1}")
     if count != EXPECTED_FRAMES:
         raise ValueError(f"{path}: expected {EXPECTED_FRAMES} rows, found {count}")
     return count
@@ -249,9 +244,13 @@ def validate_siglip_shards(data_root: Path, canonical_metadata: Path) -> dict[st
                     raise ValueError(f"Unexpected tensors in {current_path}: {sorted(tensors)}")
                 current_matrix = tensors["embeddings"]
                 if current_matrix.ndim != 2 or current_matrix.shape[1] != 768:
-                    raise ValueError(f"Invalid SigLIP shard shape {current_path}: {current_matrix.shape}")
+                    raise ValueError(
+                        f"Invalid SigLIP shard shape {current_path}: {current_matrix.shape}"
+                    )
                 if current_matrix.dtype != np.float16:
-                    raise ValueError(f"Invalid SigLIP shard dtype {current_path}: {current_matrix.dtype}")
+                    raise ValueError(
+                        f"Invalid SigLIP shard dtype {current_path}: {current_matrix.dtype}"
+                    )
                 used.add(current_path.resolve())
                 current_video = video_id
                 current_rows = int(current_matrix.shape[0])
@@ -269,7 +268,9 @@ def validate_siglip_shards(data_root: Path, canonical_metadata: Path) -> dict[st
                 raise ValueError(f"Non-finite SigLIP vector at canonical row {row + 1}")
             norm = float(np.linalg.norm(chunk))
             if norm < 0.995 or norm > 1.005:
-                raise ValueError(f"SigLIP vector at canonical row {row + 1} is not normalized: {norm}")
+                raise ValueError(
+                    f"SigLIP vector at canonical row {row + 1} is not normalized: {norm}"
+                )
     if current_path is not None and current_matrix is not None:
         if len(current_used_rows) != current_rows:
             raise ValueError(f"SigLIP shard row mapping is incomplete: {current_path}")
@@ -286,8 +287,13 @@ def validate_siglip_shards(data_root: Path, canonical_metadata: Path) -> dict[st
     if all_shards != used:
         unused = sorted(str(path) for path in all_shards - used)
         missing = sorted(str(path) for path in used - all_shards)
-        raise ValueError(f"SigLIP shard set does not match metadata; unused={unused[:5]}, missing={missing[:5]}")
-    if total_mapped_rows != EXPECTED_FRAMES or sum(int(report["rows"]) for report in reports) != EXPECTED_FRAMES:
+        raise ValueError(
+            f"SigLIP shard set does not match metadata; unused={unused[:5]}, missing={missing[:5]}"
+        )
+    if (
+        total_mapped_rows != EXPECTED_FRAMES
+        or sum(int(report["rows"]) for report in reports) != EXPECTED_FRAMES
+    ):
         raise ValueError("SigLIP shard row total does not equal canonical frame count")
     return {
         "shard_count": len(reports),
@@ -404,9 +410,7 @@ def build_data_gate_report(data_root: Path, beit3_dir: Path | None = None) -> di
 
 def main() -> int:
     args = parse_args()
-    metaclip_dir = args.data_root / "visual_embeddings" / "metaclip2"
     beit3_dir = args.beit3_dir or args.data_root / "visual_embeddings" / "beit3"
-    canonical_metadata = metaclip_dir / "keyframes_metadata.jsonl"
 
     result = build_data_gate_report(args.data_root, beit3_dir)
     payload = json.dumps(result, ensure_ascii=False, indent=2)

@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import gc
+import re
 import threading
 import time
 from typing import Any, Protocol
 
 import numpy as np
 
-from ...infrastructure.qdrant import QdrantHttpClient
 from ...infrastructure.persistent_cache import PersistentQueryEmbeddingCache
+from ...infrastructure.qdrant import QdrantHttpClient
 from .contracts import (
     BRANCH1_FINAL_TOP_K,
     MODEL_SPECS,
@@ -19,10 +20,13 @@ from .contracts import (
 )
 from .fusion import aggregate_model_streams, fuse_model_candidates
 
+
 class Branch1Encoder(Protocol):
     revisions: dict[str, str]
 
-    def encode(self, model_name: str, texts: list[str]) -> tuple[np.ndarray, list[dict[str, Any]]]: ...
+    def encode(
+        self, model_name: str, texts: list[str]
+    ) -> tuple[np.ndarray, list[dict[str, Any]]]: ...
 
     def unload(self) -> None: ...
 
@@ -48,13 +52,20 @@ class Branch1Search:
         final_top_k: int,
         *,
         _lock_already_held: bool = False,
+        _video_id: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= int(per_stream_top_k) <= 2_000:
             raise ValueError("Branch-1 per_stream_top_k must be between 1 and 2000")
-        if int(final_top_k) != BRANCH1_FINAL_TOP_K:
-            raise ValueError(
-                f"Branch-1 final_top_k is fixed at {BRANCH1_FINAL_TOP_K}"
-            )
+        scoped_video_id = None
+        if _video_id is None:
+            if int(final_top_k) != BRANCH1_FINAL_TOP_K:
+                raise ValueError(f"Branch-1 final_top_k is fixed at {BRANCH1_FINAL_TOP_K}")
+        else:
+            scoped_video_id = str(_video_id).strip().upper().replace("-", "_")
+            if not re.fullmatch(r"[A-Z0-9]+_V\d+", scoped_video_id):
+                raise ValueError("Invalid video ID")
+            if not 1 <= int(final_top_k) <= 100:
+                raise ValueError("Visual in-video final_top_k must be between 1 and 100")
         weights = normalize_model_weights(weights)
         acquired = False
         if not _lock_already_held:
@@ -84,7 +95,9 @@ class Branch1Search:
                 vi = str(item.get("vi") or "").strip()
                 en = str(item.get("en") or "").strip()
                 if not vi or not en:
-                    raise ValueError("Branch-1 Vietnamese and English query variants must not be empty")
+                    raise ValueError(
+                        "Branch-1 Vietnamese and English query variants must not be empty"
+                    )
                 by_role[role] = {"role": role, "vi": vi, "en": en}
             if set(by_role) != set(QUERY_ROLES):
                 raise ValueError("Branch-1 query roles must contain each role exactly once")
@@ -100,8 +113,7 @@ class Branch1Search:
                 model_started = time.perf_counter()
                 stream_descriptors = stream_contracts[model_name]
                 texts = [
-                    str(by_role[item["role"]][item["language"]])
-                    for item in stream_descriptors
+                    str(by_role[item["role"]][item["language"]]) for item in stream_descriptors
                 ]
                 revision = self.encoder.revisions[model_name]
                 tokenizer_config = (
@@ -111,19 +123,28 @@ class Branch1Search:
                     if model_name == "metaclip2"
                     else "languages=en;max_tokens=64;output=language_head;normalization=l2"
                 )
+                stream_contract = [
+                    {
+                        "role": descriptor["role"],
+                        "language": descriptor["language"],
+                        "text": text,
+                    }
+                    for descriptor, text in zip(stream_descriptors, texts, strict=True)
+                ]
+
+                cache_device_for_model = getattr(self.encoder, "cache_device_for_model", None)
+                lookup_device = (
+                    str(cache_device_for_model(model_name))
+                    if callable(cache_device_for_model)
+                    else str(getattr(self.encoder, "cache_device", "cpu"))
+                )
                 cache_key = self.cache.key(
                     model_name,
                     revision,
                     texts,
                     tokenizer_config=tokenizer_config,
-                    stream_contract=[
-                        {
-                            "role": descriptor["role"],
-                            "language": descriptor["language"],
-                            "text": text,
-                        }
-                        for descriptor, text in zip(stream_descriptors, texts, strict=True)
-                    ],
+                    stream_contract=stream_contract,
+                    device=lookup_device,
                 )
                 cached = self.cache.get(cache_key)
                 encode_started = time.perf_counter()
@@ -146,7 +167,24 @@ class Branch1Search:
                             model_diagnostics, stream_descriptors, strict=True
                         )
                     ]
-                    self.cache.put(cache_key, model_name, vectors, model_diagnostics)
+                    actual_device = (
+                        str(cache_device_for_model(model_name))
+                        if callable(cache_device_for_model)
+                        else lookup_device
+                    )
+                    self.cache.put(
+                        self.cache.key(
+                            model_name,
+                            revision,
+                            texts,
+                            tokenizer_config=tokenizer_config,
+                            stream_contract=stream_contract,
+                            device=actual_device,
+                        ),
+                        model_name,
+                        vectors,
+                        model_diagnostics,
+                    )
                     cache_hit = False
                 else:
                     vectors, model_diagnostics = cached
@@ -184,10 +222,27 @@ class Branch1Search:
                     )
                 ]
                 encode_ms = (time.perf_counter() - encode_started) * 1000.0
-                worker_timing = dict(getattr(getattr(self.encoder, "manager", None), "last_timing", {})) if not cache_hit else {}
+                worker_timing = (
+                    dict(getattr(getattr(self.encoder, "manager", None), "last_timing", {}))
+                    if not cache_hit
+                    else {}
+                )
                 qdrant_started = time.perf_counter()
+                query_filter = (
+                    {"must": [{"key": "video_id", "match": {"value": scoped_video_id}}]}
+                    if scoped_video_id
+                    else None
+                )
                 streams = [
                     self.qdrant.query(
+                        str(spec["collection"]),
+                        str(spec["vector"]),
+                        vectors[index],
+                        per_stream_top_k,
+                        query_filter,
+                    )
+                    if query_filter
+                    else self.qdrant.query(
                         str(spec["collection"]),
                         str(spec["vector"]),
                         vectors[index],
@@ -201,9 +256,7 @@ class Branch1Search:
                     f"{descriptor['role']}:{descriptor['language']}"
                     for descriptor in stream_descriptors
                 )
-                model_candidates[model_name] = aggregate_model_streams(
-                    stream_keys, streams
-                )
+                model_candidates[model_name] = aggregate_model_streams(stream_keys, streams)
                 normalize_ms = (time.perf_counter() - normalize_started) * 1000.0
                 diagnostics[model_name] = model_diagnostics
                 self.encoder.unload()
@@ -226,8 +279,14 @@ class Branch1Search:
             # Keep the public pool bounded even if a custom fusion adapter
             # accidentally returns more rows than the fixed Branch-1 gate.
             results = list(fuse_model_candidates(model_candidates, weights, final_top_k))[
-                :BRANCH1_FINAL_TOP_K
+                : int(final_top_k)
             ]
+            if scoped_video_id and any(
+                str(item.get("video_id") or "") != scoped_video_id for item in results
+            ):
+                raise ValueError(
+                    "Visual in-video search returned a frame outside the requested video"
+                )
             timing["fusion_ms"] = round((time.perf_counter() - fusion_started) * 1000.0, 2)
             timing["total_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
             response = {
@@ -243,8 +302,10 @@ class Branch1Search:
                 "candidate_count_before_gate": len(
                     set().union(*(set(v) for v in model_candidates.values()))
                 ),
-                "gate_top_k": BRANCH1_FINAL_TOP_K,
-                "future_fusion_eligible": True,
+                "gate_top_k": int(final_top_k),
+                "future_fusion_eligible": scoped_video_id is None,
+                "scope": "video" if scoped_video_id else "global",
+                "video_id": scoped_video_id,
                 "query_streams": {
                     model_name: [
                         {
@@ -292,4 +353,22 @@ class Branch1Search:
             per_stream_top_k,
             final_top_k,
             _lock_already_held=True,
+        )
+
+    def execute_in_video(
+        self,
+        query_bundle: dict[str, Any],
+        video_id: str,
+        top_k: int,
+    ) -> dict[str, Any]:
+        """Fuse SigLIP2, MetaCLIP2 and BEIT3 only inside one video."""
+
+        if not 1 <= int(top_k) <= 100:
+            raise ValueError("Visual in-video top_k must be between 1 and 100")
+        return self.execute(
+            query_bundle,
+            {"siglip2": 0.45, "metaclip2": 0.30, "beit3": 0.25},
+            int(top_k),
+            int(top_k),
+            _video_id=video_id,
         )

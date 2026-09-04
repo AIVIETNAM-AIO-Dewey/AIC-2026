@@ -9,19 +9,33 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..branch1.contracts import EXPECTED_FRAMES, QUERY_ROLES
-from ...infrastructure.persistent_cache import PersistentQueryEmbeddingCache
 from ...encoders.cpu import CpuTextEncoders
+from ...infrastructure.persistent_cache import PersistentQueryEmbeddingCache
 from ...infrastructure.qdrant import QdrantHttpClient
-from .contracts import DEFAULT_PER_STREAM_TOP_K, DEFAULT_PRE_RERANK_TOP_K, DEFAULT_RERANK_TOP_K, normalize_weights
+from ..branch1.contracts import EXPECTED_FRAMES, QUERY_ROLES
+from ..rerankers.beit3_cosine import Beit3CosineReranker
+from .contracts import (
+    DEFAULT_PER_STREAM_TOP_K,
+    DEFAULT_PRE_RERANK_TOP_K,
+    DEFAULT_RERANK_TOP_K,
+    normalize_weights,
+)
 from .dense import DamDenseRetriever
 from .fusion import fuse_dense_sparse
-from ..rerankers.beit3_cosine import Beit3CosineReranker
 from .sparse import DamBm25Index
 
 
 class Branch2Search:
-    def __init__(self, qdrant: QdrantHttpClient, data_root: Path, state_root: Path, bge_encoders: CpuTextEncoders, beit_encoders: Any, cache: PersistentQueryEmbeddingCache, search_lock: threading.Lock | None = None) -> None:
+    def __init__(
+        self,
+        qdrant: QdrantHttpClient,
+        data_root: Path,
+        state_root: Path,
+        bge_encoders: CpuTextEncoders,
+        beit_encoders: Any,
+        cache: PersistentQueryEmbeddingCache,
+        search_lock: threading.Lock | None = None,
+    ) -> None:
         self.qdrant = qdrant
         self.bge_encoders = bge_encoders
         self.beit_encoders = beit_encoders
@@ -37,6 +51,7 @@ class Branch2Search:
     @staticmethod
     def _load_frame_ids(data_root: Path) -> dict[str, int]:
         import json
+
         path = data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
         mapping: dict[str, int] = {}
         minimum = EXPECTED_FRAMES + 1
@@ -74,6 +89,7 @@ class Branch2Search:
 
     def health(self) -> dict[str, Any]:
         from .health import branch2_health
+
         return branch2_health(
             self.data_root,
             self.qdrant,
@@ -84,19 +100,25 @@ class Branch2Search:
             self.sparse.state_root,
         )
 
-    def execute(self, query_bundle: dict[str, Any], hybrid_weights: dict[str, float], rerank_weights: dict[str, float], per_stream_top_k: int = DEFAULT_PER_STREAM_TOP_K, pre_rerank_top_k: int = DEFAULT_PRE_RERANK_TOP_K, rerank_top_k: int = DEFAULT_RERANK_TOP_K, *, _lock_already_held: bool = False) -> dict[str, Any]:
+    def execute(
+        self,
+        query_bundle: dict[str, Any],
+        hybrid_weights: dict[str, float],
+        rerank_weights: dict[str, float],
+        per_stream_top_k: int = DEFAULT_PER_STREAM_TOP_K,
+        pre_rerank_top_k: int = DEFAULT_PRE_RERANK_TOP_K,
+        rerank_top_k: int = DEFAULT_RERANK_TOP_K,
+        *,
+        _lock_already_held: bool = False,
+    ) -> dict[str, Any]:
         if not 1 <= int(per_stream_top_k) <= DEFAULT_PER_STREAM_TOP_K:
             raise ValueError(
                 f"Branch-2 per_stream_top_k must be between 1 and {DEFAULT_PER_STREAM_TOP_K}"
             )
         if int(pre_rerank_top_k) != DEFAULT_PRE_RERANK_TOP_K:
-            raise ValueError(
-                f"Branch-2 pre_rerank_top_k is fixed at {DEFAULT_PRE_RERANK_TOP_K}"
-            )
+            raise ValueError(f"Branch-2 pre_rerank_top_k is fixed at {DEFAULT_PRE_RERANK_TOP_K}")
         if not 1 <= int(rerank_top_k) <= DEFAULT_RERANK_TOP_K:
-            raise ValueError(
-                f"Branch-2 BEiT-3 rerank_top_k must be in 1..{DEFAULT_RERANK_TOP_K}"
-            )
+            raise ValueError(f"Branch-2 BEiT-3 rerank_top_k must be in 1..{DEFAULT_RERANK_TOP_K}")
         if int(rerank_top_k) > int(pre_rerank_top_k):
             raise ValueError("rerank_top_k cannot exceed pre_rerank_top_k")
         acquired = False
@@ -125,22 +147,39 @@ class Branch2Search:
                 vi = str(item.get("vi") or "").strip()
                 en = str(item.get("en") or "").strip()
                 if not vi or not en:
-                    raise ValueError("Branch-2 Vietnamese and English query variants must not be empty")
+                    raise ValueError(
+                        "Branch-2 Vietnamese and English query variants must not be empty"
+                    )
                 by_role[role] = {"role": role, "vi": vi, "en": en}
             if set(by_role) != set(QUERY_ROLES):
                 raise ValueError("Branch-2 query roles must contain each role exactly once")
             texts = [str(by_role[role]["en"]) for role in QUERY_ROLES]
-            bge_revision = str(getattr(self.bge_encoders, "bge_revision", None) or os.environ.get("AIC_BGE_REVISION", "local-cache"))
-            cache_key = self.cache.key(
-                "bge_m3",
-                f"{getattr(self.bge_encoders, 'bge_id', 'BAAI/bge-m3')}@{bge_revision}",
-                texts,
-                tokenizer_config="max_tokens=512;pooling=cls;normalization=l2",
-                stream_contract=[
-                    {"role": role, "language": "en", "text": text}
-                    for role, text in zip(QUERY_ROLES, texts, strict=True)
-                ],
+            bge_revision = str(
+                getattr(self.bge_encoders, "bge_revision", None)
+                or os.environ.get("AIC_BGE_REVISION", "local-cache")
             )
+            bge_stream_contract = [
+                {"role": role, "language": "en", "text": text}
+                for role, text in zip(QUERY_ROLES, texts, strict=True)
+            ]
+
+            def bge_cache_key(device: str) -> str:
+                return self.cache.key(
+                    "bge_m3",
+                    f"{getattr(self.bge_encoders, 'bge_id', 'BAAI/bge-m3')}@{bge_revision}",
+                    texts,
+                    tokenizer_config="max_tokens=512;pooling=cls;normalization=l2",
+                    stream_contract=bge_stream_contract,
+                    device=device,
+                )
+
+            cache_device_for_bge = getattr(self.bge_encoders, "cache_device_for_bge", None)
+            bge_lookup_device = (
+                str(cache_device_for_bge())
+                if callable(cache_device_for_bge)
+                else str(getattr(self.bge_encoders, "cache_device", "cpu"))
+            )
+            cache_key = bge_cache_key(bge_lookup_device)
             encode_started = time.perf_counter()
             cached = self.cache.get(cache_key)
             if cached is None:
@@ -148,7 +187,9 @@ class Branch2Search:
                     vectors, diagnostics = self.bge_encoders.encode_bge_text(texts)
                 else:
                     vectors = self.bge_encoders.embed_bge_text(texts)
-                    diagnostics = [{"token_count": None, "max_tokens": 512, "truncated": False} for _ in texts]
+                    diagnostics = [
+                        {"token_count": None, "max_tokens": 512, "truncated": False} for _ in texts
+                    ]
                 diagnostics = [
                     {
                         **dict(diagnostic),
@@ -158,7 +199,17 @@ class Branch2Search:
                     }
                     for diagnostic, role in zip(diagnostics, QUERY_ROLES, strict=True)
                 ]
-                self.cache.put(cache_key, "bge_m3", vectors, diagnostics)
+                bge_actual_device = (
+                    str(cache_device_for_bge())
+                    if callable(cache_device_for_bge)
+                    else bge_lookup_device
+                )
+                self.cache.put(
+                    bge_cache_key(bge_actual_device),
+                    "bge_m3",
+                    vectors,
+                    diagnostics,
+                )
                 cache_hit = False
             else:
                 vectors, diagnostics = cached
@@ -173,11 +224,17 @@ class Branch2Search:
                     for diagnostic, role in zip(diagnostics, QUERY_ROLES, strict=True)
                 ]
             timings["bge_encoding_ms"] = round((time.perf_counter() - encode_started) * 1000.0, 2)
-            bge_worker_timing = dict(getattr(getattr(self.bge_encoders, "manager", None), "last_timing", {})) if not cache_hit else {}
+            bge_worker_timing = (
+                dict(getattr(getattr(self.bge_encoders, "manager", None), "last_timing", {}))
+                if not cache_hit
+                else {}
+            )
             timings["bge_model_loading_ms"] = bge_worker_timing.get("model_loading_ms", 0.0)
             timings["bge_model_inference_ms"] = bge_worker_timing.get("inference_ms", 0.0)
             timings["bge_worker_reused"] = bool(bge_worker_timing.get("worker_reused", False))
-            timings["bge_worker_spawned"] = bool(bge_worker_timing.get("worker_spawned", not cache_hit))
+            timings["bge_worker_spawned"] = bool(
+                bge_worker_timing.get("worker_spawned", not cache_hit)
+            )
             timings["bge_worker_pid"] = bge_worker_timing.get("worker_pid")
             timings["bge_worker_load_count"] = bge_worker_timing.get("worker_load_count", 0)
             dense_started = time.perf_counter()
@@ -190,12 +247,15 @@ class Branch2Search:
             timings["sparse_ms"] = round((time.perf_counter() - sparse_started) * 1000.0, 2)
             fusion_started = time.perf_counter()
             candidate_count_before_gate = len(set(dense) | set(sparse))
-            hybrid = fuse_dense_sparse(dense, sparse, normalize_weights(hybrid_weights, ("dense", "sparse")), pre_rerank_top_k)
+            hybrid = fuse_dense_sparse(
+                dense,
+                sparse,
+                normalize_weights(hybrid_weights, ("dense", "sparse")),
+                pre_rerank_top_k,
+            )
             timings["fusion_ms"] = round((time.perf_counter() - fusion_started) * 1000.0, 2)
             rerank_started = time.perf_counter()
-            normalized_rerank_weights = normalize_weights(
-                rerank_weights, ("beit3", "previous")
-            )
+            normalized_rerank_weights = normalize_weights(rerank_weights, ("beit3", "previous"))
             # There is no BEiT-3 work to perform when DAM dense and BM25
             # produce no candidate.  Apart from saving CPU/RAM, this keeps an
             # empty standalone pool from loading an encoder during a KIS
@@ -218,20 +278,32 @@ class Branch2Search:
             }
             beit_worker_timing: dict[str, Any] = {}
             if hybrid:
-                cache_key = self.cache.key(
-                    "beit3",
-                    self.beit_encoders.revisions["beit3"],
-                    texts,
-                    # Keep the cache namespace identical to Branch 1 and
-                    # final KIS fusion.  The language contract is part of
-                    # the encoder identity even though all six Branch-2
-                    # streams are English.
-                    tokenizer_config="languages=en;max_tokens=64;output=language_head;normalization=l2",
-                    stream_contract=[
-                        {"role": role, "language": "en", "text": text}
-                        for role, text in zip(QUERY_ROLES, texts, strict=True)
-                    ],
+                beit_stream_contract = [
+                    {"role": role, "language": "en", "text": text}
+                    for role, text in zip(QUERY_ROLES, texts, strict=True)
+                ]
+
+                def beit_cache_key(device: str) -> str:
+                    return self.cache.key(
+                        "beit3",
+                        self.beit_encoders.revisions["beit3"],
+                        texts,
+                        # Keep the cache namespace identical to Branch 1 and
+                        # final KIS fusion.  The language contract is part of
+                        # the encoder identity even though all six Branch-2
+                        # streams are English.
+                        tokenizer_config="languages=en;max_tokens=64;output=language_head;normalization=l2",
+                        stream_contract=beit_stream_contract,
+                        device=device,
+                    )
+
+                cache_device_for_model = getattr(self.beit_encoders, "cache_device_for_model", None)
+                beit_lookup_device = (
+                    str(cache_device_for_model("beit3"))
+                    if callable(cache_device_for_model)
+                    else str(getattr(self.beit_encoders, "cache_device", "cpu"))
                 )
+                cache_key = beit_cache_key(beit_lookup_device)
                 cached_beit = self.cache.get(cache_key)
                 if cached_beit is None:
                     beit_vectors, beit_diagnostics = self.beit_encoders.encode("beit3", texts)
@@ -244,7 +316,17 @@ class Branch2Search:
                         }
                         for diagnostic, role in zip(beit_diagnostics, QUERY_ROLES, strict=True)
                     ]
-                    self.cache.put(cache_key, "beit3", beit_vectors, beit_diagnostics)
+                    beit_actual_device = (
+                        str(cache_device_for_model("beit3"))
+                        if callable(cache_device_for_model)
+                        else beit_lookup_device
+                    )
+                    self.cache.put(
+                        beit_cache_key(beit_actual_device),
+                        "beit3",
+                        beit_vectors,
+                        beit_diagnostics,
+                    )
                     beit_cache_hit = False
                 else:
                     beit_vectors, beit_diagnostics = cached_beit
@@ -258,9 +340,11 @@ class Branch2Search:
                         }
                         for diagnostic, role in zip(beit_diagnostics, QUERY_ROLES, strict=True)
                     ]
-                beit_worker_timing = dict(
-                    getattr(getattr(self.beit_encoders, "manager", None), "last_timing", {})
-                ) if not beit_cache_hit else {}
+                beit_worker_timing = (
+                    dict(getattr(getattr(self.beit_encoders, "manager", None), "last_timing", {}))
+                    if not beit_cache_hit
+                    else {}
+                )
                 # Reranker accepts the text list and intentionally uses the
                 # same COCO retrieval checkpoint.
                 reranked, rerank_info = self._get_reranker().rerank(
@@ -274,7 +358,11 @@ class Branch2Search:
             timings["beit_model_loading_ms"] = beit_worker_timing.get("model_loading_ms", 0.0)
             timings["beit_model_inference_ms"] = beit_worker_timing.get("inference_ms", 0.0)
             timings["beit_worker_reused"] = bool(beit_worker_timing.get("worker_reused", False))
-            timings["beit_worker_spawned"] = bool(beit_worker_timing.get("worker_spawned", not beit_cache_hit)) if hybrid else False
+            timings["beit_worker_spawned"] = (
+                bool(beit_worker_timing.get("worker_spawned", not beit_cache_hit))
+                if hybrid
+                else False
+            )
             timings["beit_worker_pid"] = beit_worker_timing.get("worker_pid")
             timings["beit_worker_load_count"] = beit_worker_timing.get("worker_load_count", 0)
             # ``pre_rerank_top_k`` is a public output gate.  Keep this

@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import types
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, XLMRobertaTokenizer
 
+from .device import (
+    clear_accelerator_cache,
+    cpu_fallback_allowed,
+    device_contract,
+    move_tensors,
+    requested_device,
+    resolve_device,
+    transformers_dtype_kwargs,
+)
 
 LOGGER = logging.getLogger(__name__)
 SIGLIP_ID = "google/siglip2-base-patch16-224"
@@ -70,17 +80,26 @@ def _query_snapshot_assets(
 class SequentialBranch1Encoders:
     """Loads exactly one text encoder at a time and unloads it after use."""
 
-    def __init__(self, model_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        model_root: Path | None = None,
+        *,
+        device: str | None = None,
+        allow_cpu_fallback: bool | None = None,
+    ) -> None:
         threads = max(1, int(os.environ.get("AIC_CPU_THREADS", "8")))
         torch.set_num_threads(threads)
-        try:
+        with suppress(RuntimeError):
             torch.set_num_interop_threads(1)
-        except RuntimeError:
-            # PyTorch only allows the inter-op pool to be configured before
-            # the first parallel operation.  A worker may already have
-            # initialized it while importing a sibling encoder.
-            pass
-        self.model_root = model_root or Path(os.environ.get("AIC_BRANCH1_MODEL_ROOT", "/models/branch1"))
+        self.model_root = model_root or Path(
+            os.environ.get("AIC_BRANCH1_MODEL_ROOT", "/models/branch1")
+        )
+        self.requested_device = requested_device(device)
+        self.allow_cpu_fallback = cpu_fallback_allowed(allow_cpu_fallback)
+        self.device = resolve_device(
+            self.requested_device,
+            allow_fallback=self.allow_cpu_fallback,
+        )
         self.beit3_source = self.model_root / "unilm" / "beit3"
         self.beit3_source_archive = self.model_root / "unilm.zip"
         self.beit3_checkpoint = self.model_root / BEIT3_CHECKPOINT_NAME
@@ -103,6 +122,7 @@ class SequentialBranch1Encoders:
         self._loaded_name: str | None = None
         self._tokenizer: Any | None = None
         self._model: Any | None = None
+        self._health_model_probe: dict[str, Any] | None = None
 
     def health(self) -> dict[str, dict[str, Any]]:
         try:
@@ -123,6 +143,7 @@ class SequentialBranch1Encoders:
             metaclip_supported = True
         except ImportError:
             metaclip_supported = False
+
         def local_text_assets(model_id: str, revision: str) -> dict[str, Any]:
             try:
                 kwargs = {"revision": revision} if revision else {}
@@ -140,24 +161,52 @@ class SequentialBranch1Encoders:
             except Exception as error:
                 return {"ready": False, "config": False, "tokenizer": False, "error": str(error)}
 
-        siglip_assets = local_text_assets(SIGLIP_ID, SIGLIP_REVISION)
+        with self._lock:
+            model_probe = self._health_model_probe
+            if model_probe is None:
+                siglip_assets = local_text_assets(SIGLIP_ID, SIGLIP_REVISION)
+                if AutoProcessor is None:
+                    siglip_image_assets = {
+                        "ready": False,
+                        "error": "AutoProcessor is unavailable",
+                    }
+                else:
+                    try:
+                        siglip_processor = AutoProcessor.from_pretrained(
+                            SIGLIP_ID,
+                            revision=SIGLIP_REVISION,
+                            trust_remote_code=False,
+                            local_files_only=True,
+                            use_fast=False,
+                        )
+                        siglip_image_assets = {"ready": siglip_processor is not None}
+                    except Exception as error:
+                        siglip_image_assets = {"ready": False, "error": str(error)}
+                metaclip_assets = local_text_assets(METACLIP2_ID, METACLIP2_REVISION)
+                model_probe = {
+                    "siglip_assets": siglip_assets,
+                    "siglip_image_assets": siglip_image_assets,
+                    "metaclip_assets": metaclip_assets,
+                    "metaclip_supported": metaclip_supported,
+                }
+                # Successful model parsing is immutable for this process.
+                # Artifact stat manifests below are still checked on every
+                # health generation, so changed/deleted files fail closed.
+                if (
+                    siglip_assets.get("ready") is True
+                    and siglip_image_assets.get("ready") is True
+                    and metaclip_assets.get("ready") is True
+                    and metaclip_supported
+                ):
+                    self._health_model_probe = model_probe
+            siglip_assets = dict(model_probe["siglip_assets"])
+            siglip_image_assets = dict(model_probe["siglip_image_assets"])
+            metaclip_assets = dict(model_probe["metaclip_assets"])
+            metaclip_supported = bool(model_probe["metaclip_supported"])
+
         siglip_snapshot = _query_snapshot_assets(
             "siglip2", SIGLIP_ID, SIGLIP_REVISION, "max_tokens=64;normalization=l2"
         )
-        if AutoProcessor is None:
-            siglip_image_assets = {"ready": False, "error": "AutoProcessor is unavailable"}
-        else:
-            try:
-                siglip_processor = AutoProcessor.from_pretrained(
-                    SIGLIP_ID,
-                    revision=SIGLIP_REVISION,
-                    trust_remote_code=False,
-                    local_files_only=True,
-                )
-                siglip_image_assets = {"ready": siglip_processor is not None}
-            except Exception as error:
-                siglip_image_assets = {"ready": False, "error": str(error)}
-        metaclip_assets = local_text_assets(METACLIP2_ID, METACLIP2_REVISION)
         metaclip_snapshot = _query_snapshot_assets(
             "metaclip2", METACLIP2_ID, METACLIP2_REVISION, "max_tokens=77;normalization=l2"
         )
@@ -205,9 +254,16 @@ class SequentialBranch1Encoders:
                 "snapshot_assets": siglip_snapshot,
                 "image_ready": bool(siglip_image_assets["ready"]),
                 "image_assets": siglip_image_assets,
+                "execution_device": self.device,
+                "device": device_contract(
+                    self.requested_device,
+                    allow_fallback=self.allow_cpu_fallback,
+                ),
             },
             "metaclip2": {
-                "ready": metaclip_supported and bool(metaclip_assets["ready"]) and bool(metaclip_snapshot["ready"]),
+                "ready": metaclip_supported
+                and bool(metaclip_assets["ready"])
+                and bool(metaclip_snapshot["ready"]),
                 "model_id": METACLIP2_ID,
                 "revision": METACLIP2_REVISION,
                 "dimension": 1024,
@@ -215,6 +271,11 @@ class SequentialBranch1Encoders:
                 "transformers_support": metaclip_supported,
                 "local_assets": metaclip_assets,
                 "snapshot_assets": metaclip_snapshot,
+                "execution_device": self.device,
+                "device": device_contract(
+                    self.requested_device,
+                    allow_fallback=self.allow_cpu_fallback,
+                ),
             },
             "beit3": {
                 "ready": all(beit_files.values()) and manifest_ok,
@@ -228,6 +289,11 @@ class SequentialBranch1Encoders:
                 "manifest": str(manifest_path),
                 "manifest_hashes": manifest_hashes,
                 "hashes_verified": manifest_ok,
+                "execution_device": self.device,
+                "device": device_contract(
+                    self.requested_device,
+                    allow_fallback=self.allow_cpu_fallback,
+                ),
             },
         }
 
@@ -237,20 +303,27 @@ class SequentialBranch1Encoders:
         self._tokenizer = AutoTokenizer.from_pretrained(
             SIGLIP_ID, revision=SIGLIP_REVISION, trust_remote_code=False, local_files_only=True
         )
-        self._model = AutoModel.from_pretrained(
-            SIGLIP_ID,
-            revision=SIGLIP_REVISION,
-            trust_remote_code=False,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
-            local_files_only=True,
-        ).eval()
+        self._model = (
+            AutoModel.from_pretrained(
+                SIGLIP_ID,
+                revision=SIGLIP_REVISION,
+                trust_remote_code=False,
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                **transformers_dtype_kwargs(torch.float32),
+            )
+            .to(self.device)
+            .eval()
+        )
 
     def _load_metaclip2(self) -> None:
         from transformers import AutoConfig, MetaClip2TextModelWithProjection
 
         self._tokenizer = AutoTokenizer.from_pretrained(
-            METACLIP2_ID, revision=METACLIP2_REVISION, trust_remote_code=False, local_files_only=True
+            METACLIP2_ID,
+            revision=METACLIP2_REVISION,
+            trust_remote_code=False,
+            local_files_only=True,
         )
         # The published worldwide-huge checkpoint stores the shared retrieval
         # projection dimension on the parent MetaCLIP2 config (1024), while its
@@ -267,15 +340,19 @@ class SequentialBranch1Encoders:
         )
         text_config = full_config.text_config
         text_config.projection_dim = int(full_config.projection_dim)
-        self._model = MetaClip2TextModelWithProjection.from_pretrained(
-            METACLIP2_ID,
-            revision=METACLIP2_REVISION,
-            config=text_config,
-            trust_remote_code=False,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.bfloat16,
-            local_files_only=True,
-        ).eval()
+        self._model = (
+            MetaClip2TextModelWithProjection.from_pretrained(
+                METACLIP2_ID,
+                revision=METACLIP2_REVISION,
+                config=text_config,
+                trust_remote_code=False,
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                **transformers_dtype_kwargs(torch.bfloat16),
+            )
+            .to(self.device)
+            .eval()
+        )
 
     @staticmethod
     def _install_beit3_compatibility_shims() -> None:
@@ -330,9 +407,7 @@ class SequentialBranch1Encoders:
             # different task/checkpoint cannot silently enter retrieval.
             incompatible = model.load_state_dict(state_dict, strict=False)
             missing = [
-                key
-                for key in incompatible.missing_keys
-                if "relative_position_index" not in key
+                key for key in incompatible.missing_keys if "relative_position_index" not in key
             ]
             unexpected = list(incompatible.unexpected_keys)
             if missing or unexpected:
@@ -344,13 +419,13 @@ class SequentialBranch1Encoders:
             if sys.path and sys.path[0] == str(self.beit3_source):
                 sys.path.pop(0)
         self._tokenizer = XLMRobertaTokenizer(str(self.beit3_sentencepiece))
-        self._model = model.eval()
+        self._model = model.to(self.device).eval()
 
     def _load(self, model_name: str) -> None:
         if self._loaded_name == model_name and self._model is not None:
             return
         self.unload()
-        LOGGER.info("Loading Branch-1 %s text encoder on CPU", model_name)
+        LOGGER.info("Loading Branch-1 %s text encoder on %s", model_name, self.device)
         if model_name == "siglip2":
             self._load_siglip2()
         elif model_name == "metaclip2":
@@ -378,19 +453,27 @@ class SequentialBranch1Encoders:
         with self._lock:
             self._load(model_name)
             if model_name == "siglip2":
-                raw_counts = [len(self._tokenizer(text, add_special_tokens=True)["input_ids"]) for text in texts]
+                raw_counts = [
+                    len(self._tokenizer(text, add_special_tokens=True)["input_ids"])
+                    for text in texts
+                ]
                 inputs = self._tokenizer(
                     texts, padding="max_length", truncation=True, max_length=64, return_tensors="pt"
                 )
+                inputs = move_tensors(inputs, self.device)
                 output = self._model.get_text_features(**inputs)
                 features = output if isinstance(output, torch.Tensor) else output.pooler_output
                 vectors = F.normalize(features.float(), p=2, dim=-1)
                 diagnostics = self._diagnostic(raw_counts, 64)
             elif model_name == "metaclip2":
-                raw_counts = [len(self._tokenizer(text, add_special_tokens=True)["input_ids"]) for text in texts]
+                raw_counts = [
+                    len(self._tokenizer(text, add_special_tokens=True)["input_ids"])
+                    for text in texts
+                ]
                 inputs = self._tokenizer(
                     texts, padding=True, truncation=True, max_length=77, return_tensors="pt"
                 )
+                inputs = move_tensors(inputs, self.device)
                 output = self._model(**inputs)
                 vectors = F.normalize(output.text_embeds.float(), p=2, dim=-1)
                 diagnostics = self._diagnostic(raw_counts, 77)
@@ -399,7 +482,9 @@ class SequentialBranch1Encoders:
                 padding_masks: list[list[int]] = []
                 raw_counts = []
                 for text in texts:
-                    token_ids = self._tokenizer.convert_tokens_to_ids(self._tokenizer.tokenize(text))
+                    token_ids = self._tokenizer.convert_tokens_to_ids(
+                        self._tokenizer.tokenize(text)
+                    )
                     raw_counts.append(len(token_ids) + 2)
                     token_ids = token_ids[:62]
                     row = [self._tokenizer.bos_token_id, *token_ids, self._tokenizer.eos_token_id]
@@ -407,8 +492,8 @@ class SequentialBranch1Encoders:
                     encoded.append(row + [self._tokenizer.pad_token_id] * (64 - len(row)))
                     padding_masks.append(padding)
                 _, language = self._model(
-                    text_description=torch.tensor(encoded, dtype=torch.long),
-                    padding_mask=torch.tensor(padding_masks, dtype=torch.bool),
+                    text_description=torch.tensor(encoded, dtype=torch.long, device=self.device),
+                    padding_mask=torch.tensor(padding_masks, dtype=torch.bool, device=self.device),
                     only_infer=True,
                 )
                 vectors = F.normalize(language.float(), p=2, dim=-1)
@@ -422,3 +507,4 @@ class SequentialBranch1Encoders:
             self._tokenizer = None
             self._loaded_name = None
         gc.collect()
+        clear_accelerator_cache(self.device)

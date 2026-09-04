@@ -5,33 +5,49 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import resource
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
-MAX_PRODUCTION_RSS_BYTES = int(
-    float(os.environ.get("AIC_MAX_MODEL_RSS_GIB", "6.5")) * 1024**3
-)
+MAX_PRODUCTION_RSS_BYTES = int(float(os.environ.get("AIC_MAX_MODEL_RSS_GIB", "6.5")) * 1024**3)
 
 
 def current_process_rss_bytes() -> int:
-    """Return the current process RSS when procfs is available."""
+    """Return the current process RSS on Linux and macOS."""
+
     try:
         resident_pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
         return resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
     except (OSError, ValueError, IndexError, AttributeError):
-        return 0
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-o", "rss=", "-p", str(os.getpid())],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+            # BSD ps reports RSS in KiB.
+            return int(result.stdout.strip()) * 1024
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    return 0
 
 
 def peak_process_rss_bytes() -> int | None:
     """Return this process' peak RSS in bytes (Linux and macOS aware)."""
     try:
-        import resource
-
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        # Linux reports KiB; macOS reports bytes. The production image is Linux.
-        return value * 1024 if value < 1024**3 else value
+        # Linux reports KiB while macOS reports bytes.  Detect the platform
+        # explicitly: a size-based heuristic turns every macOS process whose
+        # peak is below 1 GiB into a fictitious terabyte-scale process.
+        return value if sys.platform == "darwin" else value * 1024
     except (ImportError, OSError, ValueError):
         return None
 
@@ -62,9 +78,7 @@ def _runtime_fingerprint(state_root: Path) -> dict[str, Any]:
             raise ValueError("runtime fingerprint must be an object")
         fingerprint = str(payload.get("fingerprint") or "").strip()
         material = payload.get("material")
-        canonical = json.dumps(
-            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         valid = (
             payload.get("schema_version") == RUNTIME_FINGERPRINT_SCHEMA
             and isinstance(material, dict)
@@ -117,9 +131,7 @@ def resource_qualification(state_root: Path) -> dict[str, Any]:
     }
     try:
         stack_peak = int(report.get("stack_peak_rss_bytes", -1))
-        component_peaks = {
-            name: int(report.get(name, -1)) for name in component_peaks
-        }
+        component_peaks = {name: int(report.get(name, -1)) for name in component_peaks}
         coverage = report.get("coverage") or {}
         coverage_ready = all(
             coverage.get(name) is True

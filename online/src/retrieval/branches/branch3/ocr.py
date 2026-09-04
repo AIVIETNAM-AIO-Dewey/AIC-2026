@@ -9,7 +9,6 @@ from typing import Any
 from ...modalities.ocr import OcrFtsIndex
 from .contracts import DEFAULT_FINAL_TOP_K, QUERY_ROLES
 
-
 OCR_RESULT_SCHEMA_VERSION = "branch3.ocr.result.v1"
 
 
@@ -23,9 +22,7 @@ class Branch3OcrSearch:
     def health(self, audit_sources: bool = False) -> dict[str, Any]:
         try:
             payload = dict(
-                self.index.health(audit_sources=True)
-                if audit_sources
-                else self.index.health()
+                self.index.health(audit_sources=True) if audit_sources else self.index.health()
             )
         except Exception as error:  # health must never take down /api/health
             payload = {
@@ -97,7 +94,9 @@ class Branch3OcrSearch:
                 }
             if set(by_role) != set(QUERY_ROLES):
                 raise ValueError("OCR query roles must contain each role exactly once")
-            if any(not values[language] for values in by_role.values() for language in ("vi", "en")):
+            if any(
+                not values[language] for values in by_role.values() for language in ("vi", "en")
+            ):
                 raise ValueError("OCR Vietnamese and English query variants must not be empty")
             streams = {
                 f"{role}:{language}": values[language]
@@ -176,9 +175,7 @@ class Branch3OcrSearch:
         """Run the legacy OCR endpoint through one canonical FTS stream."""
 
         if not 1 <= int(top_k) <= DEFAULT_FINAL_TOP_K:
-            raise ValueError(
-                f"Branch-3 OCR top_k must be between 1 and {DEFAULT_FINAL_TOP_K}"
-            )
+            raise ValueError(f"Branch-3 OCR top_k must be between 1 and {DEFAULT_FINAL_TOP_K}")
         query = str(query or "").strip()
         if not query:
             raise ValueError("OCR requires one non-empty query")

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AIC-2026 No-Fusion Retrieval Lab</title>
+  <title>AIC-2026 KIS Fusion Studio</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,13 +13,13 @@
       <div class="logo-badge">
         <span class="logo-icon">⚡</span>
         <div class="logo-text">
-          <span class="logo-title">AIC-2026 NO-FUSION LAB</span>
-          <span class="logo-sub">Four independent, auditable retrieval pools</span>
+          <span class="logo-title">AIC-2026 KIS FUSION STUDIO</span>
+          <span class="logo-sub">Local multimodal retrieval and verified submission</span>
         </div>
       </div>
       
       <div class="task-selector">
-        <span id="task-selector-label">SUBMISSION:</span>
+        <span id="task-selector-label">TASK:</span>
         <div class="task-btn-group" role="group" aria-labelledby="task-selector-label">
           <button class="task-btn active" type="button" data-task="KIS" aria-pressed="true">KIS</button>
           <button class="task-btn" type="button" data-task="VQA" aria-pressed="false">Q&amp;A</button>
@@ -32,7 +32,7 @@
       <div class="parser-selector" aria-label="Query parser settings">
         <label for="select-parser-engine">Parser</label>
         <select id="select-parser-engine">
-          <option value="local" selected>CPU Local</option>
+          <option value="local" selected>Local deterministic</option>
           <option value="direct">Direct · no LLM</option>
         </select>
         <label class="parser-fallback-control" title="All query processing stays on this machine">
@@ -43,17 +43,17 @@
 
       <div class="status-pill ready" role="status" aria-live="polite">
         <span class="status-dot"></span>
-        <span id="server-status-text">No fusion / no reranking</span>
+        <span id="server-status-text">Checking local KIS Fusion</span>
       </div>
     </div>
   </header>
 
   <nav class="workspace-tabs" aria-label="Retrieval workspaces">
-    <button class="workspace-tab" type="button" data-workspace="kis_fusion" aria-selected="false" aria-controls="workspace-kis-fusion">KIS Fusion</button>
+    <button class="workspace-tab active" type="button" data-workspace="kis_fusion" aria-selected="true" aria-controls="workspace-kis-fusion">KIS Fusion</button>
     <button class="workspace-tab" type="button" data-workspace="branch2" aria-selected="false" aria-controls="workspace-branch2">Branch 2 - DAM Hybrid</button>
     <button class="workspace-tab" type="button" data-workspace="branch3_asr" aria-selected="false" aria-controls="workspace-branch3-asr">Branch 3 · ASR</button>
     <button class="workspace-tab" type="button" data-workspace="branch3_ocr" aria-selected="false" aria-controls="workspace-branch3-ocr">Branch 3 · OCR</button>
-    <button class="workspace-tab active" type="button" data-workspace="text" aria-selected="true" aria-controls="workspace-text">⌨ Text Search</button>
+    <button class="workspace-tab" type="button" data-workspace="text" aria-selected="false" aria-controls="workspace-text">⌨ Diagnostics</button>
     <button class="workspace-tab" type="button" data-workspace="branch1" aria-selected="false" aria-controls="workspace-branch1">Branch 1 · 3 Models</button>
     <button class="workspace-tab" type="button" data-workspace="image" aria-selected="false" aria-controls="workspace-image">🖼 Image Search</button>
     <button class="workspace-tab" type="button" data-workspace="video" aria-selected="false" aria-controls="workspace-video">▶ Watch Video</button>
@@ -67,7 +67,10 @@
           <div class="submission-rail-title">SUBMISSION DRAFT</div>
           <div id="submission-schema-note" class="submission-schema-note">KIS · video_id, frame_idx · no header · up to 100 rows</div>
         </div>
-        <span id="submission-count" class="submission-count">0</span>
+        <div class="submission-header-actions">
+          <span id="submission-count" class="submission-count">0</span>
+          <button id="btn-close-submission-rail" class="submission-rail-close" type="button" aria-label="Close submission panel" title="Close submission panel">×</button>
+        </div>
       </div>
       <label class="submission-query-id-label" for="submission-query-id">Query/file ID (filename only)</label>
       <input id="submission-query-id" class="submission-query-id" type="text" value="1" maxlength="64">
@@ -83,12 +86,13 @@
       <div id="submission-list" class="submission-list" aria-live="polite">
         <div class="submission-empty">Add a frame from any result, inspector, or video player.</div>
       </div>
+      <div id="submission-related-note" class="submission-related-note hidden" role="status" aria-live="polite"></div>
       <div class="submission-summary">
         <label for="submission-input">Top row / active selection</label>
         <input type="text" id="submission-input" readonly value="No keyframe selected">
       </div>
       <div class="submission-rail-actions">
-        <button id="btn-copy-submission" class="btn-copy" type="button">📋 Copy</button>
+        <button id="btn-copy-submission" class="btn-copy" type="button">📋 Copy active row</button>
         <button id="btn-export-csv" class="btn-export" type="button">📥 Review CSV</button>
         <button id="btn-clear-submission" class="btn-text" type="button">Clear draft</button>
       </div>
@@ -96,7 +100,7 @@
 
     <!-- MAIN CONTAINER -->
     <main class="main-container">
-    <div id="workspace-text" class="workspace-panel" data-workspace-panel="text">
+    <div id="workspace-text" class="workspace-panel hidden" data-workspace-panel="text">
     <!-- QUERY CONTROL DECK -->
     <section class="control-deck">
       <div class="deck-header">
@@ -446,16 +450,31 @@
       </div>
     </section>
 
-    <section id="workspace-kis-fusion" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="kis_fusion" aria-labelledby="kis-fusion-workspace-title">
+    <section id="workspace-kis-fusion" class="workspace-panel workspace-feature-panel" data-workspace-panel="kis_fusion" aria-labelledby="kis-fusion-workspace-title">
       <div class="feature-panel-header">
         <div>
-          <div class="feature-eyebrow">WEIGHTED RRF k=60 Â· FOUR BRANCH POOLS Â· FINAL TOP 150</div>
-          <h1 id="kis-fusion-workspace-title">KIS cross-branch fusion</h1>
+          <div class="feature-eyebrow">WEIGHTED RRF k=60 · FOUR BRANCH POOLS · FINAL TOP 150</div>
+          <h1 id="kis-fusion-workspace-title">KIS Fusion main workspace</h1>
           <p>Branch 1 (1,500), Branch 2 (500), ASR (500) and OCR (500) are fused by rank. BEiT-3 COCO cosine reranks only the first 100; frames 101-150 keep their RRF order.</p>
         </div>
         <span id="kis-fusion-health-badge" class="nofusion-badge">CHECKING FUSION HEALTH</span>
       </div>
-      <div class="branch1-control-grid">
+      <div id="kis-sticky-query" class="kis-sticky-query">
+        <div class="kis-sticky-query-main">
+          <span id="kis-task-badge" class="kis-task-badge">KIS</span>
+          <div class="kis-sticky-query-content">
+            <label class="kis-sticky-label" for="kis-pinned-query-text">OVERALL QUERY · SINGLE SOURCE</label>
+            <textarea id="kis-pinned-query-text" class="kis-pinned-query-text" rows="2" maxlength="4096" spellcheck="false" placeholder="Enter the complete KIS, Q&amp;A, or TRAKE query. Use E1:, E2:, … or temporal words for ordered events."></textarea>
+            <div id="kis-query-plan-status" class="kis-query-plan-status" role="status" aria-live="polite">Enter one overall query, then prepare its linked bundle and events.</div>
+          </div>
+        </div>
+        <div class="kis-sticky-query-actions">
+          <button id="btn-prepare-kis-query" class="btn-secondary" type="button" disabled>Prepare bundle &amp; events</button>
+          <span class="kis-sticky-hint">Preparation is local and does not run retrieval.</span>
+        </div>
+      </div>
+      <div id="kis-task-guidance" class="kis-task-guidance">KIS uses the full four-branch fusion pipeline. Selecting the first frame can fill the remaining draft with visually related indexed frames.</div>
+      <div id="kis-fusion-control-grid" class="branch1-control-grid">
         <div class="branch1-editor-column">
           <div class="col-header"><label for="kis-fusion-json-editor">KIS QUERY BUNDLE</label><button id="btn-format-kis-fusion-json" class="btn-text" type="button">Format</button></div>
           <textarea id="kis-fusion-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
@@ -482,13 +501,34 @@
           <label for="kis-fusion-weight-asr">ASR <output id="kis-fusion-weight-asr-value">0.15</output></label>
           <input id="kis-fusion-weight-asr" type="range" min="0.01" max="1" step="0.01" value="0.15">
           <div id="kis-fusion-normalized-weights" class="branch1-normalized-weights">Normalized: 40% / 30% / 15% / 15%</div>
-          <div class="branch1-fixed-setting">RRF k=60 Â· final pool: 150 Â· BEiT-3 COCO cosine rerank top 100</div>
+          <div class="branch1-fixed-setting">RRF k=60 · final pool: 150 · BEiT-3 COCO cosine rerank top 100</div>
           <div class="branch1-fixed-setting">Final score: 25% BEiT-3 + 75% RRF</div>
           <button id="btn-run-kis-fusion" class="btn-primary" type="button" disabled>Run KIS fusion</button>
         </div>
       </div>
+      <details id="kis-trake-sequence-panel" class="kis-trake-sequence-panel">
+        <summary>
+          <span>ORDERED KIS EVENTS (E1 → E2 → …)</span>
+          <span id="kis-trake-event-count">0 events</span>
+        </summary>
+        <div class="kis-trake-sequence-body">
+          <label class="sr-only" for="kis-trake-sequence-editor">Ordered KIS event prompts</label>
+          <textarea id="kis-trake-sequence-editor" rows="6" spellcheck="false" placeholder="E1: First event in English&#10;E2: Next event in English&#10;&#10;Optional bilingual form: sự kiện tiếng Việt || event in English"></textarea>
+          <div class="kis-trake-actions">
+            <label for="kis-trake-gap">Maximum gap
+              <select id="kis-trake-gap"><option value="15">15s</option><option value="30" selected>30s</option><option value="60">60s</option><option value="120">120s</option></select>
+            </label>
+            <label for="kis-trake-sequences">Sequences
+              <select id="kis-trake-sequences"><option value="20">20</option><option value="50">50</option><option value="100" selected>100</option></select>
+            </label>
+            <button id="btn-run-kis-trake" class="btn-primary" type="button" disabled>Run ordered KIS fusion</button>
+          </div>
+          <div class="branch1-fixed-setting">Every event runs through Branch 1, Branch 2, OCR and ASR, followed by KIS fusion and strict same-video source-frame ordering. Each event inherits only the shared context from the overall query.</div>
+          <div class="branch1-fixed-setting">Ordered matches are complete sequences, but “first appearance” and camera motion must be confirmed in the video player because retrieval operates on indexed frames.</div>
+        </div>
+      </details>
       <div class="results-header feature-results-header">
-        <div class="results-title-group"><span class="results-heading">KIS FINAL RESULTS</span><span id="kis-fusion-results-count" class="count-badge">Not run</span></div>
+        <div class="results-title-group"><span id="kis-fusion-results-heading" class="results-heading">KIS FINAL RESULTS</span><span id="kis-fusion-results-count" class="count-badge">Not run</span></div>
         <span id="kis-fusion-timing" class="meta-badge">Ready</span>
       </div>
       <div id="kis-fusion-results-grid" class="results-grid feature-results-grid">
@@ -542,7 +582,7 @@
         <div>
           <div class="feature-eyebrow">INDEPENDENT DATASET BROWSER</div>
           <h1 id="video-workspace-title">Watch a video by dataset ID</h1>
-          <p>Playback is mapped to the nearest canonical indexed keyframe. The estimated raw frame is informative only and is never submitted.</p>
+          <p>Choose any zero-based source-frame index. The exact index is verified for submission, the video seeks to its calculated timestamp, and the nearest indexed keyframe is shown only as a preview.</p>
         </div>
       </div>
       <form id="video-id-form" class="video-id-form">
@@ -554,7 +594,7 @@
         <div class="standalone-player-column">
           <div id="standalone-video-mock" class="video-mock standalone-video-mock" aria-label="Dataset video player">
             <iframe id="standalone-youtube-player" class="youtube-player" title="Dataset YouTube video player" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-            <img id="standalone-video-poster" class="video-poster" alt="Nearest indexed keyframe">
+            <img id="standalone-video-poster" class="video-poster" alt="Playback-adjacent indexed keyframe preview">
             <div class="video-vignette"></div>
             <button id="standalone-btn-video-center-play" class="video-center-play" type="button" aria-label="Play video"><i data-lucide="play"></i></button>
             <div class="video-controls-shell">
@@ -575,22 +615,30 @@
           </div>
           <div class="video-local-search-bar">
             <input id="standalone-video-query" type="text" placeholder="Search only inside this video…">
-            <button id="btn-standalone-video-search" class="btn-secondary" type="button">Direct SigLIP search</button>
+            <button id="btn-standalone-video-search" class="btn-secondary" type="button">Visual trio search</button>
           </div>
         </div>
         <aside class="playback-map-card">
           <div id="standalone-video-source" class="mapping-status">Loading metadata</div>
           <div class="playback-map-row"><span>Playback</span><strong id="watch-playback-time">0.0s</strong></div>
-          <div class="playback-map-row"><span>Estimated raw frame</span><strong id="watch-estimated-frame">—</strong></div>
-          <div class="playback-map-row canonical"><span>Nearest indexed keyframe</span><strong id="watch-keyframe-n">—</strong></div>
-          <div class="playback-map-row"><span>Canonical frame index</span><strong id="watch-frame-idx">—</strong></div>
-          <div class="playback-map-row"><span>Canonical timestamp</span><strong id="watch-keyframe-time">—</strong></div>
-          <div class="playback-map-row"><span>Mapping delta</span><strong id="watch-mapping-delta">—</strong></div>
-          <div class="playback-neighbor-actions">
-            <button id="btn-watch-prev-keyframe" type="button">← Previous</button>
-            <button id="btn-watch-next-keyframe" type="button">Next →</button>
+          <div class="playback-map-row"><span>Current source frame (0-based)</span><strong id="watch-estimated-frame">—</strong></div>
+          <div class="playback-map-row"><span>Nearest indexed preview</span><strong id="watch-keyframe-n">—</strong></div>
+          <div class="playback-map-row"><span>Preview frame index</span><strong id="watch-frame-idx">—</strong></div>
+          <div class="playback-map-row"><span>Preview timestamp</span><strong id="watch-keyframe-time">—</strong></div>
+          <div class="playback-map-row"><span>Preview time offset</span><strong id="watch-mapping-delta">—</strong></div>
+          <div class="watch-exact-selector">
+            <label for="watch-exact-frame-input">Exact source frame to submit (0-based)</label>
+            <div>
+              <input id="watch-exact-frame-input" type="number" min="0" step="1" placeholder="frame_idx">
+              <button id="btn-select-watch-frame" type="button">Verify &amp; seek</button>
+            </div>
+            <span id="watch-selected-frame-status">No source frame selected</span>
           </div>
-          <button id="btn-submit-watch-frame" class="btn-submit-toggle" type="button" disabled>+ Add nearest indexed frame</button>
+          <div class="playback-neighbor-actions">
+            <button id="btn-watch-prev-keyframe" type="button">← 1 frame</button>
+            <button id="btn-watch-next-keyframe" type="button">+1 frame →</button>
+          </div>
+          <button id="btn-submit-watch-frame" class="btn-submit-toggle" type="button" disabled>+ Add selected source frame</button>
         </aside>
       </div>
       <div id="standalone-video-search-results" class="results-grid feature-results-grid hidden"></div>
@@ -706,8 +754,8 @@
               <div class="inspector-local-search-row">
                 <input id="inspector-video-query" type="text" placeholder="Describe another moment in this video…">
                 <select id="inspector-parser-engine" aria-label="Inside-video parser">
-                  <option value="direct" selected>Direct SigLIP</option>
-                  <option value="local">CPU Local</option>
+                  <option value="direct" selected>Direct visual trio</option>
+                  <option value="local">Local parse + visual trio</option>
                 </select>
                 <button id="btn-inspector-video-search" type="button">Search</button>
               </div>
@@ -795,7 +843,11 @@
       <div class="inspector-filmstrip-pane">
         <div class="filmstrip-header">
           <span>VIDEO KEYFRAMES TIMELINE</span>
-          <span id="filmstrip-count" role="status" aria-live="polite">0 frames</span>
+          <div class="filmstrip-bulk-actions">
+            <span id="filmstrip-count" role="status" aria-live="polite">0 frames</span>
+            <button id="btn-clear-filmstrip-selection" type="button" disabled>Clear</button>
+            <button id="btn-add-filmstrip-selection" type="button" disabled>Add selected (0)</button>
+          </div>
         </div>
         <div class="filmstrip-carousel-wrap">
           <button id="btn-filmstrip-prev" class="carousel-arrow" type="button" aria-label="Scroll filmstrip backward" title="Previous keyframes">◀</button>

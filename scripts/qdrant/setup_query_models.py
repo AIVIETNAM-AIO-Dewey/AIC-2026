@@ -9,10 +9,12 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
 
-
 MODELS = {
     "siglip2": ("google/siglip2-base-patch16-224", "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"),
-    "metaclip2": ("facebook/metaclip-2-worldwide-huge-quickgelu", "2431b607fc8e05dd43b73797ba1a7a042514bcf4"),
+    "metaclip2": (
+        "facebook/metaclip-2-worldwide-huge-quickgelu",
+        "2431b607fc8e05dd43b73797ba1a7a042514bcf4",
+    ),
     "bge_m3": ("BAAI/bge-m3", None),
 }
 TOKENIZER_CONTRACTS = {
@@ -20,6 +22,20 @@ TOKENIZER_CONTRACTS = {
     "metaclip2": "max_tokens=77;normalization=l2",
     "bge_m3": "max_tokens=512;pooling=cls;normalization=l2",
 }
+# Query workers load PyTorch checkpoints only.  Model repositories often also
+# publish multi-gigabyte ONNX/TensorFlow exports and documentation media; those
+# are intentionally excluded from the immutable local runtime snapshot.
+IGNORED_SNAPSHOT_PATTERNS = (
+    "onnx/**",
+    "*.onnx",
+    "*.onnx_data",
+    "*.jpg",
+    "*.png",
+    "*.webp",
+    ".DS_Store",
+    "tf_model.h5",
+    "flax_model.msgpack",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -62,7 +78,14 @@ def main() -> int:
         revision = configured_revision or api.model_info(model_id, revision="main").sha
         if not revision:
             raise RuntimeError(f"Could not resolve immutable revision for {model_id}")
-        snapshot = Path(snapshot_download(repo_id=model_id, revision=revision, cache_dir=cache_root))
+        snapshot = Path(
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                cache_dir=cache_root,
+                ignore_patterns=IGNORED_SNAPSHOT_PATTERNS,
+            )
+        )
         models[name] = {
             "model_id": model_id,
             "revision": revision,

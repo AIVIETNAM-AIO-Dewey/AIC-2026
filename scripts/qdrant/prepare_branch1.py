@@ -16,12 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from online.src.retrieval.encoders.sequential_manager import SequentialBranch1Encoders  # noqa: E402
 from scripts.qdrant.validate_branch1_data import (  # noqa: E402
     DATA_GATE_SCHEMA_VERSION,
     build_data_gate_report,
 )
-from online.src.retrieval.encoders.sequential_manager import SequentialBranch1Encoders  # noqa: E402
-
 
 SIGLIP_ID = "google/siglip2-base-patch16-224"
 SIGLIP_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
@@ -53,7 +52,12 @@ def validate_data(data_root: Path, beit3_dir: Path) -> dict[str, Any]:
     return build_data_gate_report(data_root, beit3_dir)
 
 
-def validate_encoder_compatibility(model_root: Path, query_manifest_path: Path) -> dict[str, Any]:
+def validate_encoder_compatibility(
+    model_root: Path,
+    query_manifest_path: Path,
+    *,
+    runtime_probe: bool = True,
+) -> dict[str, Any]:
     checks: dict[str, bool] = {}
     details: dict[str, Any] = {}
     try:
@@ -63,13 +67,15 @@ def validate_encoder_compatibility(model_root: Path, query_manifest_path: Path) 
         checks["siglip2_checkpoint"] = (
             models.get("siglip2", {}).get("model_id") == SIGLIP_ID
             and models.get("siglip2", {}).get("revision") == SIGLIP_REVISION
-            and models.get("siglip2", {}).get("tokenizer_config") == "max_tokens=64;normalization=l2"
+            and models.get("siglip2", {}).get("tokenizer_config")
+            == "max_tokens=64;normalization=l2"
             and bool(models.get("siglip2", {}).get("files"))
         )
         checks["metaclip2_checkpoint"] = (
             models.get("metaclip2", {}).get("model_id") == METACLIP_ID
             and models.get("metaclip2", {}).get("revision") == METACLIP_REVISION
-            and models.get("metaclip2", {}).get("tokenizer_config") == "max_tokens=77;normalization=l2"
+            and models.get("metaclip2", {}).get("tokenizer_config")
+            == "max_tokens=77;normalization=l2"
             and bool(models.get("metaclip2", {}).get("files"))
         )
         details["query_models"] = models
@@ -117,55 +123,94 @@ def validate_encoder_compatibility(model_root: Path, query_manifest_path: Path) 
     }
     expected_probe_rows = {"siglip2": 12, "metaclip2": 12, "beit3": 6}
     probe_results: dict[str, Any] = {}
-    try:
-        encoder = SequentialBranch1Encoders(model_root)
-        for model_name, dimension in (("siglip2", 768), ("metaclip2", 1024), ("beit3", 768)):
-            probe_texts = probe_texts_by_model[model_name]
-            vectors, diagnostics = encoder.encode(model_name, probe_texts)
-            vectors = np.asarray(vectors, dtype=np.float32)
-            norms = np.linalg.norm(vectors, axis=1) if vectors.ndim == 2 else np.asarray([])
-            expected_rows = expected_probe_rows[model_name]
-            passed = (
-                vectors.shape == (expected_rows, dimension)
-                and bool(np.isfinite(vectors).all())
-                and bool(np.all(norms > 0.999))
-                and bool(np.all(norms < 1.001))
-                and len(diagnostics) == expected_rows
-                and all("token_count" in item and "truncated" in item for item in diagnostics)
-            )
-            checks[f"{model_name}_runtime_probe"] = passed
-            probe_results[model_name] = {
-                "shape": list(vectors.shape),
-                "finite": bool(np.isfinite(vectors).all()),
-                "min_norm": float(norms.min()) if norms.size else None,
-                "max_norm": float(norms.max()) if norms.size else None,
-                "tokenizer_diagnostics": diagnostics,
-            }
-            encoder.unload()
-    except Exception as error:
-        checks["runtime_probe"] = False
-        details["runtime_probe_error"] = f"{type(error).__name__}: {error}"
-    details["runtime_probe"] = probe_results
+    if runtime_probe:
+        try:
+            encoder = SequentialBranch1Encoders(model_root)
+            for model_name, dimension in (("siglip2", 768), ("metaclip2", 1024), ("beit3", 768)):
+                probe_texts = probe_texts_by_model[model_name]
+                vectors, diagnostics = encoder.encode(model_name, probe_texts)
+                vectors = np.asarray(vectors, dtype=np.float32)
+                norms = np.linalg.norm(vectors, axis=1) if vectors.ndim == 2 else np.asarray([])
+                expected_rows = expected_probe_rows[model_name]
+                passed = (
+                    vectors.shape == (expected_rows, dimension)
+                    and bool(np.isfinite(vectors).all())
+                    and bool(np.all(norms > 0.999))
+                    and bool(np.all(norms < 1.001))
+                    and len(diagnostics) == expected_rows
+                    and all("token_count" in item and "truncated" in item for item in diagnostics)
+                )
+                checks[f"{model_name}_runtime_probe"] = passed
+                probe_results[model_name] = {
+                    "shape": list(vectors.shape),
+                    "finite": bool(np.isfinite(vectors).all()),
+                    "min_norm": float(norms.min()) if norms.size else None,
+                    "max_norm": float(norms.max()) if norms.size else None,
+                    "tokenizer_diagnostics": diagnostics,
+                }
+                encoder.unload()
+        except Exception as error:
+            checks["runtime_probe"] = False
+            details["runtime_probe_error"] = f"{type(error).__name__}: {error}"
+        details["runtime_probe"] = probe_results
+    else:
+        details["runtime_probe"] = {
+            "status": "deferred_to_first_user_query",
+            "reason": "setup was requested without model inference",
+        }
     report = {
         "schema_version": "branch1.encoder-compatibility.v2",
         "passed": all(checks.values()),
         "checks": checks,
         "details": details,
         "text_encoder_contract": {
-            "siglip2": {"model_id": SIGLIP_ID, "revision": SIGLIP_REVISION, "languages": ["vi", "en"], "dimension": 768},
-            "metaclip2": {"model_id": METACLIP_ID, "revision": METACLIP_REVISION, "languages": ["vi", "en"], "dimension": 1024},
-            "beit3": {"checkpoint": BEIT3_CHECKPOINT, "source_revision": UNILM_REVISION, "languages": ["en"], "dimension": 768},
+            "siglip2": {
+                "model_id": SIGLIP_ID,
+                "revision": SIGLIP_REVISION,
+                "languages": ["vi", "en"],
+                "dimension": 768,
+            },
+            "metaclip2": {
+                "model_id": METACLIP_ID,
+                "revision": METACLIP_REVISION,
+                "languages": ["vi", "en"],
+                "dimension": 1024,
+            },
+            "beit3": {
+                "checkpoint": BEIT3_CHECKPOINT,
+                "source_revision": UNILM_REVISION,
+                "languages": ["en"],
+                "dimension": 768,
+            },
         },
+        "runtime_probe_performed": runtime_probe,
     }
     return report
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data")))
-    parser.add_argument("--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state")))
-    parser.add_argument("--model-root", type=Path, default=Path(os.environ.get("AIC_BRANCH1_MODEL_ROOT", "/models/branch1")))
-    parser.add_argument("--query-manifest", type=Path, default=Path(os.environ.get("AIC_QUERY_MODEL_MANIFEST", "/models/query_models.json")))
+    parser.add_argument(
+        "--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data"))
+    )
+    parser.add_argument(
+        "--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state"))
+    )
+    parser.add_argument(
+        "--model-root",
+        type=Path,
+        default=Path(os.environ.get("AIC_BRANCH1_MODEL_ROOT", "/models/branch1")),
+    )
+    parser.add_argument(
+        "--query-manifest",
+        type=Path,
+        default=Path(os.environ.get("AIC_QUERY_MODEL_MANIFEST", "/models/query_models.json")),
+    )
+    parser.add_argument(
+        "--skip-runtime-probe",
+        action="store_true",
+        help="Validate immutable assets only; defer the first inference to the UI user.",
+    )
     args = parser.parse_args()
     beit3_dir = args.data_root / "visual_embeddings" / "beit3"
     data_gate_path = args.state_root / "branch1_data_gate.json"
@@ -187,7 +232,11 @@ def main() -> int:
     )
     try:
         data_report = validate_data(args.data_root, beit3_dir)
-        compatibility = validate_encoder_compatibility(args.model_root, args.query_manifest)
+        compatibility = validate_encoder_compatibility(
+            args.model_root,
+            args.query_manifest,
+            runtime_probe=not args.skip_runtime_probe,
+        )
     except Exception as error:
         _write_atomic(
             data_gate_path,
@@ -201,7 +250,7 @@ def main() -> int:
         _write_atomic(
             compatibility_path,
             {
-            "schema_version": "branch1.encoder-compatibility.v2",
+                "schema_version": "branch1.encoder-compatibility.v2",
                 "passed": False,
                 "status": "failed",
                 "error": f"{type(error).__name__}: {error}",
@@ -210,7 +259,13 @@ def main() -> int:
         raise
     _write_atomic(data_gate_path, data_report)
     _write_atomic(compatibility_path, compatibility)
-    print(json.dumps({"data_gate": data_report, "encoder_compatibility": compatibility}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"data_gate": data_report, "encoder_compatibility": compatibility},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     if not compatibility.get("passed"):
         raise RuntimeError(
             "Branch-1 encoder compatibility gate failed; inspect "

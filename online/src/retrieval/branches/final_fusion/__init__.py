@@ -7,9 +7,9 @@ from .contracts import (
     FINAL_TOP_K,
     RRF_K,
 )
-from .service import KisFusionSearch
 from .health import fusion_health
 from .provenance import compact_branch_evidence, materialize_fusion_candidate
+from .service import KisFusionSearch
 
 __all__ = [
     "DEFAULT_BRANCH_WEIGHTS",

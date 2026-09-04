@@ -112,6 +112,74 @@ class SubmissionCoreTests(unittest.TestCase):
                 frame_lookup=self.store.frame,
             )
 
+    def test_verified_non_keyframe_keeps_exact_source_index_and_uses_anchors_only_for_fill(self) -> None:
+        def source_frame(video_id: str, frame_idx: int) -> dict | None:
+            canonical = self.store.frame(video_id, frame_idx)
+            if canonical is not None:
+                return canonical
+            if video_id != "A" or not 0 <= frame_idx <= 1200:
+                return None
+            return {
+                "video_id": video_id,
+                "frame_idx": frame_idx,
+                "keyframe_n": None,
+                "pts_time_s": frame_idx / 10,
+                "fps": 10.0,
+                "indexed_keyframe": False,
+                "validation": "source_timeline",
+                "frame_index_base": 0,
+                "max_frame_idx": 1200,
+                "preview_frame_idx": 30,
+                "preview_keyframe_n": 3,
+                "preview_pts_time_s": 3.0,
+                "preview_image_relpath": "keyframes/A/000003.jpg",
+                "related_seed_frame_idx": 30,
+            }
+
+        result = build_submission(
+            "KIS",
+            manual_items=[{"video_id": "A", "frame_idx": 35}],
+            candidate_items=[],
+            frame_lookup=source_frame,
+            video_frames_lookup=self.store.video,
+            target_rows=3,
+        )
+        self.assertEqual([row["frame_idx"] for row in result["rows"]], [35, 30, 20])
+        self.assertIsNone(result["rows"][0]["keyframe_n"])
+        self.assertEqual(result["rows"][0]["validation"], "source_timeline")
+        self.assertEqual(result["rows"][0]["csv_line"], "A,35")
+
+    def test_trake_accepts_verified_arbitrary_source_frames_in_exact_order(self) -> None:
+        def source_frame(video_id: str, frame_idx: int) -> dict | None:
+            if video_id != "A" or not 0 <= frame_idx <= 1200:
+                return None
+            return {
+                "video_id": video_id,
+                "frame_idx": frame_idx,
+                "keyframe_n": None,
+                "pts_time_s": frame_idx / 10,
+                "validation": "source_timeline",
+            }
+
+        result = build_submission(
+            "TRAKE",
+            manual_items=[
+                {
+                    "events": [
+                        {"event_order": 1, "video_id": "A", "frame_idx": 15},
+                        {"event_order": 2, "video_id": "A", "frame_idx": 35},
+                    ]
+                }
+            ],
+            candidate_items=[],
+            frame_lookup=source_frame,
+            event_count=2,
+            target_rows=1,
+        )
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["rows"][0]["matched_frames"], [15, 35])
+        self.assertEqual(result["rows"][0]["csv_line"], "A,15,35")
+
     def test_vqa_requires_human_answer_and_preserves_it_at_query_level(self) -> None:
         invalid = prepare_submission(
             {
@@ -198,7 +266,7 @@ class SubmissionCoreTests(unittest.TestCase):
                         "matched_events": [
                             {"video_id": "A", "frame_idx": 20},
                             {"video_id": "A", "frame_idx": 40},
-                        ]
+                        ],
                     },
                     [
                         {"video_id": "A", "frame_idx": 20},
@@ -225,10 +293,7 @@ class SubmissionCoreTests(unittest.TestCase):
         self.assertTrue(all(len(row["events"]) == 2 for row in result["rows"]))
         self.assertTrue(all(row["video_id"] == "A" for row in result["rows"]))
         self.assertTrue(
-            all(
-                row["matched_frames"][0] < row["matched_frames"][1]
-                for row in result["rows"]
-            )
+            all(row["matched_frames"][0] < row["matched_frames"][1] for row in result["rows"])
         )
         self.assertIn("same video", result["warnings"][0])
         self.assertEqual(result["rows"][0]["csv_line"], "A,10,30")
@@ -270,15 +335,16 @@ class SubmissionCoreTests(unittest.TestCase):
         self.assertEqual(first["row_count"], 100)
         self.assertEqual(first["rows"][0]["matched_frames"], [300, 600, 900])
         self.assertEqual(first["rows"][1]["matched_frames"], [310, 610, 910])
-        identities = {
-            (row["video_id"], tuple(row["matched_frames"])) for row in first["rows"]
-        }
+        identities = {(row["video_id"], tuple(row["matched_frames"])) for row in first["rows"]}
         self.assertEqual(len(identities), 100)
         for row in first["rows"]:
             self.assertEqual(len(row["matched_frames"]), 3)
             self.assertEqual(row["matched_frames"], sorted(row["matched_frames"]))
             self.assertTrue(
-                all(self.store.frame(row["video_id"], frame_idx) for frame_idx in row["matched_frames"])
+                all(
+                    self.store.frame(row["video_id"], frame_idx)
+                    for frame_idx in row["matched_frames"]
+                )
             )
         self.assertEqual(
             [row["matched_frames"] for row in first["rows"]],

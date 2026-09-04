@@ -9,10 +9,34 @@ from typing import Any
 
 from ..modalities.lexical import repair_mojibake
 
-
 # Preserve the private helper name used by older metadata callers while
 # sharing the conservative decoder used by both text retrieval modalities.
 _repair_mojibake = repair_mojibake
+
+# Identity and timing always come from the organizer-backed canonical metadata.
+# ``unified_metadata`` is an enrichment artifact and older builds stored a
+# video-local ``point_id`` in it, so none of these fields may be copied back
+# over the canonical frame reference.
+_CANONICAL_FRAME_FIELDS = frozenset(
+    {
+        "point_id",
+        "global_idx",
+        "frame_uid",
+        "video_id",
+        "keyframe_n",
+        "frame_idx",
+        "pts_time_s",
+        "fps",
+        "image_relpath",
+        "frame_relpath",
+        "filename",
+        "submission_string",
+        "vector_row",
+        "vector_shard",
+        "row_id",
+        "global_vector_row",
+    }
+)
 
 
 class FrameMetadataStore:
@@ -23,7 +47,9 @@ class FrameMetadataStore:
         self.unified_dir = data_root / "unified_metadata"
         self.ocr = ocr
 
-    @lru_cache(maxsize=32)
+    # The server owns exactly one long-lived metadata store. This bounded
+    # method cache cannot retain a stream of short-lived instances.
+    @lru_cache(maxsize=32)  # noqa: B019
     def video_frames(self, video_id: str) -> tuple[dict[str, Any], ...]:
         canonical = video_id.upper().replace("-", "_")
         path = self.video_metadata_dir / f"{canonical}.jsonl"
@@ -39,7 +65,7 @@ class FrameMetadataStore:
                 frames.append(item)
         return tuple(frames)
 
-    @lru_cache(maxsize=8)
+    @lru_cache(maxsize=8)  # noqa: B019 - same singleton lifecycle as above
     def unified_frames(self, video_id: str) -> dict[int, dict[str, Any]]:
         path = self.unified_dir / f"{video_id}.jsonl"
         if not path.is_file():
@@ -53,15 +79,24 @@ class FrameMetadataStore:
         return result
 
     def detail(self, video_id: str, keyframe_n: int) -> dict[str, Any] | None:
-        unified = self.unified_frames(video_id).get(keyframe_n)
-        if unified is not None:
-            return dict(unified)
+        canonical: dict[str, Any] | None = None
         for frame in self.video_frames(video_id):
             if int(frame["keyframe_n"]) == keyframe_n:
-                item = dict(frame)
-                item["ocr_text"] = self._lookup_ocr_text(str(item["frame_uid"]))
-                return item
-        return None
+                canonical = dict(frame)
+                break
+        if canonical is None:
+            return None
+
+        unified = self.unified_frames(video_id).get(keyframe_n)
+        if unified is not None:
+            for field, value in unified.items():
+                if field not in _CANONICAL_FRAME_FIELDS:
+                    canonical[field] = value
+        canonical["ocr_text"] = _repair_mojibake(
+            str(canonical.get("ocr_text") or self._lookup_ocr_text(str(canonical["frame_uid"])))
+        )
+        canonical["submission_string"] = f"{canonical['video_id']}, {int(canonical['frame_idx'])}"
+        return canonical
 
     def frame_by_idx(self, video_id: str, frame_idx: int) -> dict[str, Any] | None:
         canonical = video_id.upper().replace("-", "_")

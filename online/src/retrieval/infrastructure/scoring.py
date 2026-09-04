@@ -37,11 +37,7 @@ def normalize_weights(values: dict[str, float], names: tuple[str, ...]) -> dict[
 def normalize_scores(items: dict[str, dict[str, Any]], raw_field: str) -> None:
     """Attach clipped z-score sigmoid values, preserving missing as zero."""
 
-    observed = [
-        float(item[raw_field])
-        for item in items.values()
-        if item.get("observed", True)
-    ]
+    observed = [float(item[raw_field]) for item in items.values() if item.get("observed", True)]
     if any(not math.isfinite(value) for value in observed):
         raise ValueError(f"{raw_field} scores must be finite")
     if not observed:

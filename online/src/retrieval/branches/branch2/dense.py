@@ -10,7 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
+from ...encoders.device import (
+    clear_accelerator_cache,
+    cpu_fallback_allowed,
+    device_contract,
+    is_mps_runtime_error,
+    requested_device,
+    resolve_device,
+)
 from ...infrastructure.qdrant import QdrantHttpClient, base_frame
 from ..branch1.contracts import EXPECTED_FRAMES
 from .contracts import EXPECTED_DAM_REGIONS
@@ -26,33 +36,103 @@ def normalized_lse(scores: np.ndarray, temperature: float) -> np.ndarray:
         raise ValueError("LSE temperature must be positive and finite")
     scaled = values / float(temperature)
     maximum = scaled.max(axis=1)
-    result = float(temperature) * (
-        maximum + np.log(np.exp(scaled - maximum[:, None]).sum(axis=1))
-    )
+    result = float(temperature) * (maximum + np.log(np.exp(scaled - maximum[:, None]).sum(axis=1)))
     return result - float(temperature) * math.log(values.shape[1])
 
 
 class DamDenseRetriever:
     MANIFEST_SCHEMA_VERSION = "branch2.dam.v2"
-    def __init__(self, qdrant: QdrantHttpClient, data_root: Path, state_root: Path, *, temperature: float = 0.05) -> None:
+
+    def __init__(
+        self,
+        qdrant: QdrantHttpClient,
+        data_root: Path,
+        state_root: Path,
+        *,
+        temperature: float = 0.05,
+        device: str | None = None,
+        allow_cpu_fallback: bool | None = None,
+    ) -> None:
         if not math.isfinite(float(temperature)) or float(temperature) <= 0:
             raise ValueError("DAM LSE temperature must be positive and finite")
         self.qdrant = qdrant
         self.temperature = float(temperature)
+        self.requested_device = requested_device(device)
+        self.allow_cpu_fallback = cpu_fallback_allowed(allow_cpu_fallback)
+        self.device = resolve_device(
+            self.requested_device,
+            allow_fallback=self.allow_cpu_fallback,
+        )
+        self.fallback_reason: str | None = None
         dense_dir = data_root / "dense_text_embeddings"
         self.matrix_path = dense_dir / "dam_vectors.f16.npy"
         self.metadata_path = dense_dir / "dam_metadata.jsonl"
         self.manifest_path = state_root / "branch2_dam_manifest.json"
         self._matrix: np.memmap | None = None
         self._lock = threading.RLock()
-        self.last_timing: dict[str, float] = {}
+        self.last_timing: dict[str, Any] = {}
+
+    def device_health(self) -> dict[str, Any]:
+        requested = str(getattr(self, "requested_device", "cpu"))
+        fallback_allowed = bool(getattr(self, "allow_cpu_fallback", True))
+        return {
+            **device_contract(
+                requested,
+                allow_fallback=fallback_allowed,
+            ),
+            "actual": str(getattr(self, "device", "cpu")),
+            "fallback_reason": getattr(self, "fallback_reason", None),
+            "operation": "DAM candidate normalization, matmul, and LSE",
+        }
+
+    @staticmethod
+    def _numpy_exact_scores(
+        rows: np.ndarray,
+        vectors: np.ndarray,
+        temperature: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        normalized_rows = rows / np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-12)
+        scores = normalized_rows @ vectors.T
+        return scores, normalized_lse(scores, temperature)
+
+    def _exact_scores(
+        self,
+        rows: np.ndarray,
+        vectors: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.device != "mps":
+            return self._numpy_exact_scores(rows, vectors, self.temperature)
+        try:
+            row_tensor = torch.as_tensor(rows, dtype=torch.float32, device="mps")
+            query_tensor = torch.as_tensor(vectors, dtype=torch.float32, device="mps")
+            row_tensor = F.normalize(row_tensor, p=2, dim=1)
+            query_tensor = F.normalize(query_tensor, p=2, dim=1)
+            score_tensor = row_tensor @ query_tensor.T
+            lse_tensor = self.temperature * (
+                torch.logsumexp(score_tensor / self.temperature, dim=1)
+                - math.log(score_tensor.shape[1])
+            )
+            scores = score_tensor.to("cpu", dtype=torch.float32).numpy()
+            lse = lse_tensor.to("cpu", dtype=torch.float32).numpy()
+            del row_tensor, query_tensor, score_tensor, lse_tensor
+            clear_accelerator_cache("mps")
+            return scores, lse
+        except BaseException as error:
+            if not self.allow_cpu_fallback or not is_mps_runtime_error(error):
+                raise
+            self.fallback_reason = f"{type(error).__name__}: {error}"
+            self.device = "cpu"
+            clear_accelerator_cache("mps")
+            return self._numpy_exact_scores(rows, vectors, self.temperature)
 
     def _open_matrix(self) -> np.memmap:
         with self._lock:
             if self._matrix is None:
                 matrix = np.load(self.matrix_path, mmap_mode="r", allow_pickle=False)
                 if matrix.shape != (EXPECTED_DAM_REGIONS, 1024) or matrix.dtype != np.float16:
-                    raise ValueError(f"Invalid DAM matrix: shape={matrix.shape}, dtype={matrix.dtype}")
+                    raise ValueError(
+                        f"Invalid DAM matrix: shape={matrix.shape}, dtype={matrix.dtype}"
+                    )
                 self._matrix = matrix
             return self._matrix
 
@@ -127,9 +207,8 @@ class DamDenseRetriever:
             "frame_metadata_count": int(manifest.get("frame_metadata_count", 0)),
             "frame_metadata_size": int(manifest.get("frame_metadata_size", -1)),
             "frame_metadata_mtime_ns": int(manifest.get("frame_metadata_mtime_ns", -1)),
-            "frame_metadata_identity_verified": manifest.get(
-                "frame_metadata_identity_verified"
-            ) is True,
+            "frame_metadata_identity_verified": manifest.get("frame_metadata_identity_verified")
+            is True,
             # Branch-2 health uses these source fingerprints to bind the DAM
             # preparation manifest to the Qdrant ingestion manifest.
             "matrix_sha256": manifest.get("matrix_sha256"),
@@ -138,22 +217,26 @@ class DamDenseRetriever:
             "manifest": str(self.manifest_path),
             "warnings": warnings,
             "files_match_manifest": files_match_manifest,
+            "execution_device": str(getattr(self, "device", "cpu")),
+            "device": self.device_health(),
         }
 
-    def search(self, query_vectors: np.ndarray, query_roles: tuple[str, ...], top_k: int) -> dict[str, dict[str, Any]]:
+    def search(
+        self, query_vectors: np.ndarray, query_roles: tuple[str, ...], top_k: int
+    ) -> dict[str, dict[str, Any]]:
         if len(query_roles) != 6 or not 1 <= int(top_k) <= 2_000:
             raise ValueError("DAM dense retrieval requires six roles and top_k in 1..2000")
         vectors = np.asarray(query_vectors, dtype=np.float32)
         if vectors.shape != (len(query_roles), 1024):
-            raise ValueError(f"Expected ({len(query_roles)}, 1024) BGE query matrix, got {vectors.shape}")
+            raise ValueError(
+                f"Expected ({len(query_roles)}, 1024) BGE query matrix, got {vectors.shape}"
+            )
         if not np.isfinite(vectors).all() or np.any(np.linalg.norm(vectors, axis=1) == 0):
             raise ValueError("BGE query vectors must be finite and non-zero")
         # Qdrant scores cosine, so the exact mmap path must use the same
         # normalized geometry even if a caller supplies an unnormalized
         # encoder output.
-        vectors = vectors / np.maximum(
-            np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12
-        )
+        vectors = vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
         streams: list[list[dict[str, Any]]] = []
         qdrant_started = time.perf_counter()
         for vector in vectors:
@@ -162,22 +245,22 @@ class DamDenseRetriever:
         exact_started = time.perf_counter()
         region_ids = {int(point["id"]) for stream in streams for point in stream}
         if not region_ids:
-            self.last_timing = {"qdrant_ms": round(qdrant_ms, 2), "exact_scoring_ms": 0.0}
+            self.last_timing = {
+                "qdrant_ms": round(qdrant_ms, 2),
+                "exact_scoring_ms": 0.0,
+                "exact_scoring_device": self.device,
+            }
             return {}
         ordered_ids = sorted(region_ids)
         if ordered_ids[0] < 1 or ordered_ids[-1] > EXPECTED_DAM_REGIONS:
             raise ValueError("Qdrant DAM point IDs are not aligned with the offline DAM matrix")
-        rows = np.asarray(self._open_matrix()[np.asarray(ordered_ids, dtype=np.int64) - 1], dtype=np.float32)
+        rows = np.asarray(
+            self._open_matrix()[np.asarray(ordered_ids, dtype=np.int64) - 1], dtype=np.float32
+        )
         if not np.isfinite(rows).all():
             raise ValueError("Candidate DAM vectors contain non-finite values")
-        rows /= np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-12)
-        scores = rows @ vectors.T
-        lse = normalized_lse(scores, self.temperature)
-        region_points = {
-            int(point["id"]): point
-            for stream in streams
-            for point in stream
-        }
+        scores, lse = self._exact_scores(rows, vectors)
+        region_points = {int(point["id"]): point for stream in streams for point in stream}
         frames: dict[int, dict[str, Any]] = {}
         for index, point_id in enumerate(ordered_ids):
             point = region_points[point_id]
@@ -198,23 +281,31 @@ class DamDenseRetriever:
                 payload.get("frame_uid") or f"{video_id}:{frame_idx}"
             ):
                 raise RuntimeError(f"DAM point {point_id} has inconsistent frame identity")
-            query_scores = {role: float(scores[index, role_index]) for role_index, role in enumerate(query_roles)}
+            query_scores = {
+                role: float(scores[index, role_index])
+                for role_index, role in enumerate(query_roles)
+            }
             best_query = max(query_scores, key=query_scores.get)
             candidate = frames.setdefault(parent_id, {"region_count": 0, "regions": []})
             candidate["region_count"] += 1
-            candidate["regions"].append({
-                "point_id": point_id,
-                "region_id": payload.get("region_id"),
-                "class_entity": payload.get("class_entity", ""),
-                "bbox": payload.get("bbox", []),
-                "description_en": payload.get("description_en", ""),
-                "query_scores": query_scores,
-                "best_query_role": best_query,
-                "best_query_language": "en",
-                "lse_score": float(lse[index]),
-            })
+            candidate["regions"].append(
+                {
+                    "point_id": point_id,
+                    "region_id": payload.get("region_id"),
+                    "class_entity": payload.get("class_entity", ""),
+                    "bbox": payload.get("bbox", []),
+                    "description_en": payload.get("description_en", ""),
+                    "query_scores": query_scores,
+                    "best_query_role": best_query,
+                    "best_query_language": "en",
+                    "lse_score": float(lse[index]),
+                }
+            )
         selected = sorted(
-            ((max(region["lse_score"] for region in value["regions"]), parent_id, value) for parent_id, value in frames.items()),
+            (
+                (max(region["lse_score"] for region in value["regions"]), parent_id, value)
+                for parent_id, value in frames.items()
+            ),
             key=lambda item: (-item[0], item[1]),
         )[:top_k]
         payloads = self.qdrant.retrieve("aic_frames", [parent_id for _, parent_id, _ in selected])
@@ -237,21 +328,24 @@ class DamDenseRetriever:
                 )
             winner = max(value["regions"], key=lambda item: item["lse_score"])
             frame = base_frame(payload, score=score, rank=rank, score_type="dam_lse_max")
-            frame.update({
-                "frame_uid": str(payload["frame_uid"]),
-                "global_idx": parent_id,
-                "dense_raw": float(score),
-                "dense_observed": True,
-                "dam_region_count": value["region_count"],
-                "dam_winner": winner,
-                "dense_query_scores": winner["query_scores"],
-                "dense_best_query_role": winner["best_query_role"],
-                "dense_best_query_language": winner["best_query_language"],
-                "dense_rank": rank,
-            })
+            frame.update(
+                {
+                    "frame_uid": str(payload["frame_uid"]),
+                    "global_idx": parent_id,
+                    "dense_raw": float(score),
+                    "dense_observed": True,
+                    "dam_region_count": value["region_count"],
+                    "dam_winner": winner,
+                    "dense_query_scores": winner["query_scores"],
+                    "dense_best_query_role": winner["best_query_role"],
+                    "dense_best_query_language": winner["best_query_language"],
+                    "dense_rank": rank,
+                }
+            )
             output[frame["frame_uid"]] = frame
         self.last_timing = {
             "qdrant_ms": round(qdrant_ms, 2),
             "exact_scoring_ms": round((time.perf_counter() - exact_started) * 1000.0, 2),
+            "exact_scoring_device": self.device,
         }
         return output

@@ -6,10 +6,8 @@ import re
 
 from online.src.contracts.query import ParsedQuery, TaskType, TrakeEvent
 
-
 _VIETNAMESE_MARKS = set(
-    "ăâđêôơưĂÂĐÊÔƠƯáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệ"
-    "íìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
+    "ăâđêôơưĂÂĐÊÔƠƯáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
 )
 _STOPWORDS = {
     "a",
@@ -55,7 +53,8 @@ def _ocr_keywords(text: str, limit: int = 10) -> list[str]:
     candidates = quoted + [
         token
         for token in tokens
-        if token.casefold() not in _STOPWORDS and (len(token) >= 3 or any(c.isdigit() for c in token))
+        if token.casefold() not in _STOPWORDS
+        and (len(token) >= 3 or any(c.isdigit() for c in token))
     ]
     deduplicated: list[str] = []
     seen: set[str] = set()
@@ -71,7 +70,29 @@ def _ocr_keywords(text: str, limit: int = 10) -> list[str]:
 
 
 def _temporal_events(text: str) -> list[TrakeEvent]:
-    marked = re.sub(r"(?:^|\s)\d+[.)]\s+", " | ", text)
+    # Explicit ``E1:`` labels are the format used by the KIS/TRAKE authoring
+    # surface.  Keep plain ``1:`` untouched so numbered visual attributes
+    # (for example diagram levels) are not mistaken for temporal events.
+    first_explicit_event = re.search(
+        r"(?:^|\s)(?:E\s*1\s*[:.)-]|1\s*[.)-])\s+",
+        text,
+        flags=re.IGNORECASE,
+    )
+    event_text = text[first_explicit_event.start() :] if first_explicit_event else text
+    marked = re.sub(
+        r"(?:^|\s)(?:E\s*\d+\s*[:.)-]|\d+\s*[.)-])\s+",
+        " | ",
+        event_text,
+        flags=re.IGNORECASE,
+    )
+    # Semicolons are event separators only when the query explicitly says it
+    # is a sequence.  This avoids splitting ordinary object lists.
+    if marked.count(";") >= 1 and re.search(
+        r"\b(?:lần lượt|chuyển cảnh|chuỗi|đầu tiên|sequence|transition|first)\b",
+        marked,
+        flags=re.IGNORECASE,
+    ):
+        marked = marked.replace(";", " | ")
     parts = re.split(
         r"\s*(?:\||\b(?:sau đó|tiếp theo|kế tiếp|rồi|cuối cùng|then|next|after that|finally)\b)\s*",
         marked,
@@ -82,8 +103,17 @@ def _temporal_events(text: str) -> list[TrakeEvent]:
     if len(clean_parts) < 2:
         return []
     speech_markers = (
-        "nói", "phát biểu", "lời thoại", "đối thoại", "thuyết minh",
-        "giọng đọc", "voiceover", "says", "speaks", "speech", "dialogue",
+        "nói",
+        "phát biểu",
+        "lời thoại",
+        "đối thoại",
+        "thuyết minh",
+        "giọng đọc",
+        "voiceover",
+        "says",
+        "speaks",
+        "speech",
+        "dialogue",
     )
     return [
         TrakeEvent(
@@ -109,8 +139,17 @@ class LocalQueryParser:
             raise ValueError("The CPU-only server currently supports KIS queries only")
         events = _temporal_events(clean)
         speech_markers = (
-            "nói", "phát biểu", "lời thoại", "đối thoại", "thuyết minh",
-            "giọng đọc", "voiceover", "says", "speaks", "speech", "dialogue",
+            "nói",
+            "phát biểu",
+            "lời thoại",
+            "đối thoại",
+            "thuyết minh",
+            "giọng đọc",
+            "voiceover",
+            "says",
+            "speaks",
+            "speech",
+            "dialogue",
         )
         speech_query = clean if any(marker in clean.casefold() for marker in speech_markers) else ""
         return ParsedQuery(

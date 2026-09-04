@@ -1,4 +1,4 @@
-"""Short-lived CPU encoder workers with deterministic RAM reclamation."""
+"""Short-lived accelerator workers with deterministic memory reclamation."""
 
 from __future__ import annotations
 
@@ -9,19 +9,29 @@ import os
 import threading
 import time
 import traceback
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from PIL import Image
 
-from .cpu import CpuTextEncoders
-from .sequential_manager import SequentialBranch1Encoders
 from ..infrastructure.resources import (
     MAX_PRODUCTION_RSS_BYTES,
     current_process_rss_bytes,
     peak_process_rss_bytes,
 )
+from .cpu import CpuTextEncoders
+from .device import (
+    clear_accelerator_cache,
+    cpu_fallback_allowed,
+    device_contract,
+    is_mps_runtime_error,
+    requested_device,
+    resolve_device,
+)
+from .sequential_manager import SequentialBranch1Encoders
 
 MAX_IDLE_TIMEOUT_SECONDS = 30.0
 
@@ -34,6 +44,10 @@ def _worker_identity(request: dict[str, Any]) -> tuple[str, ...]:
     # contract are identical; otherwise a cached model could silently serve
     # vectors from a different tokenizer or projection head.
     tokenizer_config = str(request.get("tokenizer_config") or "default")
+    accelerator_contract = (
+        str(request.get("device") or "cpu"),
+        str(bool(request.get("allow_cpu_fallback", True))),
+    )
     if kind == "branch1_text":
         return (
             kind,
@@ -41,6 +55,7 @@ def _worker_identity(request: dict[str, Any]) -> tuple[str, ...]:
             str(request["model_root"]),
             str(request.get("model_revision") or "unknown-revision"),
             tokenizer_config,
+            *accelerator_contract,
         )
     if kind == "bge_text":
         return (
@@ -48,6 +63,7 @@ def _worker_identity(request: dict[str, Any]) -> tuple[str, ...]:
             str(request["bge_id"]),
             str(request.get("bge_revision") or "local-cache"),
             tokenizer_config,
+            *accelerator_contract,
         )
     if kind in {"siglip_text", "siglip_image"}:
         # Text and image requests intentionally share one identity because
@@ -58,26 +74,33 @@ def _worker_identity(request: dict[str, Any]) -> tuple[str, ...]:
             str(request["siglip_id"]),
             str(request["siglip_revision"]),
             tokenizer_config,
+            *accelerator_contract,
         )
     raise ValueError(f"Unknown encoder worker request: {kind}")
+
+
+def _device_state_key(identity: tuple[str, ...]) -> str:
+    return ":".join(identity[:2])
 
 
 def _load_worker_encoder(request: dict[str, Any]) -> tuple[Any, float]:
     load_started = time.perf_counter()
     kind = str(request["kind"])
     if kind == "branch1_text":
-        encoder = SequentialBranch1Encoders(Path(request["model_root"]))
+        encoder = SequentialBranch1Encoders(
+            Path(request["model_root"]),
+            device=str(request.get("device") or "cpu"),
+            allow_cpu_fallback=bool(request.get("allow_cpu_fallback", True)),
+        )
         encoder._load(str(request["model_name"]))
     else:
         encoder = CpuTextEncoders(
             siglip_id=str(request["siglip_id"]),
             siglip_revision=str(request["siglip_revision"]),
             bge_id=str(request["bge_id"]),
-            bge_revision=(
-                str(request["bge_revision"])
-                if request.get("bge_revision")
-                else None
-            ),
+            bge_revision=(str(request["bge_revision"]) if request.get("bge_revision") else None),
+            device=str(request.get("device") or "cpu"),
+            allow_cpu_fallback=bool(request.get("allow_cpu_fallback", True)),
         )
         if kind == "bge_text":
             encoder._load_bge()
@@ -86,7 +109,33 @@ def _load_worker_encoder(request: dict[str, Any]) -> tuple[Any, float]:
     return encoder, (time.perf_counter() - load_started) * 1000.0
 
 
-def _run_worker_inference(encoder: Any, request: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
+def _unload_worker_encoder(encoder: Any | None) -> None:
+    if encoder is None:
+        return
+    try:
+        if hasattr(encoder, "unload"):
+            encoder.unload()
+        elif hasattr(encoder, "unload_all"):
+            encoder.unload_all()
+    except (AttributeError, RuntimeError):
+        pass
+
+
+def _can_fallback_to_cpu(request: dict[str, Any], error: BaseException) -> bool:
+    return (
+        bool(request.get("allow_cpu_fallback", True))
+        and str(request.get("device") or "cpu") != "cpu"
+        and is_mps_runtime_error(error)
+    )
+
+
+def _cpu_request(request: dict[str, Any]) -> dict[str, Any]:
+    return {**request, "device": "cpu", "allow_cpu_fallback": False}
+
+
+def _run_worker_inference(
+    encoder: Any, request: dict[str, Any]
+) -> tuple[Any, list[dict[str, Any]]]:
     kind = str(request["kind"])
     if kind == "branch1_text":
         return encoder.encode(str(request["model_name"]), list(request["texts"]))
@@ -104,14 +153,35 @@ def _run_worker_inference(encoder: Any, request: dict[str, Any]) -> tuple[Any, l
 def _worker_main(connection: Any, request: dict[str, Any], idle_timeout_seconds: float) -> None:
     """Serve one model identity and exit after a bounded idle period."""
     encoder: Any | None = None
+    fallback_reason: str | None = None
     try:
         identity = _worker_identity(request)
-        encoder, first_load_ms = _load_worker_encoder(request)
+        try:
+            encoder, first_load_ms = _load_worker_encoder(request)
+        except BaseException as error:
+            if not _can_fallback_to_cpu(request, error):
+                raise
+            fallback_reason = f"{type(error).__name__}: {error}"
+            clear_accelerator_cache("mps")
+            encoder, first_load_ms = _load_worker_encoder(_cpu_request(request))
         pending = request
         load_ms = first_load_ms
         while True:
             inference_started = time.perf_counter()
-            vectors, diagnostics = _run_worker_inference(encoder, pending)
+            try:
+                vectors, diagnostics = _run_worker_inference(encoder, pending)
+            except BaseException as error:
+                if getattr(encoder, "device", "cpu") != "mps" or not _can_fallback_to_cpu(
+                    pending, error
+                ):
+                    raise
+                fallback_reason = f"{type(error).__name__}: {error}"
+                _unload_worker_encoder(encoder)
+                encoder = None
+                clear_accelerator_cache("mps")
+                encoder, fallback_load_ms = _load_worker_encoder(_cpu_request(pending))
+                load_ms += fallback_load_ms
+                vectors, diagnostics = _run_worker_inference(encoder, _cpu_request(pending))
             connection.send(
                 {
                     "ok": True,
@@ -125,6 +195,14 @@ def _worker_main(connection: Any, request: dict[str, Any], idle_timeout_seconds:
                         "worker_reused": load_ms == 0.0,
                         "worker_pid": os.getpid(),
                         "worker_load_count": 1,
+                        "requested_device": str(request.get("device") or "cpu"),
+                        "execution_device": str(getattr(encoder, "device", "cpu")),
+                        "cpu_fallback": fallback_reason is not None,
+                    },
+                    "device": {
+                        "requested": str(request.get("device") or "cpu"),
+                        "actual": str(getattr(encoder, "device", "cpu")),
+                        "fallback_reason": fallback_reason,
                     },
                     "peak_rss_bytes": peak_process_rss_bytes(),
                 }
@@ -136,7 +214,7 @@ def _worker_main(connection: Any, request: dict[str, Any], idle_timeout_seconds:
             if _worker_identity(pending) != identity:
                 raise RuntimeError("Encoder worker received a different model identity")
     except BaseException as error:
-        try:
+        with suppress(BrokenPipeError, EOFError, OSError):
             connection.send(
                 {
                     "ok": False,
@@ -145,17 +223,8 @@ def _worker_main(connection: Any, request: dict[str, Any], idle_timeout_seconds:
                     "peak_rss_bytes": peak_process_rss_bytes(),
                 }
             )
-        except (BrokenPipeError, EOFError, OSError):
-            pass
     finally:
-        if encoder is not None:
-            try:
-                if hasattr(encoder, "unload"):
-                    encoder.unload()
-                elif hasattr(encoder, "unload_all"):
-                    encoder.unload_all()
-            except (AttributeError, RuntimeError):
-                pass
+        _unload_worker_encoder(encoder)
         connection.close()
 
 
@@ -168,6 +237,8 @@ class EncoderWorkerManager:
         timeout_seconds: float = 600.0,
         idle_timeout_seconds: float = 30.0,
         worker_target: Callable[[Any, dict[str, Any], float], None] | None = None,
+        device: str | None = None,
+        allow_cpu_fallback: bool | None = None,
     ) -> None:
         self.timeout_seconds = float(timeout_seconds)
         self.idle_timeout_seconds = float(idle_timeout_seconds)
@@ -185,6 +256,12 @@ class EncoderWorkerManager:
         # pickleable under Windows/Linux spawn. Production always uses the
         # concrete model worker above.
         self._worker_target = worker_target or _worker_main
+        self.requested_device = requested_device(device)
+        self.allow_cpu_fallback = cpu_fallback_allowed(allow_cpu_fallback)
+        self.preferred_device = resolve_device(
+            self.requested_device,
+            allow_fallback=self.allow_cpu_fallback,
+        )
         self._lock = threading.Lock()
         self._process: mp.Process | None = None
         self._connection: Any | None = None
@@ -195,6 +272,34 @@ class EncoderWorkerManager:
         self.last_worker_spawned = False
         self.last_worker_pid: int | None = None
         self.last_worker_load_count = 0
+        self.last_device = self.preferred_device
+        self.last_fallback_reason: str | None = None
+        self._device_state_lock = threading.RLock()
+        self._device_states: dict[str, dict[str, Any]] = {}
+
+    @property
+    def cache_device(self) -> str:
+        return self.preferred_device
+
+    def cache_device_for(self, state_key: str) -> str:
+        """Return the device that actually serves one model identity."""
+
+        with self._device_state_lock:
+            state = self._device_states.get(state_key) or {}
+            return str(state.get("actual") or self.preferred_device)
+
+    def device_health(self) -> dict[str, Any]:
+        with self._device_state_lock:
+            actual_workers = {name: dict(state) for name, state in self._device_states.items()}
+        return {
+            **device_contract(
+                self.requested_device,
+                allow_fallback=self.allow_cpu_fallback,
+            ),
+            "actual_workers": actual_workers,
+            "last_execution_device": self.last_device,
+            "last_fallback_reason": self.last_fallback_reason,
+        }
 
     @property
     def production_ready(self) -> bool:
@@ -212,10 +317,8 @@ class EncoderWorkerManager:
         self.last_worker_pid = None
         self.last_worker_load_count = 0
         if connection is not None:
-            try:
+            with suppress(OSError, EOFError):
                 connection.close()
-            except (OSError, EOFError):
-                pass
         if process is not None:
             process.join(timeout=1)
             if process.is_alive():
@@ -254,6 +357,9 @@ class EncoderWorkerManager:
 
     def execute(self, request: dict[str, Any]) -> tuple[np.ndarray, list[dict[str, Any]]]:
         with self._lock:
+            request = dict(request)
+            request.setdefault("device", self.requested_device)
+            request.setdefault("allow_cpu_fallback", self.allow_cpu_fallback)
             identity = _worker_identity(request)
             for attempt in range(2):
                 reusable = (
@@ -291,6 +397,24 @@ class EncoderWorkerManager:
                 self.last_worker_load_count = int(
                     result.get("timing", {}).get("worker_load_count", 0)
                 )
+                raw_device = result.get("device") or {}
+                device_state = raw_device if isinstance(raw_device, dict) else {}
+                self.last_device = str(
+                    device_state.get("actual")
+                    or result.get("timing", {}).get("execution_device")
+                    or self.preferred_device
+                )
+                fallback_reason = device_state.get("fallback_reason")
+                self.last_fallback_reason = str(fallback_reason) if fallback_reason else None
+                state_key = _device_state_key(identity)
+                with self._device_state_lock:
+                    self._device_states[state_key] = {
+                        "requested": str(device_state.get("requested") or self.requested_device),
+                        "actual": self.last_device,
+                        "fallback_reason": self.last_fallback_reason,
+                    }
+                self.last_timing.setdefault("execution_device", self.last_device)
+                self.last_timing.setdefault("cpu_fallback", self.last_fallback_reason is not None)
                 if not result.get("ok"):
                     self._stop_active()
                     raise RuntimeError(
@@ -305,9 +429,17 @@ class ProcessBranch1Encoders:
 
     def __init__(self, manager: EncoderWorkerManager, model_root: Path | None = None) -> None:
         self.manager = manager
-        self.inspector = SequentialBranch1Encoders(model_root)
+        self.inspector = SequentialBranch1Encoders(
+            model_root,
+            device=manager.requested_device,
+            allow_cpu_fallback=manager.allow_cpu_fallback,
+        )
         self.model_root = self.inspector.model_root
         self.revisions = self.inspector.revisions
+        self.cache_device = manager.cache_device
+
+    def cache_device_for_model(self, model_name: str) -> str:
+        return self.manager.cache_device_for(f"branch1_text:{model_name}")
 
     def health(self) -> dict[str, dict[str, Any]]:
         return self.inspector.health()
@@ -363,8 +495,14 @@ class ProcessCpuTextEncoders:
             siglip_revision=siglip_revision,
             bge_id=bge_id,
             bge_revision=bge_revision,
+            device=manager.requested_device,
+            allow_cpu_fallback=manager.allow_cpu_fallback,
         )
         self.bge_revision = self.inspector.bge_revision
+        self.cache_device = manager.cache_device
+
+    def cache_device_for_bge(self) -> str:
+        return self.manager.cache_device_for(f"bge_text:{self.bge_id}")
 
     def _base(self) -> dict[str, Any]:
         return {
@@ -372,6 +510,8 @@ class ProcessCpuTextEncoders:
             "siglip_revision": self.siglip_revision,
             "bge_id": self.bge_id,
             "bge_revision": self.bge_revision,
+            "device": self.manager.requested_device,
+            "allow_cpu_fallback": self.manager.allow_cpu_fallback,
         }
 
     def health(self) -> dict[str, object]:

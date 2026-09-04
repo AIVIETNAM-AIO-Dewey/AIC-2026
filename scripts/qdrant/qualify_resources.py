@@ -10,7 +10,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 MAX_BYTES = int(float(os.environ.get("AIC_MAX_MODEL_RSS_GIB", "6.5")) * 1024**3)
 SCHEMA = "aic.resource-qualification.v2"
 RUNTIME_FINGERPRINT_SCHEMA = "aic.runtime-fingerprint.v1"
@@ -37,7 +36,9 @@ def _load_runtime_fingerprint(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state")))
+    parser.add_argument(
+        "--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state"))
+    )
     parser.add_argument("--stack-peak-bytes", type=int, required=True)
     parser.add_argument("--api-peak-bytes", type=int, required=True)
     parser.add_argument("--worker-peak-bytes", type=int, required=True)
@@ -59,7 +60,12 @@ def main() -> int:
         args.state_root / "runtime_fingerprint.json"
     )
     runtime_fingerprint = _load_runtime_fingerprint(fingerprint_path)
-    values = (args.stack_peak_bytes, args.api_peak_bytes, args.worker_peak_bytes, args.qdrant_peak_bytes)
+    values = (
+        args.stack_peak_bytes,
+        args.api_peak_bytes,
+        args.worker_peak_bytes,
+        args.qdrant_peak_bytes,
+    )
     if any(value < 0 for value in values):
         raise ValueError("memory measurements must be non-negative")
     if args.stack_peak_bytes < max(

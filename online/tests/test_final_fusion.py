@@ -7,10 +7,10 @@ standalone branch adapters used by :class:`KisFusionSearch`.
 
 from __future__ import annotations
 
-from copy import deepcopy
-import unittest
-import threading
 import tempfile
+import threading
+import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +23,9 @@ from online.src.retrieval.branches.final_fusion.provenance import materialize_fu
 from online.src.retrieval.branches.final_fusion.rrf import fuse_branch_pools
 from online.src.retrieval.branches.final_fusion.service import KisFusionSearch
 from online.src.retrieval.branches.rerankers.beit3_cosine import Beit3CosineReranker
+from online.src.retrieval.infrastructure.persistent_cache import (
+    PersistentQueryEmbeddingCache,
+)
 from online.src.retrieval.infrastructure.scoring import normalize_scores
 
 
@@ -290,6 +293,22 @@ class _TinyBeitEncoder:
         return np.ones((6, 768), dtype=np.float32), [{} for _ in range(6)]
 
 
+class _FallbackBeitEncoder(_TinyBeitEncoder):
+    cache_device = "mps"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.device = "mps"
+
+    def cache_device_for_model(self, _model_name: str) -> str:
+        return self.device
+
+    def encode(self, model_name, texts):
+        vectors, diagnostics = super().encode(model_name, texts)
+        self.device = "cpu"
+        return vectors, diagnostics
+
+
 class _FakeFusionBranch:
     def __init__(self, name: str, payload: dict[str, object], calls: list[str]) -> None:
         self.name = name
@@ -358,8 +377,7 @@ class _RecordingFusionReranker:
                         "previous_weight": 0.75,
                         "previous_score_field": "rrf_score",
                         "expression": (
-                            "beit3_weight * normalized_beit3 + "
-                            "previous_weight * normalized_rrf"
+                            "beit3_weight * normalized_beit3 + previous_weight * normalized_rrf"
                         ),
                     },
                 }
@@ -451,9 +469,17 @@ class RerankerContractTests(unittest.TestCase):
         )
         self.assertTrue(all("beit3_raw_cosine" not in item for item in result[100:]))
         self.assertTrue(all("rank_delta" not in item for item in result[100:]))
-        self.assertEqual(set(result[0]["beit3_query_scores"]), {
-            "original", "entity", "action", "context", "synonym", "keyword",
-        })
+        self.assertEqual(
+            set(result[0]["beit3_query_scores"]),
+            {
+                "original",
+                "entity",
+                "action",
+                "context",
+                "synonym",
+                "keyword",
+            },
+        )
 
     def test_constant_beit_and_rrf_scores_use_half_normalization_and_fixed_blend(self) -> None:
         point_payloads = {1: "L01_V001:4", 2: "L01_V001:8"}
@@ -530,7 +556,9 @@ class FusionProvenanceContractTests(unittest.TestCase):
         self.assertNotIn("dam_winner", materialized)
         self.assertNotIn("reranked_score", materialized)
         self.assertNotIn("rerank_score_type", materialized)
-        self.assertNotIn("query_scores", materialized.get("branch_provenance", {}).get("branch1", {}))
+        self.assertNotIn(
+            "query_scores", materialized.get("branch_provenance", {}).get("branch1", {})
+        )
         branch1_model = materialized["branch_provenance"]["branch1"]["model_provenance"]
         self.assertNotIn("query_scores", branch1_model["siglip2"])
         branch2 = materialized["branch_provenance"]["branch2"]
@@ -568,19 +596,37 @@ class FusionHealthContractTests(unittest.TestCase):
         branches = tuple({"ready": True, "production_ready": True} for _ in range(4))
         self.assertFalse(_fusion_production_ready(True, branches, {"production_ready": False}))
         self.assertTrue(_fusion_production_ready(True, branches, {"production_ready": True}))
-        self.assertFalse(_fusion_production_ready(True, (branches[0],) * 3 + ({"ready": True},), {"production_ready": True}))
+        self.assertFalse(
+            _fusion_production_ready(
+                True, (branches[0],) * 3 + ({"ready": True},), {"production_ready": True}
+            )
+        )
         self.assertFalse(_fusion_production_ready(False, branches, {"production_ready": True}))
         self.assertFalse(_fusion_production_ready(True, branches, {}))
         self.assertFalse(_fusion_production_ready(True, branches, None))
 
     def test_runtime_error_codes_preserve_fusion_phase(self) -> None:
-        self.assertEqual(_kis_runtime_error_code("KIS_FUSION_SEARCH_BUSY"), "KIS_FUSION_SEARCH_BUSY")
-        self.assertEqual(_kis_runtime_error_code("KIS_FUSION_BRANCH_FAILED: OCR unavailable"), "KIS_FUSION_BRANCH_FAILED")
-        self.assertEqual(_kis_runtime_error_code("KIS_FUSION_RRF_FAILED: duplicate UID"), "KIS_FUSION_RRF_FAILED")
-        self.assertEqual(_kis_runtime_error_code("KIS_FUSION_BEIT3_FAILED: missing point"), "KIS_FUSION_BEIT3_FAILED")
-        self.assertEqual(_kis_runtime_error_code("unexpected runtime failure"), "KIS_FUSION_EXECUTION_FAILED")
+        self.assertEqual(
+            _kis_runtime_error_code("KIS_FUSION_SEARCH_BUSY"), "KIS_FUSION_SEARCH_BUSY"
+        )
+        self.assertEqual(
+            _kis_runtime_error_code("KIS_FUSION_BRANCH_FAILED: OCR unavailable"),
+            "KIS_FUSION_BRANCH_FAILED",
+        )
+        self.assertEqual(
+            _kis_runtime_error_code("KIS_FUSION_RRF_FAILED: duplicate UID"), "KIS_FUSION_RRF_FAILED"
+        )
+        self.assertEqual(
+            _kis_runtime_error_code("KIS_FUSION_BEIT3_FAILED: missing point"),
+            "KIS_FUSION_BEIT3_FAILED",
+        )
+        self.assertEqual(
+            _kis_runtime_error_code("unexpected runtime failure"), "KIS_FUSION_EXECUTION_FAILED"
+        )
 
-    def test_cache_contract_and_malformed_resource_report_fail_closed_without_crashing(self) -> None:
+    def test_cache_contract_and_malformed_resource_report_fail_closed_without_crashing(
+        self,
+    ) -> None:
         class _HealthBranch(_FakeFusionBranch):
             def __init__(self, name: str, health: dict[str, object]) -> None:
                 super().__init__(name, _pool("branch1.result.v1", []), [])
@@ -628,7 +674,9 @@ class FusionHealthContractTests(unittest.TestCase):
                 resource_health = service.health()
             self.assertTrue(resource_health["ready"])
             self.assertFalse(resource_health["production_ready"])
-            self.assertEqual(resource_health["resource_qualification"]["error"], "resource report is malformed")
+            self.assertEqual(
+                resource_health["resource_qualification"]["error"], "resource report is malformed"
+            )
 
 
 class FusionServiceContractTests(unittest.TestCase):
@@ -695,14 +743,10 @@ class FusionServiceContractTests(unittest.TestCase):
             {"branch1": 0.40, "branch2": 0.30, "ocr": 0.15, "asr": 0.15},
         )
         expected_rrf_public = [
-            materialize_fusion_candidate(item, include_rerank_fields=False)
-            for item in expected_rrf
+            materialize_fusion_candidate(item, include_rerank_fields=False) for item in expected_rrf
         ]
         expected_tail = expected_rrf_public[100:]
-        expected_top_by_uid = {
-            str(item["frame_uid"]): item
-            for item in expected_rrf_public[:100]
-        }
+        expected_top_by_uid = {str(item["frame_uid"]): item for item in expected_rrf_public[:100]}
         response = service.execute(_query_bundle())
         self.assertEqual(calls, ["branch1", "branch2", "asr", "ocr"])
         self.assertEqual(len(reranker.selected_uids), 100)
@@ -710,22 +754,28 @@ class FusionServiceContractTests(unittest.TestCase):
         self.assertEqual(response["result_count"], 150)
         top = response["results"][:100]
         self.assertTrue(all(set(item["beit3_query_scores"]) == set(QUERY_ROLES) for item in top))
-        self.assertTrue(all(
-            item["rerank_formula"] == {
-                "beit3_weight": 0.25,
-                "previous_weight": 0.75,
-                "previous_score_field": "rrf_score",
-                "expression": "beit3_weight * normalized_beit3 + previous_weight * normalized_rrf",
-            }
-            for item in top
-        ))
-        self.assertTrue(all(
-            abs(
-                item["final_score"]
-                - (0.25 * item["beit3_normalized"] + 0.75 * item["rrf_normalized"])
-            ) <= 1e-7
-            for item in top
-        ))
+        self.assertTrue(
+            all(
+                item["rerank_formula"]
+                == {
+                    "beit3_weight": 0.25,
+                    "previous_weight": 0.75,
+                    "previous_score_field": "rrf_score",
+                    "expression": "beit3_weight * normalized_beit3 + previous_weight * normalized_rrf",
+                }
+                for item in top
+            )
+        )
+        self.assertTrue(
+            all(
+                abs(
+                    item["final_score"]
+                    - (0.25 * item["beit3_normalized"] + 0.75 * item["rrf_normalized"])
+                )
+                <= 1e-7
+                for item in top
+            )
+        )
         expected_beit_normalized = {
             str(item["frame_uid"]): {
                 "raw": item["beit3_raw_cosine"],
@@ -755,9 +805,13 @@ class FusionServiceContractTests(unittest.TestCase):
             )
             self.assertEqual(item["pre_rerank_rank"], expected_top_by_uid[uid]["pre_rerank_rank"])
             self.assertEqual(item["rrf_score"], expected_top_by_uid[uid]["rrf_score"])
-            self.assertEqual(item["branch_provenance"], expected_top_by_uid[uid]["branch_provenance"])
+            self.assertEqual(
+                item["branch_provenance"], expected_top_by_uid[uid]["branch_provenance"]
+            )
             self.assertEqual(item["beit3_best_query_role"], winning_role)
-            self.assertAlmostEqual(item["beit3_raw_cosine"], query_scores[winning_role]["cosine"], places=7)
+            self.assertAlmostEqual(
+                item["beit3_raw_cosine"], query_scores[winning_role]["cosine"], places=7
+            )
             self.assertAlmostEqual(
                 item["beit3_normalized"],
                 expected_beit_normalized[uid]["normalized_score"],
@@ -769,13 +823,24 @@ class FusionServiceContractTests(unittest.TestCase):
                 places=7,
             )
         tail = response["results"][100:]
-        self.assertEqual([item["frame_uid"] for item in tail], [f"L01_V001:{index}" for index in range(101, 151)])
-        self.assertTrue(all("beit3_raw_cosine" not in item and "rank_delta" not in item for item in tail))
-        self.assertTrue(all(item["score"] == item["final_score"] == item["rrf_score"] for item in tail))
+        self.assertEqual(
+            [item["frame_uid"] for item in tail], [f"L01_V001:{index}" for index in range(101, 151)]
+        )
+        self.assertTrue(
+            all("beit3_raw_cosine" not in item and "rank_delta" not in item for item in tail)
+        )
+        self.assertTrue(
+            all(item["score"] == item["final_score"] == item["rrf_score"] for item in tail)
+        )
         self.assertTrue(all(item["score_type"] == "weighted_rrf" for item in tail))
         self.assertEqual(tail, expected_tail)
         self.assertTrue(all("large_raw_stream_dump" not in item for item in response["results"]))
-        self.assertTrue(all("reranked_score" not in item and "rerank_score_type" not in item for item in response["results"]))
+        self.assertTrue(
+            all(
+                "reranked_score" not in item and "rerank_score_type" not in item
+                for item in response["results"]
+            )
+        )
 
     def test_empty_pools_return_without_encoder_or_reranker(self) -> None:
         pools = {
@@ -835,6 +900,50 @@ class FusionServiceContractTests(unittest.TestCase):
         self.assertEqual(reranker.selected_uids, [str(row["frame_uid"])])
         self.assertTrue(response["rerank"]["cache_hit"])
 
+    def test_final_beit_fallback_cache_uses_actual_cpu_device(self) -> None:
+        service = self._service(self._pools_with_rows([]), [])
+        encoder = _FallbackBeitEncoder()
+        service.branch2.beit_encoders = encoder
+        texts = [f"en {role}" for role in QUERY_ROLES]
+        streams = [
+            {"role": role, "language": "en", "text": text}
+            for role, text in zip(QUERY_ROLES, texts, strict=True)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            cache = PersistentQueryEmbeddingCache(Path(directory) / "cache.sqlite3")
+            try:
+                service.branch1.cache = cache
+                _vectors, _diagnostics, first_timing = service._encode_beit_queries(texts)
+                key_args = {
+                    "tokenizer_config": (
+                        "languages=en;max_tokens=64;output=language_head;normalization=l2"
+                    ),
+                    "stream_contract": streams,
+                }
+                cpu_key = cache.key(
+                    "beit3",
+                    "test-revision",
+                    texts,
+                    device="cpu",
+                    **key_args,
+                )
+                mps_key = cache.key(
+                    "beit3",
+                    "test-revision",
+                    texts,
+                    device="mps",
+                    **key_args,
+                )
+                self.assertFalse(first_timing["cache_hit"])
+                self.assertIsNotNone(cache.get(cpu_key))
+                self.assertIsNone(cache.get(mps_key))
+
+                _vectors, _diagnostics, second_timing = service._encode_beit_queries(texts)
+                self.assertTrue(second_timing["cache_hit"])
+                self.assertEqual(encoder.encode_calls, 1)
+            finally:
+                cache.close()
+
     def test_beit_vector_validation_failures_are_classified_at_fusion_boundary(self) -> None:
         row = _frame("L01_V001:4", 1)
         point_map = {str(row["frame_uid"]): 1}
@@ -850,7 +959,9 @@ class FusionServiceContractTests(unittest.TestCase):
                     [{} for _ in range(6)],
                     self._valid_beit_timing(),
                 )
-                self._install_actual_reranker(service, _RecordingQdrant({1: str(row["frame_uid"])}), point_map)
+                self._install_actual_reranker(
+                    service, _RecordingQdrant({1: str(row["frame_uid"])}), point_map
+                )
                 with self.assertRaisesRegex(RuntimeError, r"^KIS_FUSION_BEIT3_FAILED:"):
                     service.execute(_query_bundle())
 
@@ -914,7 +1025,10 @@ class FusionServiceContractTests(unittest.TestCase):
                     return values, info
                 if self.mode == "extra_query_role":
                     values[0]["beit3_query_scores"]["unexpected"] = {
-                        "cosine": 0.2, "rank": 1, "role": "unexpected", "language": "en",
+                        "cosine": 0.2,
+                        "rank": 1,
+                        "role": "unexpected",
+                        "language": "en",
                     }
                     return values, info
                 if self.mode == "mismatched_query_role":
@@ -965,7 +1079,8 @@ class FusionServiceContractTests(unittest.TestCase):
                     return values, info
                 if self.mode == "swapped_pre_ranks":
                     values[0]["pre_rerank_rank"], values[1]["pre_rerank_rank"] = (
-                        values[1]["pre_rerank_rank"], values[0]["pre_rerank_rank"],
+                        values[1]["pre_rerank_rank"],
+                        values[0]["pre_rerank_rank"],
                     )
                     for rank, item in enumerate(values[:top_k], 1):
                         item["rank_delta"] = item["pre_rerank_rank"] - rank
@@ -1000,16 +1115,14 @@ class FusionServiceContractTests(unittest.TestCase):
                 if self.mode == "fake_beit_normalization":
                     values[0]["beit3_normalized"] = 0.5
                     values[0]["final_score"] = (
-                        0.25 * values[0]["beit3_normalized"]
-                        + 0.75 * values[0]["rrf_normalized"]
+                        0.25 * values[0]["beit3_normalized"] + 0.75 * values[0]["rrf_normalized"]
                     )
                     values[0]["score"] = values[0]["final_score"]
                     return values, info
                 if self.mode == "fake_rrf_normalization":
                     values[0]["rrf_normalized"] = 0.5
                     values[0]["final_score"] = (
-                        0.25 * values[0]["beit3_normalized"]
-                        + 0.75 * values[0]["rrf_normalized"]
+                        0.25 * values[0]["beit3_normalized"] + 0.75 * values[0]["rrf_normalized"]
                     )
                     values[0]["score"] = values[0]["final_score"]
                     return values, info
@@ -1039,18 +1152,47 @@ class FusionServiceContractTests(unittest.TestCase):
                 raise AssertionError(f"unexpected mode {self.mode}")
 
         for mode in (
-            "wrong_type", "wrong_info", "wrong_count", "duplicate_uid",
-            "tail_order", "tail_promoted", "missing_raw_cosine",
-            "nonfinite_normalized", "out_of_range_normalized", "missing_query_role",
-            "extra_query_role", "mismatched_query_role", "non_english_query",
-            "nonfinite_query_cosine", "invalid_query_rank", "invalid_best_role",
-            "non_english_best_language", "invalid_score_type", "invalid_rank_delta",
-            "invalid_final_rank", "invalid_formula", "invalid_weight", "invalid_final_score",
-            "score_mismatch", "duplicate_pre_rank", "missing_pre_rank", "swapped_pre_ranks",
-            "top_rrf_score", "top_branch_ranks", "top_contributions", "top_provenance",
-            "in_place_tail_mutation", "raw_not_query_max", "tie_wrong_best_role",
-            "fake_beit_normalization", "fake_rrf_normalization", "unsorted_final_scores",
-            "tail_rrf_score", "tail_branch_ranks", "tail_contributions", "tail_provenance",
+            "wrong_type",
+            "wrong_info",
+            "wrong_count",
+            "duplicate_uid",
+            "tail_order",
+            "tail_promoted",
+            "missing_raw_cosine",
+            "nonfinite_normalized",
+            "out_of_range_normalized",
+            "missing_query_role",
+            "extra_query_role",
+            "mismatched_query_role",
+            "non_english_query",
+            "nonfinite_query_cosine",
+            "invalid_query_rank",
+            "invalid_best_role",
+            "non_english_best_language",
+            "invalid_score_type",
+            "invalid_rank_delta",
+            "invalid_final_rank",
+            "invalid_formula",
+            "invalid_weight",
+            "invalid_final_score",
+            "score_mismatch",
+            "duplicate_pre_rank",
+            "missing_pre_rank",
+            "swapped_pre_ranks",
+            "top_rrf_score",
+            "top_branch_ranks",
+            "top_contributions",
+            "top_provenance",
+            "in_place_tail_mutation",
+            "raw_not_query_max",
+            "tie_wrong_best_role",
+            "fake_beit_normalization",
+            "fake_rrf_normalization",
+            "unsorted_final_scores",
+            "tail_rrf_score",
+            "tail_branch_ranks",
+            "tail_contributions",
+            "tail_provenance",
             "tail_beit_field",
         ):
             with self.subTest(mode=mode):
@@ -1082,6 +1224,50 @@ class FusionServiceContractTests(unittest.TestCase):
                 service.execute(_query_bundle())
         finally:
             service.search_lock.release()
+
+    def test_ordered_batch_reuses_single_lock_and_runs_every_full_kis_event(self) -> None:
+        pools = {
+            "branch1": _pool("branch1.result.v1", []),
+            "branch2": _pool("branch2.result.v1", []),
+            "ocr": _pool("branch3.ocr.result.v1", []),
+            "asr": _pool("branch3.asr.result.v1", []),
+        }
+        calls: list[str] = []
+        service = self._service(pools, calls)
+        health_checks = 0
+
+        def ready_health() -> dict[str, bool]:
+            nonlocal health_checks
+            health_checks += 1
+            return {"ready": True}
+
+        service.health = ready_health  # type: ignore[method-assign]
+        responses = service.execute_batch([_query_bundle(), _query_bundle()])
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(
+            calls,
+            ["branch1", "branch2", "asr", "ocr"] * 2,
+        )
+        self.assertEqual(health_checks, 1)
+        self.assertTrue(service.search_lock.acquire(blocking=False))
+        service.search_lock.release()
+
+    def test_ordered_batch_validates_all_events_before_acquiring_the_lock(self) -> None:
+        pools = {
+            "branch1": _pool("branch1.result.v1", []),
+            "branch2": _pool("branch2.result.v1", []),
+            "ocr": _pool("branch3.ocr.result.v1", []),
+            "asr": _pool("branch3.asr.result.v1", []),
+        }
+        calls: list[str] = []
+        service = self._service(pools, calls)
+        invalid = {**_query_bundle(), "queries": []}
+        with self.assertRaises(ValueError):
+            service.execute_batch([_query_bundle(), invalid])
+        self.assertEqual(calls, [])
+        self.assertTrue(service.search_lock.acquire(blocking=False))
+        service.search_lock.release()
 
     def test_unready_aggregate_stops_before_any_branch_execution(self) -> None:
         pools = {

@@ -12,7 +12,6 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-
 UNILM_REVISION = "ca43e4cd19445a536f133bf2bc25b573b2f0c7c5"
 UNILM_URL = f"https://github.com/microsoft/unilm/archive/{UNILM_REVISION}.zip"
 CHECKPOINT_URL = (
@@ -114,10 +113,7 @@ def main() -> int:
         "unilm_revision": UNILM_REVISION,
         "sha256": observed,
         "urls": downloads,
-        "assets": {
-            name: asset_record(root / name, digest)
-            for name, digest in observed.items()
-        },
+        "assets": {name: asset_record(root / name, digest) for name, digest in observed.items()},
     }
     manifest_path = root / "manifest.json"
     staging = manifest_path.with_suffix(".staging.json")

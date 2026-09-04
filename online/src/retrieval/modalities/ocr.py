@@ -17,9 +17,11 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
 from ..infrastructure.qdrant import base_frame
 from .lexical import (
@@ -32,7 +34,6 @@ from .lexical import (
     query_tokens,
     sigmoid_zscore,
 )
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -312,12 +313,8 @@ def _manifest_build_identity_valid(manifest: dict[str, Any]) -> bool:
             return False
         source_fingerprint_value = str(manifest.get("source_fingerprint") or "")
         canonical_fingerprint_value = str(manifest.get("canonical_fingerprint") or "")
-        fts_content_fingerprint_value = str(
-            manifest.get("fts_content_fingerprint") or ""
-        )
-        lexical_contract_version = str(
-            manifest.get("lexical_contract_version") or ""
-        )
+        fts_content_fingerprint_value = str(manifest.get("fts_content_fingerprint") or "")
+        lexical_contract_version = str(manifest.get("lexical_contract_version") or "")
         frame_count = int(counts.get("frame_count", manifest.get("frame_count", -1)))
         fts_frame_count = int(counts.get("fts_frame_count", -1))
         mapped_frame_count = int(counts.get("mapped_frame_count", -1))
@@ -396,8 +393,7 @@ def _manifest_build_identity_valid(manifest: dict[str, Any]) -> bool:
             and canonical_fingerprint_value
             and len(fts_content_fingerprint_value) == 64
             and all(
-                character in "0123456789abcdefABCDEF"
-                for character in fts_content_fingerprint_value
+                character in "0123456789abcdefABCDEF" for character in fts_content_fingerprint_value
             )
             and lexical_contract_version == OCR_LEXICAL_CONTRACT_VERSION
             and mapping_strategy == OCR_MAPPING_STRATEGY
@@ -442,7 +438,9 @@ def _manifest_build_identity_valid(manifest: dict[str, Any]) -> bool:
         return False
 
 
-def _load_canonical_frame_index(data_root: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def _load_canonical_frame_index(
+    data_root: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Load and validate canonical frame identity for preparation only."""
 
     path = data_root / OCR_CANONICAL_RELATIVE_PATH
@@ -518,7 +516,9 @@ def _parse_ocr_row(item: dict[str, Any], path: Path, line_number: int) -> dict[s
     video_id = str(item.get("video_id") or "").upper().replace("-", "_").strip()
     frame_uid = str(item.get("frame_uid") or "").strip()
     frame_idx = _strict_int(item.get("frame_idx", -1), "frame_idx", context=f"{path}:{line_number}")
-    keyframe_n = _strict_int(item.get("keyframe_n", 0), "keyframe_n", context=f"{path}:{line_number}")
+    keyframe_n = _strict_int(
+        item.get("keyframe_n", 0), "keyframe_n", context=f"{path}:{line_number}"
+    )
     pts_time_s = float(item.get("pts_time_s", 0.0))
     if not video_id or frame_uid != f"{video_id}:{frame_idx}":
         raise ValueError(f"{path}:{line_number}: invalid video/frame identity")
@@ -585,9 +585,7 @@ def validate_ocr_sources(transcripts_dir: Path) -> dict[str, Any]:
     if total != OCR_EXPECTED_FRAMES:
         raise ValueError(f"Expected {OCR_EXPECTED_FRAMES} OCR rows, found {total}")
     if len(video_ids) != OCR_EXPECTED_SOURCE_FILES:
-        raise ValueError(
-            f"Expected {OCR_EXPECTED_SOURCE_FILES} OCR videos, found {len(video_ids)}"
-        )
+        raise ValueError(f"Expected {OCR_EXPECTED_SOURCE_FILES} OCR videos, found {len(video_ids)}")
     return {
         "source_files": source_files,
         "source_file_count": len(source_files),
@@ -632,15 +630,15 @@ def build_ocr_index(
     transcripts_dir = transcripts_dir.resolve()
     data_root = (data_root or transcripts_dir.parent).resolve()
     database_path = database_path.resolve()
-    manifest_path = (manifest_path or database_path.with_name("branch3_ocr_manifest.json")).resolve()
+    manifest_path = (
+        manifest_path or database_path.with_name("branch3_ocr_manifest.json")
+    ).resolve()
     manifest_staging = manifest_path.with_name(f".{manifest_path.name}.staging")
     source_facts = validate_ocr_sources(transcripts_dir)
     canonical_frames, canonical_record = _load_canonical_frame_index(data_root)
     canonical_fingerprint = str(canonical_record["sha256"])
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    staging_path = database_path.with_name(
-        f".{database_path.name}.staging.{os.getpid()}"
-    )
+    staging_path = database_path.with_name(f".{database_path.name}.staging.{os.getpid()}")
     try:
         staging_path.unlink(missing_ok=True)
         manifest_staging.unlink(missing_ok=True)
@@ -649,14 +647,10 @@ def build_ocr_index(
     try:
         connection = sqlite3.connect(staging_path)
     except Exception:
-        try:
+        with suppress(OSError):
             staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
+        with suppress(OSError):
             manifest_staging.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     connection.row_factory = sqlite3.Row
     try:
@@ -741,9 +735,7 @@ def build_ocr_index(
                 connection.executemany(insert_sql, rows)
                 inserted += len(rows)
             if inserted != OCR_EXPECTED_FRAMES or len(observed_uids) != OCR_EXPECTED_FRAMES:
-                raise ValueError(
-                    f"Expected {OCR_EXPECTED_FRAMES} OCR rows, found {inserted}"
-                )
+                raise ValueError(f"Expected {OCR_EXPECTED_FRAMES} OCR rows, found {inserted}")
             if set(canonical_frames) != observed_uids:
                 raise ValueError("OCR/canonical frame coverage mismatch")
             connection.execute(
@@ -752,10 +744,7 @@ def build_ocr_index(
             )
             fts_state = _fts_content_fingerprint_for_connection(connection)
             if fts_state.get("verified") is not True:
-                raise ValueError(
-                    "OCR staging FTS content validation failed: "
-                    f"{fts_state}"
-                )
+                raise ValueError(f"OCR staging FTS content validation failed: {fts_state}")
             fts_content_fingerprint = str(fts_state["fingerprint"])
             build_id = build_id_for(
                 source_fingerprint_value=source_facts["source_fingerprint"],
@@ -840,14 +829,10 @@ def build_ocr_index(
         # A failed staging build must not leave a database that a later run
         # could accidentally publish.  Close before unlinking so this is safe
         # on Windows as well as POSIX.
-        try:
+        with suppress(sqlite3.Error):
             connection.close()
-        except sqlite3.Error:
-            pass
-        try:
+        with suppress(OSError):
             staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     finally:
         connection.close()
@@ -870,20 +855,15 @@ def build_ocr_index(
         for source_record in source_facts["source_files"]:
             source_path = data_root / str(source_record.get("path") or "")
             source_stat = source_path.stat()
-            if (
-                int(source_record.get("size", -1)) != int(source_stat.st_size)
-                or int(source_record.get("mtime_ns", -1)) != int(source_stat.st_mtime_ns)
-            ):
+            if int(source_record.get("size", -1)) != int(source_stat.st_size) or int(
+                source_record.get("mtime_ns", -1)
+            ) != int(source_stat.st_mtime_ns):
                 raise RuntimeError(f"OCR source changed during preparation: {source_path}")
     except Exception:
-        try:
+        with suppress(OSError):
             staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
+        with suppress(OSError):
             manifest_staging.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
     # Prepare the manifest before replacing the live database.  The record is
@@ -895,10 +875,8 @@ def build_ocr_index(
     try:
         database_record = _artifact_record(staging_path, relative_to=database_path.parent)
     except Exception:
-        try:
+        with suppress(OSError):
             staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     database_record["path"] = database_path.name
     manifest = {
@@ -953,14 +931,10 @@ def build_ocr_index(
         _write_json_file(manifest_staging, manifest)
         os.replace(manifest_staging, manifest_path)
     except Exception:
-        try:
+        with suppress(OSError):
             manifest_staging.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
+        with suppress(OSError):
             staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     return manifest
 
@@ -987,8 +961,7 @@ class OcrFtsIndex:
             manifest_path or self.database_path.with_name("branch3_ocr_manifest.json")
         ).resolve()
         self.canonical_metadata_path = (
-            canonical_metadata_path
-            or self.data_root / OCR_CANONICAL_RELATIVE_PATH
+            canonical_metadata_path or self.data_root / OCR_CANONICAL_RELATIVE_PATH
         ).resolve()
         self.metadata = metadata
         self._lock = threading.RLock()
@@ -1011,13 +984,16 @@ class OcrFtsIndex:
         self._validated_canonical_state: dict[str, Any] | None = None
         self._health_cache: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
         self._source_inventory_cache: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
-        self._source_audit_cache: tuple[
-            float,
-            tuple[Any, ...],
-            bool,
-            bool,
-            list[dict[str, Any]],
-        ] | None = None
+        self._source_audit_cache: (
+            tuple[
+                float,
+                tuple[Any, ...],
+                bool,
+                bool,
+                list[dict[str, Any]],
+            ]
+            | None
+        ) = None
         self._artifact_hash_cache: dict[str, tuple[tuple[int, int, int], str]] = {}
 
     def close(self) -> None:
@@ -1041,17 +1017,13 @@ class OcrFtsIndex:
 
     def _close_connection_locked(self) -> None:
         if self._connection is not None:
-            try:
+            with suppress(sqlite3.Error):
                 self._connection.close()
-            except sqlite3.Error:
-                pass
         self._connection = None
         self._connection_path = None
         if self._runtime_snapshot_path is not None:
-            try:
+            with suppress(OSError):
                 self._runtime_snapshot_path.unlink(missing_ok=True)
-            except OSError:
-                pass
         self._runtime_snapshot_path = None
         self._opened_file_identity = None
         self._opened_build_id = None
@@ -1130,12 +1102,8 @@ class OcrFtsIndex:
                         continue
                     canonical_item = json.loads(line)
                     if not isinstance(canonical_item, dict):
-                        raise ValueError(
-                            f"canonical metadata row {line_number} must be an object"
-                        )
-                    video_id = str(canonical_item.get("video_id") or "").upper().replace(
-                        "-", "_"
-                    )
+                        raise ValueError(f"canonical metadata row {line_number} must be an object")
+                    video_id = str(canonical_item.get("video_id") or "").upper().replace("-", "_")
                     frame_idx = _strict_int(
                         canonical_item.get("frame_idx", -1),
                         "frame_idx",
@@ -1172,9 +1140,7 @@ class OcrFtsIndex:
                         or not math.isfinite(fps)
                         or fps <= 0
                     ):
-                        raise ValueError(
-                            f"invalid canonical identity at row {line_number}"
-                        )
+                        raise ValueError(f"invalid canonical identity at row {line_number}")
                     canonical_rows += 1
                     expected = (
                         frame_uid,
@@ -1237,7 +1203,14 @@ class OcrFtsIndex:
             if not result["ready"]:
                 result["error"] = "canonical metadata and OCR database identity mismatch"
             return result
-        except (OSError, json.JSONDecodeError, sqlite3.Error, TypeError, ValueError, OverflowError) as error:
+        except (
+            OSError,
+            json.JSONDecodeError,
+            sqlite3.Error,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as error:
             result["error"] = str(error)
             result["mismatches"] = mismatch_samples if "mismatch_samples" in locals() else []
             result["mismatch_count"] = max(
@@ -1245,7 +1218,6 @@ class OcrFtsIndex:
                 1,
             )
             return result
-
 
     def _refresh_connection_locked(self, manifest: dict[str, Any]) -> dict[str, Any]:
         file_identity = _file_identity(self.database_path)
@@ -1331,9 +1303,14 @@ class OcrFtsIndex:
             user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if meta["schema_version"] != OCR_INDEX_SCHEMA_VERSION:
                 raise ValueError("OCR SQLite schema version is unsupported")
-            if user_version != OCR_SQLITE_USER_VERSION or meta["sqlite_user_version"] != OCR_SQLITE_USER_VERSION:
+            if (
+                user_version != OCR_SQLITE_USER_VERSION
+                or meta["sqlite_user_version"] != OCR_SQLITE_USER_VERSION
+            ):
                 raise ValueError("OCR SQLite user version is unsupported")
-            if not meta["build_id"] or (expected_build_id and meta["build_id"] != expected_build_id):
+            if not meta["build_id"] or (
+                expected_build_id and meta["build_id"] != expected_build_id
+            ):
                 raise ValueError("OCR SQLite build_id does not match manifest")
             if meta["source_fingerprint"] != str(manifest.get("source_fingerprint") or ""):
                 raise ValueError("OCR SQLite source fingerprint does not match manifest")
@@ -1372,16 +1349,12 @@ class OcrFtsIndex:
             self._validated_database_state = dict(database_state)
             self._validated_canonical_state = dict(canonical_state)
         except (OSError, sqlite3.Error, ValueError, TypeError) as error:
-            try:
-                if connection is not None:
+            if connection is not None:
+                with suppress(sqlite3.Error):
                     connection.close()
-            except sqlite3.Error:
-                pass
             if snapshot_path is not None:
-                try:
+                with suppress(OSError):
                     snapshot_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
             self._close_connection_locked()
             self._connection_error = str(error)
         return {
@@ -1486,20 +1459,30 @@ class OcrFtsIndex:
                     "WHERE f.id IS NULL"
                 ).fetchone()[0]
             )
-            meta_rows = int(
-                self._connection.execute("SELECT COUNT(*) FROM ocr_meta").fetchone()[0]
-            ) if "ocr_meta" in tables else 0
+            meta_rows = (
+                int(self._connection.execute("SELECT COUNT(*) FROM ocr_meta").fetchone()[0])
+                if "ocr_meta" in tables
+                else 0
+            )
             user_version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
             meta = self._read_meta(self._connection) if "ocr_meta" in tables else {}
             expected_columns = {
-                "id", "frame_uid", "point_id", "video_id", "keyframe_n", "frame_idx",
-                "pts_time_s", "fps", "image_relpath", "full_text", "full_text_search",
+                "id",
+                "frame_uid",
+                "point_id",
+                "video_id",
+                "keyframe_n",
+                "frame_idx",
+                "pts_time_s",
+                "fps",
+                "image_relpath",
+                "full_text",
+                "full_text_search",
             }
             integrity = str(self._connection.execute("PRAGMA integrity_check").fetchone()[0])
             ready = bool(
                 integrity == "ok"
-                and
-                required.issubset(tables)
+                and required.issubset(tables)
                 and expected_columns.issubset(columns)
                 and "full_text_search" in fts_columns
                 and meta_rows == 1
@@ -1602,20 +1585,22 @@ class OcrFtsIndex:
             path = self._resolve_under(root, path_value)
             result["resolved_path"] = str(path)
             stat = path.stat()
-            stat_matches = (
-                int(record.get("size", -1)) == int(stat.st_size)
-                and int(record.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
-            )
+            stat_matches = int(record.get("size", -1)) == int(stat.st_size) and int(
+                record.get("mtime_ns", -1)
+            ) == int(stat.st_mtime_ns)
             result["stat_matches"] = stat_matches
             expected_sha = str(record.get("sha256") or "")
             if len(expected_sha) != 64 or any(
-                character not in "0123456789abcdefABCDEF"
-                for character in expected_sha
+                character not in "0123456789abcdefABCDEF" for character in expected_sha
             ):
                 result["error"] = "sha256 is missing or malformed"
                 return result
             cache_key = str(path)
-            cache_identity = (int(stat.st_size), int(stat.st_mtime_ns), int(getattr(stat, "st_ino", 0)))
+            cache_identity = (
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+                int(getattr(stat, "st_ino", 0)),
+            )
             cached = self._artifact_hash_cache.get(cache_key)
             hash_required = bool(verify_hash or not stat_matches)
             if cached is not None and cached[0] == cache_identity:
@@ -1683,9 +1668,7 @@ class OcrFtsIndex:
         manifest_identity = _file_identity(self.manifest_path)
         directory_identity = _file_identity(self.transcripts_dir)
         manifest_record_paths = tuple(
-            str(record.get("path") or "")
-            if isinstance(record, dict)
-            else "<invalid>"
+            str(record.get("path") or "") if isinstance(record, dict) else "<invalid>"
             for record in records
         )
         cache_key = (manifest_identity, directory_identity, manifest_record_paths)
@@ -1732,8 +1715,7 @@ class OcrFtsIndex:
         except OSError:
             actual_paths = set()
         directory_paths_match = (
-            len(actual_paths) == OCR_EXPECTED_SOURCE_FILES
-            and actual_paths == manifest_paths
+            len(actual_paths) == OCR_EXPECTED_SOURCE_FILES and actual_paths == manifest_paths
         )
         payload = {
             "records": stat_records,
@@ -1859,7 +1841,9 @@ class OcrFtsIndex:
             return False
         state = self._database_state_locked()
         meta = state.get("meta") or {}
-        canonical_identity = state.get("canonical_identity") or self._validated_canonical_state or {}
+        canonical_identity = (
+            state.get("canonical_identity") or self._validated_canonical_state or {}
+        )
         database = manifest.get("database") or {}
         database_path_matches = str(database.get("path") or "") == self.database_path.name
         database_stat_matches = False
@@ -1876,10 +1860,9 @@ class OcrFtsIndex:
         canonical_stat_matches = False
         try:
             canonical_stat = self.canonical_metadata_path.stat()
-            canonical_stat_matches = (
-                int(canonical.get("size", -1)) == int(canonical_stat.st_size)
-                and int(canonical.get("mtime_ns", -1)) == int(canonical_stat.st_mtime_ns)
-            )
+            canonical_stat_matches = int(canonical.get("size", -1)) == int(
+                canonical_stat.st_size
+            ) and int(canonical.get("mtime_ns", -1)) == int(canonical_stat.st_mtime_ns)
         except (OSError, TypeError, ValueError):
             pass
         database_diag = self._artifact_status_locked(
@@ -1907,10 +1890,8 @@ class OcrFtsIndex:
             and meta.get("build_id") == manifest.get("build_id")
             and meta.get("source_fingerprint") == manifest.get("source_fingerprint")
             and meta.get("canonical_fingerprint") == manifest.get("canonical_fingerprint")
-            and meta.get("fts_content_fingerprint")
-            == manifest.get("fts_content_fingerprint")
-            and meta.get("lexical_contract_version")
-            == manifest.get("lexical_contract_version")
+            and meta.get("fts_content_fingerprint") == manifest.get("fts_content_fingerprint")
+            and meta.get("lexical_contract_version") == manifest.get("lexical_contract_version")
         )
 
     def assert_ready(self) -> None:
@@ -1938,8 +1919,7 @@ class OcrFtsIndex:
                 # dedicated health route remains a bounded diagnostic.
                 inventory = (
                     self._source_inventory_locked(manifest)
-                    if audit_sources
-                    and manifest.get("schema_version") == OCR_INDEX_SCHEMA_VERSION
+                    if audit_sources and manifest.get("schema_version") == OCR_INDEX_SCHEMA_VERSION
                     else None
                 )
                 manifest_stat = _file_identity(self.manifest_path)
@@ -1971,12 +1951,8 @@ class OcrFtsIndex:
                                 if self._source_audit_cache is not None
                                 else cached_at
                             )
-                            payload["source_validation_age_s"] = round(
-                                started - audit_cached_at, 3
-                            )
-                            payload["source_audit_age_s"] = round(
-                                started - audit_cached_at, 3
-                            )
+                            payload["source_validation_age_s"] = round(started - audit_cached_at, 3)
+                            payload["source_audit_age_s"] = round(started - audit_cached_at, 3)
                         payload["connection_reopened"] = False
                         return payload
 
@@ -2104,13 +2080,9 @@ class OcrFtsIndex:
                         else len(manifest.get("source_files") or [])
                     ),
                     "source_verified": (
-                        len(source_diags) - len(failed_source_diags)
-                        if audit_sources
-                        else None
+                        len(source_diags) - len(failed_source_diags) if audit_sources else None
                     ),
-                    "source_failed": (
-                        len(failed_source_diags) if audit_sources else None
-                    ),
+                    "source_failed": (len(failed_source_diags) if audit_sources else None),
                     "hash_recomputed": sum(
                         1
                         for item in (database_diag, canonical_diag, *source_diags)
@@ -2155,17 +2127,13 @@ class OcrFtsIndex:
                     "source_stat_matches_manifest": source_stat_matches,
                     "source_fingerprint_matches_manifest": source_fingerprint_matches,
                     "source_directory_file_count": int(
-                        inventory.get("directory_file_count", 0)
-                        if inventory is not None
-                        else 0
+                        inventory.get("directory_file_count", 0) if inventory is not None else 0
                     ),
                     "source_file_count_matches_manifest": bool(
                         audit_sources
-                        and len(manifest.get("source_files") or [])
-                        == OCR_EXPECTED_SOURCE_FILES
+                        and len(manifest.get("source_files") or []) == OCR_EXPECTED_SOURCE_FILES
                         and inventory is not None
-                        and inventory.get("directory_file_count", 0)
-                        == OCR_EXPECTED_SOURCE_FILES
+                        and inventory.get("directory_file_count", 0) == OCR_EXPECTED_SOURCE_FILES
                     ),
                     "source_directory_matches_manifest": bool(
                         audit_sources
@@ -2173,18 +2141,13 @@ class OcrFtsIndex:
                         and inventory.get("directory_paths_match") is True
                     ),
                     "canonical_fingerprint_matches": canonical_fingerprint_matches,
-                    "canonical_identity_matches": bool(
-                        canonical_identity.get("ready") is True
-                    ),
-                    "canonical_identity_rows": int(
-                        canonical_identity.get("canonical_rows", 0)
-                    ),
+                    "canonical_identity_matches": bool(canonical_identity.get("ready") is True),
+                    "canonical_identity_rows": int(canonical_identity.get("canonical_rows", 0)),
                     "canonical_identity_mismatch_count": int(
                         canonical_identity.get("mismatch_count", 0)
                     ),
                     "build_id_matches": bool(
-                        build_identity_valid
-                        and meta.get("build_id") == manifest.get("build_id")
+                        build_identity_valid and meta.get("build_id") == manifest.get("build_id")
                     ),
                     "internal_metadata_matches": database_matches,
                     "connection_generation": connection_state.get("connection_generation", 0),
@@ -2366,10 +2329,13 @@ class OcrFtsIndex:
             role, language = _stream_identity(stream)
             rows, tokens = self._query_stream_locked(query, per_stream_top_k)
             stream_counts[stream] = len(rows)
-            max_relevance = max(
-                (max(0.0, -float(row["bm25_score"])) for row in rows),
-                default=0.0,
-            ) or 1.0
+            max_relevance = (
+                max(
+                    (max(0.0, -float(row["bm25_score"])) for row in rows),
+                    default=0.0,
+                )
+                or 1.0
+            )
             ordered_tokens = ordered_lexical_tokens(query)
             query_bigrams = _ordered_lexical_bigrams(query)
             search_token_set = set(tokens)
@@ -2484,7 +2450,10 @@ class OcrFtsIndex:
                 "stream_counts": stream_counts,
                 "timing": {"total_ms": round((time.perf_counter() - started) * 1000.0, 2)},
             }
-        values = [max(float(value) for value in item["query_scores"].values()) for item in frame_hits.values()]
+        values = [
+            max(float(value) for value in item["query_scores"].values())
+            for item in frame_hits.values()
+        ]
         normalized = sigmoid_zscore(values)
         ranked: list[dict[str, Any]] = []
         for index, candidate in enumerate(frame_hits.values()):
@@ -2538,8 +2507,7 @@ class OcrFtsIndex:
                         for stream in streams
                     },
                     "ocr_stream_provenance": {
-                        stream: candidate["stream_provenance"].get(stream)
-                        for stream in streams
+                        stream: candidate["stream_provenance"].get(stream) for stream in streams
                     },
                     "matched_keywords": winner["matched_terms"],
                     "matched_terms": winner["matched_terms"],
@@ -2591,9 +2559,7 @@ class OcrFtsIndex:
                 # Manifest/database publication and readiness failures are
                 # dependency failures, not malformed query contracts.  Keep
                 # them on the 503 path instead of misreporting them as 422.
-                raise RuntimeError(
-                    f"OCR index readiness validation failed: {error}"
-                ) from error
+                raise RuntimeError(f"OCR index readiness validation failed: {error}") from error
             if not ready:
                 raise RuntimeError("OCR index is stale, incomplete, or not prepared")
             if self._connection is None:
@@ -2661,6 +2627,7 @@ class OcrFtsIndex:
             _allow_single=True,
         )
         return payload["results"]
+
 
 def _database_state_for_connection(connection: sqlite3.Connection) -> dict[str, Any]:
     """Inspect a connection without publishing it to a runtime index.

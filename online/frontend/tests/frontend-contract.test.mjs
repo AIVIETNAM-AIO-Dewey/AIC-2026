@@ -58,6 +58,33 @@ test("KIS fusion keeps four positive voters and the fixed final gates", () => {
   assert.doesNotMatch(source, /legacyFusionInspectorEvidence/);
 });
 
+test("KIS owns ordered full-fusion events while in-video search stays visual-only", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(html, /id="kis-trake-sequence-panel"/);
+  assert.match(html, /id="kis-pinned-query-text"[^>]*textarea|<textarea id="kis-pinned-query-text"/);
+  assert.match(html, /id="btn-prepare-kis-query"/);
+  assert.match(html, /id="kis-query-plan-status"/);
+  assert.match(source, /fetch\("\/api\/query\/kis\/plan"/);
+  assert.match(source, /generatedBundleSignature/);
+  assert.match(source, /replacesManualWork/);
+  assert.match(html, /Every event runs through Branch 1, Branch 2, OCR and ASR/);
+  assert.match(html, /Each event inherits only the shared context/);
+  assert.match(source, /const endpoint = isKisOrdered[\s\S]*?\/api\/search\/fusion\/kis\/temporal/);
+  assert.match(source, /fetch\(endpoint/);
+  assert.match(source, /state\.taskType,[\s\S]*?query_bundle: queryBundle,[\s\S]*?events/);
+  assert.match(source, /\/search\/visual-fusion/);
+  assert.match(source, /"visual_fusion"/);
+  assert.match(source, /kisTemporalIntersection: null/);
+  assert.match(source, /state\.kisTemporalIntersection = intersectionState/);
+  assert.match(source, /sequenceIsComplete/);
+  assert.match(html, /Visual trio search/);
+  assert.doesNotMatch(
+    source.match(/async function searchVideoWithText[\s\S]*?\n}\n/)?.[0] || "",
+    /\/search\/siglip/,
+  );
+});
+
 test("branch workspaces keep full pools but render only the first 150", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
@@ -264,11 +291,32 @@ test("video controller reports time during polling, seeking, and pause sampling"
   assert.match(source, /seekTo\(seconds\)[\s\S]*?updatePlaybackUi\(\)/);
 });
 
-test("async workspaces and edited CSV review guard against stale responses", () => {
+test("async workspaces, exact source-frame selection, and edited CSV review guard stale responses", () => {
   const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   assert.match(source, /function selectImageQueryFile[\s\S]*?imageSearchRequestId \+= 1/);
   assert.match(source, /async function loadStandaloneVideo[\s\S]*?standaloneScopedRequestId \+= 1/);
-  assert.match(source, /currentSnapshot\.contextKey !== editContext \|\| currentSnapshot\.mode !== editMode/);
+  assert.match(source, /currentSnapshot\.contextKey !== startSnapshot\.contextKey[\s\S]*?currentSnapshot\.mode !== startSnapshot\.mode/);
+  assert.match(source, /\/api\/frame\/\$\{encodeURIComponent\(videoId\)\}/);
+  assert.match(source, /\/api\/video\/\$\{encodeURIComponent\(videoId\)\}\/source-frame/);
+  assert.match(source, /async function selectWatchSourceFrame/);
+  assert.match(source, /standaloneVideoController\.seekTo\(Number\(sourceFrame\.pts_time_s\)\)/);
+  assert.match(source, /state\.watch\.selected/);
+  assert.doesNotMatch(source, /addFrameToSubmission\(state\.watch\.nearest\.frame/);
   assert.match(source, /const isCurrentReview = \(\) =>[\s\S]*?reviewGeneration === csvReviewGeneration[\s\S]*?reviewContext === submissionStore\.getSnapshot\(\)\.contextKey/);
   assert.match(source, /ensureClientBackfill\(request\.manual_selections, request\.candidate_reservoir, 100, contextKey\)/);
+});
+
+test("KIS is the default workspace and the renovated controls are present", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(html, /data-workspace="kis_fusion" aria-selected="true"/);
+  assert.match(html, /id="kis-sticky-query"/);
+  assert.match(html, /id="btn-close-submission-rail"/);
+  assert.match(html, /id="submission-related-note"/);
+  assert.match(html, /id="btn-add-filmstrip-selection"/);
+  assert.match(html, /id="watch-exact-frame-input"/);
+  assert.match(source, /setWorkspace\("kis_fusion"\)/);
+  assert.match(source, /fetch\("\/api\/submission\/related-frames"/);
+  assert.match(source, /submissionStore\.addFrames\(canonicalFrames/);
+  assert.doesNotMatch(html, /class="submission-video-edit"|class="submission-frame-edit"/);
 });

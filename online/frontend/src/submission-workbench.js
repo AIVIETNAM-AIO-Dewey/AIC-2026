@@ -1,6 +1,8 @@
-const STORAGE_VERSION = 3;
-const STORAGE_KEY = "aic2026.submission-workbench.v3";
+const STORAGE_VERSION = 4;
+const STORAGE_KEY = "aic2026.submission-workbench.v4";
+const LEGACY_STORAGE_KEY = "aic2026.submission-workbench.v3";
 const TASK_MODES = ["KIS", "VQA", "TRAKE"];
+const MAX_SUBMISSION_FRAMES = 100;
 export const MAX_VQA_ANSWER_CHARACTERS = 100;
 
 export function normalizeVqaAnswer(value) {
@@ -19,6 +21,8 @@ function emptyDraft(mode) {
   return {
     answer: "",
     items: [],
+    suggestedItems: [],
+    relatedSeed: null,
     queryId: "1",
   };
 }
@@ -43,6 +47,7 @@ function emptyContext() {
 }
 
 function finiteNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
@@ -66,13 +71,47 @@ export function normalizeSubmissionFrame(item, context = {}) {
   const keyframeN = finiteNumber(item.keyframe_n);
   const ptsTimeS = finiteNumber(item.pts_time_s);
   const score = finiteNumber(item.score);
+  const pointId = finiteNumber(item.point_id ?? item.global_idx);
+  const fps = finiteNumber(item.fps);
+  const maxFrameIdx = finiteNumber(item.max_frame_idx);
+  const previewFrameIdx = finiteNumber(item.preview_frame_idx);
+  const previewKeyframeN = finiteNumber(item.preview_keyframe_n);
+  const previewPtsTimeS = finiteNumber(item.preview_pts_time_s);
+  const relatedSeedFrameIdx = finiteNumber(item.related_seed_frame_idx);
   return {
     video_id: videoId,
     frame_idx: frameIdx,
-    keyframe_n: Number.isInteger(keyframeN) && keyframeN > 0 ? keyframeN : null,
+    frame_uid: identity,
+    keyframe_n: Number.isInteger(keyframeN) && keyframeN >= 0 ? keyframeN : null,
     pts_time_s: ptsTimeS !== null && ptsTimeS >= 0 ? ptsTimeS : null,
+    fps: fps !== null && fps > 0 ? fps : null,
+    point_id: Number.isInteger(pointId) && pointId > 0 ? pointId : null,
     image_relpath: String(item.image_relpath || ""),
+    preview_image_relpath: String(item.preview_image_relpath || ""),
+    indexed_keyframe: item.indexed_keyframe === true
+      || item.validation === "canonical"
+      || context.validation === "canonical",
+    frame_index_base: Number(item.frame_index_base) === 0 ? 0 : null,
+    max_frame_idx: Number.isInteger(maxFrameIdx) && maxFrameIdx >= frameIdx
+      ? maxFrameIdx
+      : null,
+    duration_s: finiteNumber(item.duration_s),
+    timing_method: String(item.timing_method || ""),
+    preview_frame_idx: Number.isInteger(previewFrameIdx) && previewFrameIdx >= 0
+      ? previewFrameIdx
+      : null,
+    preview_keyframe_n: Number.isInteger(previewKeyframeN) && previewKeyframeN >= 0
+      ? previewKeyframeN
+      : null,
+    preview_pts_time_s: previewPtsTimeS !== null && previewPtsTimeS >= 0
+      ? previewPtsTimeS
+      : null,
+    related_seed_frame_idx: Number.isInteger(relatedSeedFrameIdx) && relatedSeedFrameIdx >= 0
+      ? relatedSeedFrameIdx
+      : null,
     score,
+    related_rank: finiteNumber(item.related_rank),
+    related_score: finiteNumber(item.related_score),
     rank: finiteNumber(item.rank),
     source: String(context.source || item.retrieval_modality || item.source || "manual"),
     manual: context.manual !== false,
@@ -117,6 +156,22 @@ function sanitizeDraft(mode, raw) {
     seen.add(identity);
     return [normalized];
   });
+  draft.suggestedItems = (Array.isArray(raw?.suggestedItems) ? raw.suggestedItems : [])
+    .flatMap((item) => {
+      const normalized = normalizeSubmissionFrame(item, {
+        source: item?.source || "auto-related",
+        manual: false,
+        validation: item?.validation,
+        addedAt: item?.added_at,
+      });
+      const identity = frameIdentity(normalized);
+      if (!normalized || !identity || seen.has(identity)) return [];
+      seen.add(identity);
+      return [normalized];
+    })
+    .slice(0, Math.max(0, MAX_SUBMISSION_FRAMES - draft.items.length));
+  const relatedSeed = frameIdentity(raw?.relatedSeed);
+  draft.relatedSeed = relatedSeed ? sanitizeStoredFrame(raw.relatedSeed) : null;
   return draft;
 }
 
@@ -124,8 +179,10 @@ function loadState(storage, key) {
   const fallback = emptyState();
   if (!storage) return fallback;
   try {
-    const raw = JSON.parse(storage.getItem(key) || "null");
-    if (!raw || raw.version !== STORAGE_VERSION) return fallback;
+    const serialized = storage.getItem(key)
+      || (key === STORAGE_KEY ? storage.getItem(LEGACY_STORAGE_KEY) : null);
+    const raw = JSON.parse(serialized || "null");
+    if (!raw || ![3, STORAGE_VERSION].includes(raw.version)) return fallback;
     const mode = TASK_MODES.includes(raw.mode) ? raw.mode : "KIS";
     const contexts = {};
     Object.entries(raw.contexts || {}).slice(0, 100).forEach(([contextKey, drafts]) => {
@@ -251,6 +308,14 @@ export function createSubmissionStore(options = {}) {
     const draft = contextDrafts()[mode];
     if (mode === "TRAKE") {
       const order = Math.max(1, Number.parseInt(context.eventOrder, 10) || draft.activeEvent || 1);
+      const conflicts = Object.entries(draft.eventSlots).some(([candidateOrder, candidate]) => {
+        if (Number(candidateOrder) === order) return false;
+        if (frameIdentity(candidate).split(":")[0] !== frame.video_id) return true;
+        return Number(candidateOrder) < order
+          ? Number(candidate.frame_idx) >= frame.frame_idx
+          : Number(candidate.frame_idx) <= frame.frame_idx;
+      });
+      if (conflicts) return { ok: false, reason: "invalid-trake-order" };
       draft.eventSlots[String(order)] = frame;
       draft.activeEvent = order;
       emit();
@@ -263,19 +328,135 @@ export function createSubmissionStore(options = {}) {
       emit();
       return { ok: true, mode, existing: true, frame: clone(frame) };
     }
+    const suggestedIndex = draft.suggestedItems.findIndex(
+      (candidate) => frameIdentity(candidate) === identity,
+    );
+    if (suggestedIndex >= 0) draft.suggestedItems.splice(suggestedIndex, 1);
+    if (
+      draft.items.length + draft.suggestedItems.length >= MAX_SUBMISSION_FRAMES
+      && draft.suggestedItems.length
+    ) draft.suggestedItems.pop();
+    if (draft.items.length + draft.suggestedItems.length >= MAX_SUBMISSION_FRAMES) {
+      return { ok: false, reason: "draft-full", maxFrames: MAX_SUBMISSION_FRAMES };
+    }
+    const firstManual = draft.items.length === 0;
     draft.items.push(frame);
     emit();
-    return { ok: true, mode, existing: false, frame: clone(frame) };
+    return { ok: true, mode, existing: false, firstManual, frame: clone(frame) };
+  }
+
+  function addFrames(items, context = {}) {
+    if (!Array.isArray(items) || items.length === 0) return { ok: false, reason: "empty-frames" };
+    const mode = context.mode && TASK_MODES.includes(context.mode) ? context.mode : data.mode;
+    if (mode === "TRAKE") return { ok: false, reason: "use-trake-sequence" };
+    const draft = contextDrafts()[mode];
+    let added = 0;
+    let existing = 0;
+    let invalid = 0;
+    for (const item of items) {
+      const frame = normalizeSubmissionFrame(item, context);
+      const identity = frameIdentity(frame);
+      if (!frame || !identity) {
+        invalid += 1;
+        continue;
+      }
+      const manualIndex = draft.items.findIndex(
+        (candidate) => frameIdentity(candidate) === identity,
+      );
+      if (manualIndex >= 0) {
+        draft.items[manualIndex] = { ...draft.items[manualIndex], ...frame, manual: true };
+        existing += 1;
+        continue;
+      }
+      draft.suggestedItems = draft.suggestedItems.filter(
+        (candidate) => frameIdentity(candidate) !== identity,
+      );
+      if (
+        draft.items.length + draft.suggestedItems.length >= MAX_SUBMISSION_FRAMES
+        && draft.suggestedItems.length
+      ) draft.suggestedItems.pop();
+      if (draft.items.length + draft.suggestedItems.length >= MAX_SUBMISSION_FRAMES) break;
+      draft.items.push(frame);
+      added += 1;
+    }
+    if (added || existing) emit();
+    return {
+      ok: added > 0 || existing > 0,
+      mode,
+      added,
+      existing,
+      invalid,
+      firstManual: added > 0 && draft.items.length === added,
+    };
+  }
+
+  function setRelatedFrames(seed, items, mode = data.mode) {
+    if (!TASK_MODES.includes(mode) || mode === "TRAKE") {
+      return { ok: false, reason: "unsupported-mode" };
+    }
+    const draft = contextDrafts()[mode];
+    const normalizedSeed = normalizeSubmissionFrame(seed, {
+      source: "related-seed",
+      manual: true,
+      validation: seed?.validation === "source_timeline" ? "source_timeline" : "canonical",
+    });
+    const seedIdentity = frameIdentity(normalizedSeed);
+    if (!seedIdentity || frameIdentity(draft.items[0]) !== seedIdentity) {
+      return { ok: false, reason: "stale-seed" };
+    }
+    const manualIdentities = new Set(draft.items.map(frameIdentity));
+    const seen = new Set(manualIdentities);
+    const capacity = Math.max(0, MAX_SUBMISSION_FRAMES - draft.items.length);
+    draft.suggestedItems = (Array.isArray(items) ? items : []).flatMap((item) => {
+      const normalized = normalizeSubmissionFrame(item, {
+        source: "auto-related",
+        manual: false,
+        validation: "canonical",
+      });
+      const identity = frameIdentity(normalized);
+      if (!normalized || !identity || seen.has(identity)) return [];
+      seen.add(identity);
+      return [normalized];
+    }).slice(0, capacity);
+    draft.relatedSeed = normalizedSeed;
+    emit();
+    return { ok: true, count: draft.suggestedItems.length };
+  }
+
+  function clearRelatedFrames(mode = data.mode) {
+    if (!TASK_MODES.includes(mode) || mode === "TRAKE") return;
+    const draft = contextDrafts()[mode];
+    if (!draft.suggestedItems.length && !draft.relatedSeed) return;
+    draft.suggestedItems = [];
+    draft.relatedSeed = null;
+    emit();
   }
 
   function addSequence(items, context = {}) {
     if (!Array.isArray(items) || items.length === 0) return { ok: false, reason: "empty-sequence" };
-    const results = items.map((item, index) => addFrame(item, {
-      ...context,
-      mode: "TRAKE",
-      eventOrder: Number.parseInt(item?.event_order, 10) || index + 1,
-    }));
-    return { ok: results.every((result) => result.ok), results };
+    const draft = contextDrafts().TRAKE;
+    const normalized = items.map((item, index) => ({
+      order: Number.parseInt(item?.event_order, 10) || index + 1,
+      frame: normalizeSubmissionFrame(item, context),
+    })).sort((left, right) => left.order - right.order);
+    if (normalized.some(({ frame }) => !frame)) return { ok: false, reason: "invalid-frame" };
+    if (draft.events.length && normalized.length !== draft.events.length) {
+      return { ok: false, reason: "event-count-mismatch" };
+    }
+    const videoIds = new Set(normalized.map(({ frame }) => frame.video_id));
+    const ordered = normalized.every(({ order, frame }, index) => (
+      order === index + 1
+      && (index === 0 || frame.frame_idx > normalized[index - 1].frame.frame_idx)
+    ));
+    if (videoIds.size !== 1 || !ordered) {
+      return { ok: false, reason: "invalid-trake-order" };
+    }
+    normalized.forEach(({ order, frame }) => {
+      draft.eventSlots[String(Math.max(1, order))] = frame;
+    });
+    draft.activeEvent = normalized[normalized.length - 1].order;
+    emit();
+    return { ok: true, count: normalized.length };
   }
 
   function removeFrame(identityOrOrder) {
@@ -285,7 +466,15 @@ export function createSubmissionStore(options = {}) {
       emit();
       return;
     }
+    const removedSeed = frameIdentity(draft.relatedSeed) === identityOrOrder;
     draft.items = draft.items.filter((item) => frameIdentity(item) !== identityOrOrder);
+    draft.suggestedItems = draft.suggestedItems.filter(
+      (item) => frameIdentity(item) !== identityOrOrder,
+    );
+    if (removedSeed) {
+      draft.relatedSeed = null;
+      draft.suggestedItems = [];
+    }
     emit();
   }
 
@@ -342,13 +531,16 @@ export function createSubmissionStore(options = {}) {
       if (eventOrder !== null) return frameIdentity(draft.eventSlots[String(eventOrder)]) === identity;
       return Object.values(draft.eventSlots).some((candidate) => frameIdentity(candidate) === identity);
     }
-    return draft.items.some((candidate) => frameIdentity(candidate) === identity);
+    return [...draft.items, ...draft.suggestedItems]
+      .some((candidate) => frameIdentity(candidate) === identity);
   }
 
   return {
     addFrame,
+    addFrames,
     addSequence,
     clear,
+    clearRelatedFrames,
     getSnapshot,
     hasFrame,
     removeFrame,
@@ -358,6 +550,7 @@ export function createSubmissionStore(options = {}) {
     setContext,
     setMode,
     setQueryId,
+    setRelatedFrames,
     setTrakeEvents,
     subscribe(listener) {
       listeners.add(listener);

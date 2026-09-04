@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from typing import Final
 
-
 FINAL_FUSION_RESULT_SCHEMA_VERSION: Final[str] = "kis.fusion.result.v1"
 RRF_K: Final[int] = 60
 FINAL_TOP_K: Final[int] = 150
@@ -42,10 +41,7 @@ def normalize_branch_weights(values: dict[str, float] | None) -> dict[str, float
     if not isinstance(supplied, dict):
         raise ValueError("branch_weights must be an object")
     try:
-        clean = {
-            name: float(supplied.get(name, 0.0))
-            for name in DEFAULT_BRANCH_WEIGHTS
-        }
+        clean = {name: float(supplied.get(name, 0.0)) for name in DEFAULT_BRANCH_WEIGHTS}
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError("branch weights must be numeric") from error
     if set(supplied) - set(DEFAULT_BRANCH_WEIGHTS):

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import threading
-import unittest
 import hashlib
-import json
 import inspect
+import json
 import os
 import sqlite3
+import threading
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -22,17 +22,13 @@ from online.src.retrieval.modalities.lexical import (
     query_tokens,
 )
 
-
 ROLES = ("original", "entity", "action", "context", "synonym", "keyword")
 
 
 def bundle() -> dict[str, object]:
     return {
         "schema_version": "branch1.query.v1",
-        "queries": [
-            {"role": role, "vi": f"vi {role}", "en": f"en {role}"}
-            for role in ROLES
-        ],
+        "queries": [{"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in ROLES],
     }
 
 
@@ -70,8 +66,7 @@ class _SingleStreamOcrIndex:
     def assert_ready(self) -> None:
         return None
 
-    def search_many(self, query_by_stream, *, per_stream_top_k, final_top_k,
-                    _allow_single=False):
+    def search_many(self, query_by_stream, *, per_stream_top_k, final_top_k, _allow_single=False):
         self.calls.append(
             {
                 "streams": query_by_stream,
@@ -115,9 +110,7 @@ class Branch3OcrContractTests(unittest.TestCase):
         index._source_inventory_locked = Mock(
             side_effect=AssertionError("raw source audit must not run during search")
         )
-        index._search_many_locked = Mock(
-            return_value={"results": [], "candidate_frame_count": 0}
-        )
+        index._search_many_locked = Mock(return_value={"results": [], "candidate_frame_count": 0})
         result = index.search_many(
             {"legacy": "visible title"},
             per_stream_top_k=10,
@@ -161,9 +154,7 @@ class Branch3OcrContractTests(unittest.TestCase):
         index._load_manifest_locked = Mock(return_value={})
         index._fast_ready_locked = Mock(return_value=True)
         try:
-            result = index.lookup_many(
-                ["L21_V001:1", "L21_V001:1", "L21_V001:2"]
-            )
+            result = index.lookup_many(["L21_V001:1", "L21_V001:1", "L21_V001:2"])
             self.assertEqual(result, {"L21_V001:1": "one", "L21_V001:2": "two"})
             index._fast_ready_locked.assert_called_once()
         finally:
@@ -172,9 +163,7 @@ class Branch3OcrContractTests(unittest.TestCase):
     def test_database_inspector_rejects_orphan_fts_rows(self) -> None:
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
-        connection.execute(
-            f"PRAGMA user_version = {ocr_module.OCR_SQLITE_USER_VERSION}"
-        )
+        connection.execute(f"PRAGMA user_version = {ocr_module.OCR_SQLITE_USER_VERSION}")
         connection.execute(
             """
             CREATE TABLE ocr_frames (
@@ -195,12 +184,8 @@ class Branch3OcrContractTests(unittest.TestCase):
         connection.execute(
             "INSERT INTO ocr_frames VALUES (1, 'L21_V001:0', 1, 'L21_V001', 1, 0, 0.0, 25.0, 'frame.jpg', 'hello', 'hello')"
         )
-        connection.execute(
-            "CREATE VIRTUAL TABLE ocr_fts USING fts5(full_text_search)"
-        )
-        connection.execute(
-            "INSERT INTO ocr_fts(rowid, full_text_search) VALUES (1, 'hello')"
-        )
+        connection.execute("CREATE VIRTUAL TABLE ocr_fts USING fts5(full_text_search)")
+        connection.execute("INSERT INTO ocr_fts(rowid, full_text_search) VALUES (1, 'hello')")
         connection.execute(
             """
             CREATE TABLE ocr_meta (
@@ -236,12 +221,11 @@ class Branch3OcrContractTests(unittest.TestCase):
             ),
         )
         try:
-            with patch.object(ocr_module, "OCR_EXPECTED_FRAMES", 1), patch.object(
-                ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1
+            with (
+                patch.object(ocr_module, "OCR_EXPECTED_FRAMES", 1),
+                patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1),
             ):
-                self.assertTrue(
-                    ocr_module._database_state_for_connection(connection)["ready"]
-                )
+                self.assertTrue(ocr_module._database_state_for_connection(connection)["ready"])
                 connection.execute(
                     "INSERT INTO ocr_fts(rowid, full_text_search) VALUES (99, 'orphan')"
                 )
@@ -285,19 +269,13 @@ class Branch3OcrContractTests(unittest.TestCase):
         connection.execute(
             "CREATE TABLE ocr_frames(id INTEGER PRIMARY KEY, frame_uid TEXT, full_text_search TEXT)"
         )
-        connection.execute(
-            "INSERT INTO ocr_frames VALUES (1, 'L21_V001:0', 'xin chao')"
-        )
+        connection.execute("INSERT INTO ocr_frames VALUES (1, 'L21_V001:0', 'xin chao')")
         connection.execute("CREATE VIRTUAL TABLE ocr_fts USING fts5(full_text_search)")
-        connection.execute(
-            "INSERT INTO ocr_fts(rowid, full_text_search) VALUES (1, 'xin chao')"
-        )
+        connection.execute("INSERT INTO ocr_fts(rowid, full_text_search) VALUES (1, 'xin chao')")
         try:
             valid = ocr_module._fts_content_fingerprint_for_connection(connection)
             self.assertTrue(valid["verified"])
-            connection.execute(
-                "UPDATE ocr_fts SET full_text_search = 'wrong text' WHERE rowid = 1"
-            )
+            connection.execute("UPDATE ocr_fts SET full_text_search = 'wrong text' WHERE rowid = 1")
             invalid = ocr_module._fts_content_fingerprint_for_connection(connection)
             self.assertFalse(invalid["verified"])
             self.assertEqual(invalid["mismatch_count"], 1)
@@ -335,7 +313,9 @@ class Branch3OcrContractTests(unittest.TestCase):
                     "results": [{"frame_uid": f"L21_V001:{index}"} for index in range(600)],
                 }
 
-        response = Branch3OcrSearch(_OversizedIndex(), threading.Lock()).execute(bundle(), 2000, 500)
+        response = Branch3OcrSearch(_OversizedIndex(), threading.Lock()).execute(
+            bundle(), 2000, 500
+        )
         self.assertEqual(response["result_count"], 500)
         self.assertEqual(len(response["results"]), 500)
         self.assertEqual(response["candidate_count_before_gate"], 600)
@@ -439,9 +419,11 @@ class Branch3OcrContractTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            with patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 2), patch.object(
-                ocr_module, "OCR_EXPECTED_FRAMES", 1
-            ), self.assertRaisesRegex(ValueError, "Expected 2 OCR source files"):
+            with (
+                patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 2),
+                patch.object(ocr_module, "OCR_EXPECTED_FRAMES", 1),
+                self.assertRaisesRegex(ValueError, "Expected 2 OCR source files"),
+            ):
                 ocr_module.validate_ocr_sources(transcripts)
 
     def test_source_gate_rejects_duplicate_frame_uid(self) -> None:
@@ -460,9 +442,11 @@ class Branch3OcrContractTests(unittest.TestCase):
                 json.dumps(row) + "\n" + json.dumps(row) + "\n",
                 encoding="utf-8",
             )
-            with patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1), patch.object(
-                ocr_module, "OCR_EXPECTED_FRAMES", 2
-            ), self.assertRaisesRegex(ValueError, "Duplicate OCR frame_uid"):
+            with (
+                patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1),
+                patch.object(ocr_module, "OCR_EXPECTED_FRAMES", 2),
+                self.assertRaisesRegex(ValueError, "Duplicate OCR frame_uid"),
+            ):
                 ocr_module.validate_ocr_sources(transcripts)
 
     def test_artifact_status_is_bound_to_instance_and_detects_content_mismatch(self) -> None:
@@ -529,7 +513,8 @@ class Branch3OcrContractTests(unittest.TestCase):
                     )
                 self.assertFalse(matched)
                 self.assertFalse(stat_matches)
-                digest.assert_called_once_with(artifact)
+                # macOS resolves the /var compatibility symlink to /private/var.
+                digest.assert_called_once_with(artifact.resolve())
             finally:
                 index.close()
 
@@ -684,14 +669,14 @@ class Branch3OcrContractTests(unittest.TestCase):
                         "frame_idx": 4,
                         "pts_time_s": 0.1333,
                         "full_text": "Xin chào",
-                    **{
-                        "full_text": "Xin ch"
-                        + chr(0xC3)
-                        + chr(0x83)
-                        + chr(0xC2)
-                        + chr(0xA0)
-                        + "o",
-                    },
+                        **{
+                            "full_text": "Xin ch"
+                            + chr(0xC3)
+                            + chr(0x83)
+                            + chr(0xC2)
+                            + chr(0xA0)
+                            + "o",
+                        },
                     },
                     ensure_ascii=False,
                 )
@@ -700,8 +685,9 @@ class Branch3OcrContractTests(unittest.TestCase):
             )
             database = root / "ocr.sqlite3"
             manifest = root / "branch3_ocr_manifest.json"
-            with patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1), patch.object(
-                ocr_module, "OCR_EXPECTED_FRAMES", 1
+            with (
+                patch.object(ocr_module, "OCR_EXPECTED_SOURCE_FILES", 1),
+                patch.object(ocr_module, "OCR_EXPECTED_FRAMES", 1),
             ):
                 ocr_module.build_ocr_index(
                     transcripts,
@@ -800,11 +786,14 @@ class Branch3OcrContractTests(unittest.TestCase):
 
                     live_database = database.read_bytes()
                     live_manifest = manifest.read_bytes()
-                    with patch.object(
-                        ocr_module,
-                        "_database_state_for_connection",
-                        side_effect=ValueError("synthetic staging validation failure"),
-                    ), self.assertRaisesRegex(ValueError, "synthetic staging"):
+                    with (
+                        patch.object(
+                            ocr_module,
+                            "_database_state_for_connection",
+                            side_effect=ValueError("synthetic staging validation failure"),
+                        ),
+                        self.assertRaisesRegex(ValueError, "synthetic staging"),
+                    ):
                         ocr_module.build_ocr_index(
                             transcripts,
                             database,

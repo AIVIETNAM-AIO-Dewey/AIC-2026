@@ -17,7 +17,10 @@ import {
   submissionFilename,
   submissionSchemaDefaults,
 } from "./src/submission-workbench.js";
-import { estimateRawFrame, nearestKeyframe } from "./src/time-keyframe-map.js";
+import {
+  nearestKeyframe,
+  secondsToFrameIndex,
+} from "./src/time-keyframe-map.js";
 import {
   branchPoolCountLabel,
   formatOcrEvidence,
@@ -26,12 +29,22 @@ import {
   renderVisibleResultPool,
   resolveWinningOcrText,
 } from "./src/result-gates.js";
+import {
+  assessKisPlanAlignment,
+  canonicalKisBundleSignature,
+  canonicalKisEventsSignature,
+  formatKisOverallQuery,
+  formatOrderedKisEvents,
+  hasCompleteKisBundle,
+  normalizeKisPlanText,
+  parseOrderedKisEvents,
+} from "./src/kis-query-plan.js";
 
 const state = {
   taskType: "KIS",
   queryMode: "auto", // "auto", "edit", "direct"
   parserEngine: "local",
-  activeWorkspace: "text",
+  activeWorkspace: "kis_fusion",
   capabilities: {},
   submissionContexts: {
     text: "text:empty",
@@ -50,10 +63,13 @@ const state = {
   drilldown: null,
   discoveryCascade: null,
   temporalIntersection: null,
+  kisTemporalIntersection: null,
   activeModality: "all",
   searchResults: [],
   activeInspectorItem: null,
   activeVideoKeyframes: [],
+  filmstripSelection: new Set(),
+  filmstripSelectionAnchor: null,
   activeBBoxObjects: [],
   inspectorMediaMode: "keyframe",
   imageQueryFile: null,
@@ -72,15 +88,33 @@ const state = {
   branch3OcrResults: [],
   branch3OcrResponse: null,
   kisFusionReady: false,
+  kisFusionBundleValid: false,
+  kisFusionBusy: false,
+  kisFusionView: "results",
   kisFusionResults: [],
   kisFusionResponse: null,
+  kisQueryPlan: {
+    preparedSource: "",
+    generatedBundleSignature: "",
+    generatedEventsSignature: "",
+    bundleSource: "",
+    preparing: false,
+    sourceOrigin: "empty",
+  },
   inspectorLocalResults: [],
   exportBackfillByContext: {},
+  relatedFillStatusByContext: {},
   watch: {
     videoId: "",
     fps: null,
+    durationS: null,
+    frameIndexBase: 0,
+    maxFrameIdx: null,
+    currentFrameIdx: null,
+    timingMethod: "",
     keyframes: [],
     nearest: null,
+    selected: null,
     searchResults: [],
   },
 };
@@ -94,6 +128,7 @@ let searchAbortController = null;
 let drilldownAbortController = null;
 let cascadeAbortController = null;
 let temporalAbortController = null;
+let kisTemporalAbortController = null;
 let inspectorAbortController = null;
 let filmstripAbortController = null;
 let parseRequestId = 0;
@@ -101,7 +136,9 @@ let searchRequestId = 0;
 let drilldownRequestId = 0;
 let cascadeRequestId = 0;
 let temporalRequestId = 0;
+let kisTemporalRequestId = 0;
 let inspectorRequestId = 0;
+let inspectorOpenRequestId = 0;
 let filmstripRequestId = 0;
 let resultsRenderId = 0;
 let toastTimer = null;
@@ -125,6 +162,12 @@ let branch2AbortController = null;
 let branch3AsrAbortController = null;
 let branch3OcrAbortController = null;
 let kisFusionAbortController = null;
+let kisQueryPlanAbortController = null;
+let kisQueryPlanRequestId = 0;
+let relatedFillAbortController = null;
+let relatedFillRequestId = 0;
+const canonicalFrameCache = new Map();
+const sourceFrameCache = new Map();
 
 // ──────────────────────────────────────────────────────────────────────────────
 // DOM Elements
@@ -136,6 +179,7 @@ const el = {
   workspaceTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".workspace-tab")),
   workspacePanels: /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("[data-workspace-panel]")),
   btnToggleSubmissionRail: document.getElementById("btn-toggle-submission-rail"),
+  btnCloseSubmissionRail: document.getElementById("btn-close-submission-rail"),
   submissionRail: document.getElementById("submission-rail"),
   submissionTabCount: document.getElementById("submission-tab-count"),
   modeTabs: /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll(".mode-tab")),
@@ -223,6 +267,20 @@ const el = {
   kisFusionResultsCount: document.getElementById("kis-fusion-results-count"),
   kisFusionTiming: document.getElementById("kis-fusion-timing"),
   kisFusionResultsGrid: document.getElementById("kis-fusion-results-grid"),
+  kisFusionResultsHeading: document.getElementById("kis-fusion-results-heading"),
+  kisFusionControlGrid: document.getElementById("kis-fusion-control-grid"),
+  kisStickyQuery: document.getElementById("kis-sticky-query"),
+  kisTaskBadge: document.getElementById("kis-task-badge"),
+  kisPinnedQueryText: /** @type {HTMLTextAreaElement} */ (document.getElementById("kis-pinned-query-text")),
+  kisQueryPlanStatus: document.getElementById("kis-query-plan-status"),
+  btnPrepareKisQuery: /** @type {HTMLButtonElement} */ (document.getElementById("btn-prepare-kis-query")),
+  kisTaskGuidance: document.getElementById("kis-task-guidance"),
+  kisTrakeSequencePanel: /** @type {HTMLDetailsElement} */ (document.getElementById("kis-trake-sequence-panel")),
+  kisTrakeSequenceEditor: /** @type {HTMLTextAreaElement} */ (document.getElementById("kis-trake-sequence-editor")),
+  kisTrakeEventCount: document.getElementById("kis-trake-event-count"),
+  kisTrakeGap: /** @type {HTMLSelectElement} */ (document.getElementById("kis-trake-gap")),
+  kisTrakeSequences: /** @type {HTMLSelectElement} */ (document.getElementById("kis-trake-sequences")),
+  btnRunKisTrake: /** @type {HTMLButtonElement} */ (document.getElementById("btn-run-kis-trake")),
   btnDiscoveryCascade: /** @type {HTMLButtonElement} */ (document.getElementById("btn-discovery-cascade")),
   btnTemporalIntersection: /** @type {HTMLButtonElement} */ (document.getElementById("btn-temporal-intersection")),
   selectTemporalGap: /** @type {HTMLSelectElement} */ (document.getElementById("select-temporal-gap")),
@@ -249,6 +307,7 @@ const el = {
   btnCopySubmission: document.getElementById("btn-copy-submission"),
   btnExportCsv: document.getElementById("btn-export-csv"),
   btnClearSubmission: document.getElementById("btn-clear-submission"),
+  submissionRelatedNote: document.getElementById("submission-related-note"),
   toast: document.getElementById("toast"),
 
   // 100-Row Export Modal
@@ -288,6 +347,9 @@ const el = {
   btnWatchPrevKeyframe: /** @type {HTMLButtonElement} */ (document.getElementById("btn-watch-prev-keyframe")),
   btnWatchNextKeyframe: /** @type {HTMLButtonElement} */ (document.getElementById("btn-watch-next-keyframe")),
   btnSubmitWatchFrame: /** @type {HTMLButtonElement} */ (document.getElementById("btn-submit-watch-frame")),
+  watchExactFrameInput: /** @type {HTMLInputElement} */ (document.getElementById("watch-exact-frame-input")),
+  btnSelectWatchFrame: /** @type {HTMLButtonElement} */ (document.getElementById("btn-select-watch-frame")),
+  watchSelectedFrameStatus: document.getElementById("watch-selected-frame-status"),
   standaloneVideoQuery: /** @type {HTMLInputElement} */ (document.getElementById("standalone-video-query")),
   btnStandaloneVideoSearch: /** @type {HTMLButtonElement} */ (document.getElementById("btn-standalone-video-search")),
   standaloneVideoSearchResults: document.getElementById("standalone-video-search-results"),
@@ -331,6 +393,8 @@ const el = {
   filmstripCount: document.getElementById("filmstrip-count"),
   btnFilmstripPrev: document.getElementById("btn-filmstrip-prev"),
   btnFilmstripNext: document.getElementById("btn-filmstrip-next"),
+  btnClearFilmstripSelection: /** @type {HTMLButtonElement} */ (document.getElementById("btn-clear-filmstrip-selection")),
+  btnAddFilmstripSelection: /** @type {HTMLButtonElement} */ (document.getElementById("btn-add-filmstrip-selection")),
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -384,20 +448,23 @@ async function initApp() {
   state.taskType = initialSubmission.mode;
   submissionStore.subscribe(renderSubmissionRail);
   renderSubmissionRail(initialSubmission);
-  setWorkspace("text");
+  setWorkspace("kis_fusion");
+  updateTaskWorkspace(initialSubmission.mode);
   if (window.matchMedia?.("(max-width: 1100px)").matches) {
-    el.submissionRail.classList.add("collapsed");
-    el.submissionRail.closest(".workbench-shell")?.classList.add("submission-collapsed");
-    el.btnToggleSubmissionRail.setAttribute("aria-expanded", "false");
+    setSubmissionRailCollapsed(true);
   }
   setInspectorMediaMode("keyframe");
   refreshVideoIcons();
-  await loadServerConfig();
-  await loadBranch1Health();
-  await loadBranch2Health();
-  await loadBranch3AsrHealth();
-  await loadBranch3OcrHealth();
-  await loadKisFusionHealth();
+  await Promise.all([
+    loadServerConfig(),
+    loadBranch1Health(),
+    loadBranch2Health(),
+    loadBranch3AsrHealth(),
+    loadBranch3OcrHealth(),
+    loadKisFusionHealth(),
+  ]);
+  // Run this last so the overall status wins over the temporary
+  // "Capabilities loaded" state regardless of request completion order.
   await loadOverallHealth();
   updateQueryModeUI();
   if (typeof ResizeObserver !== "undefined") {
@@ -410,11 +477,12 @@ async function initApp() {
 
 async function loadOverallHealth() {
   try {
-    const response = await fetch("/api/health");
+    const response = await fetch("/api/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     if (health.status === "ready") {
-      setServerStatus("CPU local / Qdrant ready", "ready");
+      const accelerator = health.device === "mps" ? "MPS" : "CPU";
+      setServerStatus(`Local ${accelerator} / Qdrant ready`, "ready");
     } else if (health.status === "starting") {
       setServerStatus("Server starting", "pending");
     } else {
@@ -475,7 +543,7 @@ const BRANCH1_ROLES = ["original", "entity", "action", "context", "synonym", "ke
 
 async function loadBranch1Health() {
   try {
-    const response = await fetch("/api/branch1/health");
+    const response = await fetch("/api/branch1/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.branch1Ready = health.ready === true;
@@ -495,7 +563,7 @@ async function loadBranch1Health() {
 
 async function loadBranch2Health() {
   try {
-    const response = await fetch("/api/branch2/health");
+    const response = await fetch("/api/branch2/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.branch2Ready = health.ready === true;
@@ -513,7 +581,7 @@ async function loadBranch2Health() {
 
 async function loadBranch3AsrHealth() {
   try {
-    const response = await fetch("/api/branch3/asr/health");
+    const response = await fetch("/api/branch3/asr/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.branch3AsrReady = health.ready === true;
@@ -653,7 +721,7 @@ function validateBranch3OcrEditor() {
 
 async function loadBranch3OcrHealth() {
   try {
-    const response = await fetch("/api/branch3/ocr/health");
+    const response = await fetch("/api/branch3/ocr/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.branch3OcrReady = health.ready === true;
@@ -676,11 +744,11 @@ async function loadBranch3OcrHealth() {
 async function loadKisFusionHealth() {
   if (!el.kisFusionHealthBadge) return;
   try {
-    const response = await fetch("/api/fusion/kis/health");
+    const response = await fetch("/api/fusion/kis/health?compact=true");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const health = await response.json();
     state.kisFusionReady = health.ready === true;
-    el.btnRunKisFusion.disabled = !state.kisFusionReady;
+    el.btnRunKisFusion.disabled = !state.kisFusionReady || state.kisFusionBusy;
     el.kisFusionHealthBadge.textContent = state.kisFusionReady
       ? "ALL POOLS READY"
       : "FAIL-CLOSED · FUSION NOT READY";
@@ -713,20 +781,33 @@ function parseKisFusionBundle() {
 function validateKisFusionEditor() {
   try {
     parseKisFusionBundle();
+    state.kisFusionBundleValid = true;
     el.kisFusionValidation.textContent = state.kisFusionReady
       ? "Valid six-role bilingual bundle. Ready for KIS fusion."
       : "JSON is valid, but at least one branch fusion dependency is not ready.";
     el.kisFusionValidation.classList.toggle("ready", state.kisFusionReady);
     el.kisFusionValidation.classList.toggle("error", !state.kisFusionReady);
-    el.btnRunKisFusion.disabled = !state.kisFusionReady;
+    el.btnRunKisFusion.disabled = !state.kisFusionReady || state.kisFusionBusy;
+    updateKisOrderedButtonState();
     return true;
   } catch (error) {
     el.kisFusionValidation.textContent = error.message;
     el.kisFusionValidation.classList.remove("ready");
     el.kisFusionValidation.classList.add("error");
     el.btnRunKisFusion.disabled = true;
+    state.kisFusionBundleValid = false;
+    updateKisOrderedButtonState();
     return false;
   }
+}
+
+function updateKisOrderedButtonState() {
+  const eventCount = kisSequenceEvents().length;
+  el.kisTrakeEventCount.textContent = `${eventCount} event${eventCount === 1 ? "" : "s"}`;
+  el.btnRunKisTrake.disabled = !state.kisFusionReady
+    || !state.kisFusionBundleValid
+    || state.kisFusionBusy
+    || eventCount < 2;
 }
 
 function updateKisFusionWeights() {
@@ -763,7 +844,15 @@ async function runKisFusionSearch() {
   const queryBundle = parseKisFusionBundle();
   kisFusionAbortController?.abort();
   kisFusionAbortController = new AbortController();
+  state.kisFusionBusy = true;
+  state.kisFusionView = "results";
+  state.kisTemporalIntersection = null;
+  kisTemporalAbortController?.abort();
+  kisTemporalAbortController = null;
+  kisTemporalRequestId += 1;
+  el.kisFusionResultsHeading.textContent = "KIS FINAL RESULTS";
   el.btnRunKisFusion.disabled = true;
+  el.btnRunKisTrake.disabled = true;
   el.btnRunKisFusion.textContent = "Running four pools\u2026";
   const started = performance.now();
   try {
@@ -814,8 +903,10 @@ async function runKisFusionSearch() {
     el.kisFusionResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">KIS fusion failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
     showToast(error.message, "error");
   } finally {
+    state.kisFusionBusy = false;
     el.btnRunKisFusion.textContent = "Run KIS fusion";
-    if (state.kisFusionReady) el.btnRunKisFusion.disabled = false;
+    el.btnRunKisFusion.disabled = !state.kisFusionReady || !state.kisFusionBundleValid;
+    updateKisOrderedButtonState();
   }
 }
 
@@ -1162,6 +1253,7 @@ function bindEvents() {
   // Task selector
   el.taskBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
+      setWorkspace("kis_fusion");
       submissionStore.setMode(btn.dataset.task);
     });
   });
@@ -1175,10 +1267,9 @@ function bindEvents() {
     tab.addEventListener("click", () => setWorkspace(tab.dataset.workspace));
   });
   el.btnToggleSubmissionRail.addEventListener("click", () => {
-    const collapsed = el.submissionRail.classList.toggle("collapsed");
-    el.submissionRail.closest(".workbench-shell")?.classList.toggle("submission-collapsed", collapsed);
-    el.btnToggleSubmissionRail.setAttribute("aria-expanded", String(!collapsed));
+    setSubmissionRailCollapsed(!el.submissionRail.classList.contains("collapsed"));
   });
+  el.btnCloseSubmissionRail.addEventListener("click", () => setSubmissionRailCollapsed(true));
 
   // Query mode tabs
   el.modeTabs.forEach((tab) => {
@@ -1220,12 +1311,34 @@ function bindEvents() {
     try {
       el.kisFusionJsonEditor.value = JSON.stringify(JSON.parse(el.kisFusionJsonEditor.value), null, 2);
       validateKisFusionEditor();
+      updateKisPinnedQuery();
     } catch (error) {
       showToast(`Cannot format KIS fusion JSON: ${error.message}`, "error");
     }
   });
   el.btnRunKisFusion.addEventListener("click", () => void runKisFusionSearch());
-  el.kisFusionJsonEditor.addEventListener("input", validateKisFusionEditor);
+  el.btnPrepareKisQuery.addEventListener("click", () => void prepareKisQueryPlan());
+  el.kisPinnedQueryText.addEventListener("input", () => {
+    if (state.kisQueryPlan.preparing) {
+      kisQueryPlanAbortController?.abort();
+      kisQueryPlanAbortController = null;
+      kisQueryPlanRequestId += 1;
+      state.kisQueryPlan.preparing = false;
+      el.btnPrepareKisQuery.textContent = "Prepare bundle & events";
+    }
+    state.kisQueryPlan.sourceOrigin = "user";
+    updateKisQueryPlanStatus();
+  });
+  el.kisPinnedQueryText.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void prepareKisQueryPlan();
+    }
+  });
+  el.kisFusionJsonEditor.addEventListener("input", () => {
+    validateKisFusionEditor();
+    updateKisPinnedQuery();
+  });
   el.kisFusionJsonEditor.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
@@ -1238,6 +1351,11 @@ function bindEvents() {
     el.kisFusionWeightOcr,
     el.kisFusionWeightAsr,
   ].forEach((input) => input.addEventListener("input", updateKisFusionWeights));
+  el.kisTrakeSequenceEditor.addEventListener("input", () => {
+    updateKisTaskUi();
+    syncSubmissionEventsFromKisSequence();
+  });
+  el.btnRunKisTrake.addEventListener("click", () => void runTemporalIntersection());
   el.branch2JsonEditor.addEventListener("input", validateBranch2Editor);
   [el.branch2WeightDense, el.branch2WeightSparse, el.branch2WeightBeit, el.branch2WeightPrevious].forEach((input) => input.addEventListener("input", updateBranch2Weights));
   el.branch1JsonEditor.addEventListener("input", validateBranch1Editor);
@@ -1306,6 +1424,10 @@ function bindEvents() {
   }
 
   el.btnClearSubmission.addEventListener("click", () => {
+    const snapshot = submissionStore.getSnapshot();
+    relatedFillAbortController?.abort();
+    relatedFillRequestId += 1;
+    delete state.relatedFillStatusByContext[relatedFillStatusKey(snapshot.contextKey, snapshot.mode)];
     submissionStore.clear();
     showToast(`Cleared the ${state.taskType} draft.`, "success");
   });
@@ -1354,14 +1476,25 @@ function bindEvents() {
   });
   el.btnWatchPrevKeyframe.addEventListener("click", (event) => {
     event.preventDefault();
-    seekWatchNeighbor(-1);
+    stepWatchSourceFrame(-1);
   });
   el.btnWatchNextKeyframe.addEventListener("click", (event) => {
     event.preventDefault();
-    seekWatchNeighbor(1);
+    stepWatchSourceFrame(1);
+  });
+  el.btnSelectWatchFrame.addEventListener("click", () => {
+    void selectWatchSourceFrame(Number(el.watchExactFrameInput.value), true);
+  });
+  el.watchExactFrameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void selectWatchSourceFrame(Number(el.watchExactFrameInput.value), true);
+    }
   });
   el.btnSubmitWatchFrame.addEventListener("click", () => {
-    if (state.watch.nearest?.frame) addFrameToSubmission(state.watch.nearest.frame, { source: "video-player" });
+    if (state.watch.selected) {
+      void addSourceFrameToSubmission(state.watch.selected, { source: "video-player-source-frame" });
+    }
   });
   el.btnStandaloneVideoSearch.addEventListener("click", () => void runStandaloneVideoSearch());
   el.standaloneVideoQuery.addEventListener("keydown", (event) => {
@@ -1394,6 +1527,8 @@ function bindEvents() {
   el.btnFilmstripNext.addEventListener("click", () => {
     el.filmstripScroll.scrollBy({ left: 300, behavior: "smooth" });
   });
+  el.btnClearFilmstripSelection.addEventListener("click", clearFilmstripSelection);
+  el.btnAddFilmstripSelection.addEventListener("click", () => void addFilmstripSelection());
 
   // Global Keydown (Escape, ArrowLeft, ArrowRight, Enter)
   document.addEventListener("keydown", (e) => {
@@ -1464,6 +1599,279 @@ function clearSubmissionSelection() {
   updateInspectorSubmitBtn();
 }
 
+function setSubmissionRailCollapsed(collapsed) {
+  el.submissionRail.classList.toggle("collapsed", collapsed);
+  el.submissionRail.closest(".workbench-shell")?.classList.toggle(
+    "submission-collapsed",
+    collapsed,
+  );
+  el.btnToggleSubmissionRail.setAttribute("aria-expanded", String(!collapsed));
+  if (!collapsed) el.submissionRail.focus?.({ preventScroll: true });
+}
+
+function kisSequenceEvents() {
+  return parseOrderedKisEvents(el.kisTrakeSequenceEditor.value);
+}
+
+function currentKisBundle() {
+  try {
+    const bundle = JSON.parse(el.kisFusionJsonEditor.value);
+    return hasCompleteKisBundle(bundle) ? bundle : null;
+  } catch {
+    return null;
+  }
+}
+
+function setKisQueryPlanStatus(message, status = "") {
+  el.kisQueryPlanStatus.textContent = message;
+  el.kisQueryPlanStatus.classList.toggle("ready", status === "ready");
+  el.kisQueryPlanStatus.classList.toggle("warning", status === "warning");
+  el.kisQueryPlanStatus.classList.toggle("error", status === "error");
+}
+
+function updateKisQueryPlanStatus() {
+  const source = normalizeKisPlanText(el.kisPinnedQueryText.value);
+  const bundle = currentKisBundle();
+  const events = kisSequenceEvents();
+  const plan = state.kisQueryPlan;
+  el.btnPrepareKisQuery.disabled = plan.preparing || !source;
+
+  if (plan.preparing) {
+    setKisQueryPlanStatus("Preparing one linked bundle and event list locally…");
+    return;
+  }
+  if (!source) {
+    setKisQueryPlanStatus("Enter one overall query, then prepare its linked bundle and events.");
+    return;
+  }
+  const stale = Boolean(plan.preparedSource)
+    && normalizeKisPlanText(plan.preparedSource) !== source;
+  if (stale) {
+    setKisQueryPlanStatus(
+      "Overall query changed. Existing JSON and events are preserved; prepare again before relying on them.",
+      "warning",
+    );
+    return;
+  }
+  if (!bundle) {
+    setKisQueryPlanStatus("No complete six-role bundle yet. Prepare this overall query first.", "warning");
+    return;
+  }
+
+  const alignment = assessKisPlanAlignment(source, bundle, events);
+  if (!alignment.sourceAligned) {
+    setKisQueryPlanStatus(
+      "Warning: the six-role JSON does not appear related to the overall query. Search remains available.",
+      "warning",
+    );
+    return;
+  }
+  if (!alignment.eventsAligned) {
+    setKisQueryPlanStatus(
+      `Warning: E${alignment.mismatchedEventOrders.join(", E")} may not match the overall query. Search remains available.`,
+      "warning",
+    );
+    return;
+  }
+
+  const bundleSignature = canonicalKisBundleSignature(bundle);
+  const eventSignature = canonicalKisEventsSignature(el.kisTrakeSequenceEditor.value);
+  const bundleEdited = Boolean(plan.generatedBundleSignature)
+    && bundleSignature !== plan.generatedBundleSignature;
+  const eventsEdited = Boolean(plan.generatedEventsSignature)
+    && eventSignature !== plan.generatedEventsSignature;
+  const editedLabel = bundleEdited || eventsEdited ? " · editable fields modified" : "";
+  const localDraftLabel = plan.bundleSource === "local_deterministic"
+    ? " · local draft; review bilingual fields"
+    : "";
+  if (plan.preparedSource) {
+    if (state.taskType === "TRAKE" && events.length < 2) {
+      setKisQueryPlanStatus(
+        "TRAKE needs at least two ordered events. Add event lines or make the temporal order explicit in the overall query.",
+        "warning",
+      );
+      return;
+    }
+    setKisQueryPlanStatus(
+      events.length >= 2
+        ? `Linked plan ready · ${events.length} related ordered events${editedLabel}${localDraftLabel}`
+        : `Single-scene KIS plan ready${editedLabel}${localDraftLabel}`,
+      "ready",
+    );
+    return;
+  }
+  setKisQueryPlanStatus(
+    events.length >= 2
+      ? `Manual bundle and ${events.length} related events are ready. Prepare to establish one-source tracking.`
+      : "Manual bundle is ready. Prepare to derive ordered events from the same overall query.",
+    "ready",
+  );
+}
+
+function updateKisPinnedQuery() {
+  const bundle = currentKisBundle();
+  const canSyncFromBundle = !normalizeKisPlanText(el.kisPinnedQueryText.value)
+    || state.kisQueryPlan.sourceOrigin === "empty"
+    || state.kisQueryPlan.sourceOrigin === "bundle";
+  if (bundle && canSyncFromBundle) {
+    const nextSource = formatKisOverallQuery(bundle);
+    if (nextSource) {
+      el.kisPinnedQueryText.value = nextSource;
+      state.kisQueryPlan.sourceOrigin = "bundle";
+    }
+  }
+  updateKisQueryPlanStatus();
+}
+
+function hasNonemptyKisEditorText() {
+  return /"(?:vi|en)"\s*:\s*"(?!\s*")[^"]+/.test(el.kisFusionJsonEditor.value);
+}
+
+async function prepareKisQueryPlan() {
+  const source = normalizeKisPlanText(el.kisPinnedQueryText.value);
+  if (!source) {
+    showToast("Enter one overall KIS query first.", "error");
+    return;
+  }
+
+  kisQueryPlanAbortController?.abort();
+  kisQueryPlanAbortController = new AbortController();
+  const requestId = ++kisQueryPlanRequestId;
+  state.kisQueryPlan.preparing = true;
+  updateKisQueryPlanStatus();
+  el.btnPrepareKisQuery.textContent = "Preparing…";
+
+  try {
+    const existingBundle = currentKisBundle();
+    const response = await fetch("/api/query/kis/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: kisQueryPlanAbortController.signal,
+      body: JSON.stringify({
+        query: source,
+        task_type: state.taskType,
+        ...(existingBundle ? { query_bundle: existingBundle } : {}),
+      }),
+    });
+    if (!response.ok) throw await responseError(response, "KIS query preparation failed");
+    const plan = await response.json();
+    if (requestId !== kisQueryPlanRequestId) return;
+    if (!hasCompleteKisBundle(plan.query_bundle) || !Array.isArray(plan.events)) {
+      throw new Error("KIS query preparation returned an invalid plan");
+    }
+
+    const nextBundleSignature = canonicalKisBundleSignature(plan.query_bundle);
+    const nextEventsText = formatOrderedKisEvents(plan.events);
+    const nextEventsSignature = canonicalKisEventsSignature(nextEventsText);
+    const currentBundleSignature = canonicalKisBundleSignature(existingBundle);
+    const currentEventsSignature = canonicalKisEventsSignature(el.kisTrakeSequenceEditor.value);
+    const emptyEventsSignature = canonicalKisEventsSignature("");
+    const previousBundleSnapshot = state.kisQueryPlan.generatedBundleSignature;
+    const previousEventsSnapshot = state.kisQueryPlan.generatedEventsSignature;
+    const protectedBundle = previousBundleSnapshot
+      ? currentBundleSignature !== previousBundleSnapshot
+      : hasNonemptyKisEditorText();
+    const protectedEvents = previousEventsSnapshot
+      ? currentEventsSignature !== previousEventsSnapshot
+      : currentEventsSignature !== emptyEventsSignature;
+    const replacesManualWork = (
+      protectedBundle && currentBundleSignature !== nextBundleSignature
+    ) || (
+      protectedEvents && currentEventsSignature !== nextEventsSignature
+    );
+    if (replacesManualWork && !window.confirm(
+      "Preparing from the overall query will replace manually edited JSON or event lines. Continue?",
+    )) {
+      return;
+    }
+
+    el.kisFusionJsonEditor.value = JSON.stringify(plan.query_bundle, null, 2);
+    el.kisTrakeSequenceEditor.value = nextEventsText;
+    state.kisQueryPlan.preparedSource = source;
+    state.kisQueryPlan.generatedBundleSignature = nextBundleSignature;
+    state.kisQueryPlan.generatedEventsSignature = nextEventsSignature;
+    state.kisQueryPlan.bundleSource = String(plan.bundle_source || "local_deterministic");
+    state.kisQueryPlan.sourceOrigin = "prepared";
+    validateKisFusionEditor();
+    if (plan.events.length >= 2) el.kisTrakeSequencePanel.open = true;
+    syncSubmissionEventsFromKisSequence();
+    updateKisTaskUi();
+    showToast(
+      plan.events.length >= 2
+        ? `Prepared one bundle and ${plan.events.length} linked events. No search was run.`
+        : "Prepared one single-scene KIS bundle. No search was run.",
+      "success",
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    console.error(error);
+    setKisQueryPlanStatus(error.message, "error");
+    showToast(error.message, "error");
+  } finally {
+    if (requestId === kisQueryPlanRequestId) {
+      state.kisQueryPlan.preparing = false;
+      kisQueryPlanAbortController = null;
+      el.btnPrepareKisQuery.textContent = "Prepare bundle & events";
+      updateKisQueryPlanStatus();
+    }
+  }
+}
+
+function updateKisTaskUi() {
+  const trake = state.taskType === "TRAKE";
+  el.kisTaskBadge.textContent = state.taskType === "VQA" ? "Q&A" : state.taskType;
+  el.kisFusionControlGrid.classList.remove("hidden");
+  if (trake) el.kisTrakeSequencePanel.open = true;
+  el.kisFusionResultsHeading.textContent = state.kisFusionView === "sequence"
+    ? "ORDERED KIS RESULTS"
+    : "KIS FINAL RESULTS";
+  if (state.taskType === "VQA") {
+    el.kisTaskGuidance.textContent = "Q&A uses full KIS Fusion for evidence. Ordered KIS events are available when the question depends on multiple moments; the final answer remains human-authored.";
+  } else if (trake) {
+    el.kisTaskGuidance.textContent = "TRAKE runs the complete four-branch KIS pipeline for every event, then requires one video with strictly increasing source-frame indexes.";
+  } else {
+    el.kisTaskGuidance.textContent = "KIS uses full four-branch fusion. Open Ordered KIS Events for a multi-action query; each event receives its own complete KIS run.";
+  }
+  updateKisOrderedButtonState();
+  updateKisPinnedQuery();
+}
+
+function updateTaskWorkspace(mode) {
+  const changed = state.taskType !== mode;
+  state.taskType = mode;
+  updateKisTaskUi();
+  if (!changed || state.activeWorkspace !== "kis_fusion") return;
+  if (state.kisFusionView === "sequence" && state.kisTemporalIntersection) {
+    renderTemporalIntersection(20, ++resultsRenderId);
+  } else if (state.kisFusionResults.length) {
+    el.kisFusionResultsCount.textContent = `${state.kisFusionResults.length} results`;
+    el.kisFusionResultsGrid.replaceChildren();
+    renderVisibleResultPool(
+      el.kisFusionResultsGrid,
+      state.kisFusionResults,
+      (visible, container) => renderStandardCards(
+        visible,
+        container,
+        "kis_fusion",
+        ++resultsRenderId,
+      ),
+      150,
+    );
+  } else {
+    el.kisFusionResultsCount.textContent = "Not run";
+    el.kisFusionTiming.textContent = "Ready";
+    el.kisFusionResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-icon">RRF</div><div class="empty-title">KIS Fusion ready</div><div class="empty-desc">Run one full KIS search, or open Ordered KIS Events to search multiple moments chronologically.</div></div>`;
+  }
+}
+
+function syncSubmissionEventsFromKisSequence() {
+  if (state.taskType !== "TRAKE") return;
+  submissionStore.setTrakeEvents(kisSequenceEvents().map((event) => ({
+    order: event.order,
+    label: event.description,
+  })));
+}
+
 function setWorkspace(workspace) {
   if (!new Set(["text", "branch1", "branch2", "branch3_asr", "branch3_ocr", "kis_fusion", "image", "video"]).has(workspace)) return;
   state.activeWorkspace = workspace;
@@ -1502,7 +1910,15 @@ function submissionItemCount(snapshot = submissionStore.getSnapshot()) {
   const draft = currentSubmissionDraft(snapshot);
   return snapshot.mode === "TRAKE"
     ? Object.keys(draft.eventSlots || {}).length
-    : (draft.items || []).length;
+    : (draft.items || []).length + (draft.suggestedItems || []).length;
+}
+
+function submissionDraftItems(draft) {
+  return [...(draft.items || []), ...(draft.suggestedItems || [])];
+}
+
+function relatedFillStatusKey(contextKey, mode) {
+  return `${contextKey}::${mode}`;
 }
 
 function syncSubmissionEventsFromQuery(editorOnly = false) {
@@ -1522,7 +1938,7 @@ function syncSubmissionEventsFromQuery(editorOnly = false) {
 }
 
 function renderSubmissionRail(snapshot) {
-  state.taskType = snapshot.mode;
+  updateTaskWorkspace(snapshot.mode);
   const draft = currentSubmissionDraft(snapshot);
   const count = submissionItemCount(snapshot);
   el.taskBtns.forEach((button) => {
@@ -1542,7 +1958,7 @@ function renderSubmissionRail(snapshot) {
   renderTrakeEventTabs(snapshot.drafts.TRAKE);
   el.submissionList.replaceChildren();
   if (snapshot.mode === "TRAKE") renderTrakeSubmissionItems(draft);
-  else renderFrameSubmissionItems(draft.items || []);
+  else renderFrameSubmissionItems(draft);
 
   if (!el.submissionList.children.length) {
     const empty = document.createElement("div");
@@ -1555,8 +1971,32 @@ function renderSubmissionRail(snapshot) {
 
   const top = snapshot.mode === "TRAKE"
     ? orderedTrakeFrames(draft)[0]?.item
-    : draft.items?.[0];
+    : submissionDraftItems(draft)[0];
   el.submissionInput.value = top ? `${top.video_id}, ${top.frame_idx}` : "No keyframe selected";
+  const relatedStatus = state.relatedFillStatusByContext[
+    relatedFillStatusKey(snapshot.contextKey, snapshot.mode)
+  ];
+  const suggestionCount = draft.suggestedItems?.length || 0;
+  el.submissionRelatedNote.classList.toggle(
+    "hidden",
+    snapshot.mode === "TRAKE" || (!relatedStatus && suggestionCount === 0),
+  );
+  if (snapshot.mode !== "TRAKE") {
+    if (relatedStatus?.state === "loading") {
+      el.submissionRelatedNote.textContent = "Finding visually related indexed frames…";
+      el.submissionRelatedNote.classList.add("loading");
+      el.submissionRelatedNote.classList.remove("error");
+    } else if (relatedStatus?.state === "error") {
+      el.submissionRelatedNote.textContent = relatedStatus.message;
+      el.submissionRelatedNote.classList.add("error");
+      el.submissionRelatedNote.classList.remove("loading");
+    } else {
+      el.submissionRelatedNote.textContent = suggestionCount
+        ? `${suggestionCount} auto-related frame${suggestionCount === 1 ? "" : "s"} from the first verified selection.`
+        : "No related frames were returned for the selected seed.";
+      el.submissionRelatedNote.classList.remove("loading", "error");
+    }
+  }
   updateInspectorSubmitBtn();
   updateWatchSubmitButton();
 }
@@ -1582,16 +2022,16 @@ function renderTrakeEventTabs(draft) {
   });
 }
 
-function renderFrameSubmissionItems(items) {
-  items.forEach((item, index) => {
+function renderFrameSubmissionItems(draft) {
+  (draft.items || []).forEach((item, index) => {
     const identity = frameIdentity(item);
     const row = createSubmissionRow(item, {
       index,
       identity,
       label: `#${index + 1}`,
-      onRemove: () => submissionStore.removeFrame(identity),
+      onRemove: () => removeSubmissionFrame(identity),
       onMove: (direction) => submissionStore.reorderFrame(index, index + direction),
-      onEdit: (patch) => void updateAndValidateSubmissionFrame(identity, patch),
+      related: false,
     });
     row.draggable = true;
     row.addEventListener("dragstart", (event) => event.dataTransfer?.setData("text/plain", String(index)));
@@ -1603,6 +2043,30 @@ function renderFrameSubmissionItems(items) {
     });
     el.submissionList.appendChild(row);
   });
+  (draft.suggestedItems || []).forEach((item, index) => {
+    const identity = frameIdentity(item);
+    el.submissionList.appendChild(createSubmissionRow(item, {
+      identity,
+      label: `A${index + 1}`,
+      related: true,
+      onRemove: () => removeSubmissionFrame(identity),
+      onMove: null,
+    }));
+  });
+}
+
+function removeSubmissionFrame(identityOrOrder) {
+  const before = submissionStore.getSnapshot();
+  submissionStore.removeFrame(identityOrOrder);
+  const after = submissionStore.getSnapshot();
+  if (after.mode !== "TRAKE" && !currentSubmissionDraft(after).relatedSeed) {
+    delete state.relatedFillStatusByContext[
+      relatedFillStatusKey(before.contextKey, before.mode)
+    ];
+    relatedFillAbortController?.abort();
+    relatedFillRequestId += 1;
+    renderSubmissionRail(after);
+  }
 }
 
 function renderTrakeSubmissionItems(draft) {
@@ -1625,9 +2089,9 @@ function renderTrakeSubmissionItems(draft) {
     el.submissionList.appendChild(createSubmissionRow(item, {
       identity: String(order),
       label: `E${order}`,
-      onRemove: () => submissionStore.removeFrame(order),
+      onRemove: () => removeSubmissionFrame(order),
       onMove: null,
-      onEdit: (patch) => void updateAndValidateSubmissionFrame(String(order), patch),
+      related: false,
     }));
   });
 }
@@ -1635,76 +2099,233 @@ function renderTrakeSubmissionItems(draft) {
 function createSubmissionRow(item, options) {
   const row = document.createElement("article");
   row.className = "submission-item";
+  row.classList.toggle("auto-related", options.related === true);
   row.dataset.identity = options.identity;
-  const validationLabel = item.validation === "canonical" ? "canonical" : "not server-verified";
+  const validationLabel = item.validation === "canonical"
+    ? "indexed frame verified"
+    : item.validation === "source_timeline"
+      ? "source frame verified"
+      : "awaiting server verification";
+  const frameUid = frameIdentity(item);
+  const timeLabel = item.pts_time_s === null || item.pts_time_s === undefined
+    ? "unknown"
+    : `${Number(item.pts_time_s).toFixed(3)}s`;
+  const fpsLabel = item.fps ? Number(item.fps).toFixed(3) : "unknown";
+  const relatedLabel = options.related ? "Auto-related" : item.source || "manual";
+  const previewFrameIdx = Number.isInteger(Number(item.preview_frame_idx))
+    ? Number(item.preview_frame_idx)
+    : null;
+  const previewLabel = item.validation === "source_timeline" && previewFrameIdx !== null
+    ? `nearest indexed preview: frame ${previewFrameIdx}`
+    : "exact indexed image";
   row.innerHTML = `
     <div class="submission-item-head">
       <span class="submission-item-order">${escapeHtml(options.label)}</span>
-      <span class="submission-item-source">${escapeHtml(item.source || "manual")}</span>
+      <span class="submission-item-source">${escapeHtml(relatedLabel)}</span>
       <button type="button" class="submission-remove" aria-label="Remove frame">×</button>
     </div>
-    <div class="submission-item-edit">
-      <input class="submission-video-edit" value="${escapeHtml(item.video_id)}" aria-label="Video ID">
-      <input class="submission-frame-edit" type="number" min="0" step="1" value="${item.frame_idx}" aria-label="Frame index">
-    </div>
-    <div class="submission-item-meta">KF ${item.keyframe_n ?? "?"} · ${item.pts_time_s === null ? "?" : `${Number(item.pts_time_s).toFixed(1)}s`} · ${escapeHtml(validationLabel)}</div>
+    <div class="submission-item-identity"><strong>${escapeHtml(item.video_id)}</strong><span>frame ${item.frame_idx}</span></div>
+    <div class="submission-item-meta">${item.keyframe_n == null ? "not an indexed keyframe" : `KF ${item.keyframe_n}`} · ${timeLabel} · ${escapeHtml(validationLabel)}</div>
+    <details class="submission-item-details">
+      <summary>Preview &amp; metadata</summary>
+      <img src="${getImageUrl(item)}" alt="${escapeHtml(item.video_id)}, ${escapeHtml(previewLabel)} for source frame ${item.frame_idx}" loading="lazy" decoding="async">
+      <dl>
+        <div><dt>frame_uid</dt><dd>${escapeHtml(frameUid)}</dd></div>
+        <div><dt>frame_idx</dt><dd>${item.frame_idx} (submission)</dd></div>
+        <div><dt>keyframe_n</dt><dd>${item.keyframe_n ?? "unknown"} (navigation)</dd></div>
+        <div><dt>preview</dt><dd>${escapeHtml(previewLabel)}</dd></div>
+        <div><dt>timestamp</dt><dd>${timeLabel}</dd></div>
+        <div><dt>FPS</dt><dd>${fpsLabel}</dd></div>
+        <div><dt>source</dt><dd>${escapeHtml(relatedLabel)}</dd></div>
+      </dl>
+    </details>
     ${options.onMove ? `<div class="submission-reorder"><button type="button" data-move="-1" aria-label="Move up">↑</button><button type="button" data-move="1" aria-label="Move down">↓</button><span>drag to reorder</span></div>` : ""}`;
   row.querySelector(".submission-remove").addEventListener("click", options.onRemove);
   row.querySelectorAll("[data-move]").forEach((button) => button.addEventListener("click", () => options.onMove(Number(/** @type {HTMLElement} */ (button).dataset.move))));
-  const videoInput = /** @type {HTMLInputElement} */ (row.querySelector(".submission-video-edit"));
-  const frameInput = /** @type {HTMLInputElement} */ (row.querySelector(".submission-frame-edit"));
-  const saveEdit = () => options.onEdit({ video_id: videoInput.value, frame_idx: Number(frameInput.value), validation: "unverified" });
-  videoInput.addEventListener("change", saveEdit);
-  frameInput.addEventListener("change", saveEdit);
+  const preview = /** @type {HTMLImageElement} */ (row.querySelector(".submission-item-details img"));
+  preview.addEventListener("error", () => {
+    preview.hidden = true;
+  }, { once: true });
   return row;
 }
 
-async function updateAndValidateSubmissionFrame(identityOrOrder, patch) {
-  const editSnapshot = submissionStore.getSnapshot();
-  const editContext = editSnapshot.contextKey;
-  const editMode = editSnapshot.mode;
-  const editedFrameIdentity = frameIdentity(patch);
-  const updated = submissionStore.updateFrame(identityOrOrder, patch);
-  if (!updated) {
-    showToast("That edit is invalid or duplicates an existing draft frame.", "error");
-    renderSubmissionRail(submissionStore.getSnapshot());
-    return;
+async function resolveCanonicalFrame(item, signal = undefined) {
+  const identity = frameIdentity(item);
+  if (!identity) throw new Error("This item has no valid video_id/frame_idx identity.");
+  if (!canonicalFrameCache.has(identity)) {
+    const [videoId, frameIndex] = identity.split(":");
+    const response = await fetch(
+      `/api/frame/${encodeURIComponent(videoId)}/${encodeURIComponent(frameIndex)}`,
+      { signal },
+    );
+    if (!response.ok) throw await responseError(response, "Exact indexed frame verification failed");
+    const payload = await response.json();
+    const canonical = payload?.exact_match === true ? payload.keyframe : null;
+    if (!canonical || frameIdentity(canonical) !== identity) {
+      throw new Error("The server returned a different frame identity; selection was blocked.");
+    }
+    canonicalFrameCache.set(identity, canonical);
   }
+  return { ...item, ...canonicalFrameCache.get(identity), validation: "canonical" };
+}
+
+async function resolveSourceFrame(item, signal = undefined) {
+  const identity = frameIdentity(item);
+  if (!identity) throw new Error("Enter a valid zero-based source-frame index.");
+  if (!sourceFrameCache.has(identity)) {
+    const [videoId, frameIndex] = identity.split(":");
+    const response = await fetch(
+      `/api/video/${encodeURIComponent(videoId)}/source-frame/${encodeURIComponent(frameIndex)}`,
+      { signal },
+    );
+    if (!response.ok) throw await responseError(response, "Source-frame verification failed");
+    const payload = await response.json();
+    const verified = payload?.exact_match === true ? payload.source_frame : null;
+    if (
+      !verified
+      || frameIdentity(verified) !== identity
+      || Number(verified.frame_index_base) !== 0
+      || !Number.isInteger(Number(verified.max_frame_idx))
+      || Number(verified.frame_idx) > Number(verified.max_frame_idx)
+      || !Number.isFinite(Number(verified.pts_time_s))
+    ) {
+      throw new Error("The server returned an inconsistent source-frame identity; selection was blocked.");
+    }
+    sourceFrameCache.set(identity, verified);
+  }
+  return { ...item, ...sourceFrameCache.get(identity) };
+}
+
+async function fillRelatedSubmissionFrames(seed, contextKey, mode) {
+  if (mode === "TRAKE" || state.capabilities.related_frame_fill === false) return;
+  relatedFillAbortController?.abort();
+  relatedFillAbortController = new AbortController();
+  const requestId = ++relatedFillRequestId;
+  const statusKey = relatedFillStatusKey(contextKey, mode);
+  Object.entries(state.relatedFillStatusByContext).forEach(([key, status]) => {
+    if (status?.state === "loading") delete state.relatedFillStatusByContext[key];
+  });
+  state.relatedFillStatusByContext[statusKey] = { state: "loading" };
+  renderSubmissionRail(submissionStore.getSnapshot());
   try {
-    const timeline = await fetchVideoTimeline(patch.video_id);
-    const canonical = timeline.keyframes.find((frame) => Number(frame.frame_idx) === Number(patch.frame_idx));
-    if (!canonical) {
-      showToast("Frame index is not present in that video's canonical keyframe map.", "error");
+    const response = await fetch("/api/submission/related-frames", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: relatedFillAbortController.signal,
+      body: JSON.stringify({
+        video_id: seed.video_id,
+        frame_idx: Number(seed.frame_idx),
+        limit: 99,
+      }),
+    });
+    if (!response.ok) throw await responseError(response, "Related-frame fill failed");
+    const payload = await response.json();
+    const snapshot = submissionStore.getSnapshot();
+    if (
+      requestId !== relatedFillRequestId
+      || snapshot.contextKey !== contextKey
+      || snapshot.mode !== mode
+    ) {
+      delete state.relatedFillStatusByContext[statusKey];
       return;
     }
-    const currentSnapshot = submissionStore.getSnapshot();
-    if (currentSnapshot.contextKey !== editContext || currentSnapshot.mode !== editMode) return;
-    const currentDraft = currentSubmissionDraft(currentSnapshot);
-    const currentItem = currentSnapshot.mode === "TRAKE"
-      ? currentDraft.eventSlots?.[String(identityOrOrder)]
-      : currentDraft.items?.find((item) => frameIdentity(item) === editedFrameIdentity);
-    if (!currentItem || frameIdentity(currentItem) !== editedFrameIdentity) return;
-    const currentIdentity = currentSnapshot.mode === "TRAKE" ? identityOrOrder : editedFrameIdentity;
-    submissionStore.updateFrame(currentIdentity, { ...canonical, validation: "canonical" });
-    showToast("Manual edit matched a canonical indexed keyframe.", "success");
+    const applied = submissionStore.setRelatedFrames(seed, payload.results || [], mode);
+    if (!applied.ok) {
+      delete state.relatedFillStatusByContext[statusKey];
+      return;
+    }
+    state.relatedFillStatusByContext[statusKey] = { state: "ready" };
+    renderSubmissionRail(submissionStore.getSnapshot());
+    showToast(`Added ${applied.count} visually related frame suggestions.`, "success");
   } catch (error) {
-    showToast(`Could not verify that edit: ${error.message}`, "error");
+    if (error.name === "AbortError" || requestId !== relatedFillRequestId) {
+      delete state.relatedFillStatusByContext[statusKey];
+      return;
+    }
+    state.relatedFillStatusByContext[statusKey] = {
+      state: "error",
+      message: `Auto-related fill unavailable: ${error.message}`,
+    };
+    renderSubmissionRail(submissionStore.getSnapshot());
+    showToast("The verified seed was kept, but related-frame fill is unavailable.", "error");
   }
 }
 
-function addFrameToSubmission(item, context = {}) {
-  const eventOrder = context.eventOrder || item?.event_order || null;
-  const result = submissionStore.addFrame(item, {
-    source: context.source || item?.retrieval_modality || "result",
-    eventOrder,
-    validation: item?.validation || "canonical",
-  });
-  if (!result.ok) {
-    showToast("This result does not contain a valid canonical frame reference.", "error");
+async function verifyAndAddSubmissionFrame(item, context, resolver) {
+  const startSnapshot = submissionStore.getSnapshot();
+  try {
+    const verified = await resolver(item);
+    const currentSnapshot = submissionStore.getSnapshot();
+    if (
+      currentSnapshot.contextKey !== startSnapshot.contextKey
+      || currentSnapshot.mode !== startSnapshot.mode
+    ) return;
+    const eventOrder = context.eventOrder || item?.event_order || null;
+    const result = submissionStore.addFrame(verified, {
+      source: context.source || item?.retrieval_modality || "result",
+      eventOrder,
+      validation: verified.validation,
+    });
+    if (!result.ok) {
+      const message = result.reason === "draft-full"
+        ? "The submission draft already contains 100 frames."
+        : result.reason === "invalid-trake-order"
+          ? "TRAKE frames must use one video and increase in exact frame order."
+          : "This result does not contain a valid source-frame reference.";
+      showToast(message, "error");
+      return;
+    }
+    const suffix = state.taskType === "TRAKE" ? ` to E${result.eventOrder}` : "";
+    showToast(`Added exact source frame ${result.frame.video_id}, ${result.frame.frame_idx}${suffix}.`, "success");
+    if (result.firstManual) {
+      void fillRelatedSubmissionFrames(
+        result.frame,
+        currentSnapshot.contextKey,
+        currentSnapshot.mode,
+      );
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function addFrameToSubmission(item, context = {}) {
+  return verifyAndAddSubmissionFrame(item, context, resolveCanonicalFrame);
+}
+
+async function addSourceFrameToSubmission(item, context = {}) {
+  return verifyAndAddSubmissionFrame(item, context, resolveSourceFrame);
+}
+
+async function addCanonicalTrakeSequence(items, videoId) {
+  const expectedEventCount = state.activeWorkspace === "kis_fusion"
+    ? kisSequenceEvents().length
+    : getUsableTemporalEvents().length;
+  if (!Array.isArray(items) || expectedEventCount < 2 || items.length !== expectedEventCount) {
+    showToast("TRAKE requires one verified frame for every ordered event.", "error");
     return;
   }
-  const suffix = state.taskType === "TRAKE" ? ` to E${result.eventOrder}` : "";
-  showToast(`Added ${result.frame.video_id}, ${result.frame.frame_idx}${suffix}.`, "success");
+  submissionStore.setMode("TRAKE");
+  const startSnapshot = submissionStore.getSnapshot();
+  try {
+    const frames = await Promise.all((items || []).map((item) => resolveCanonicalFrame(item)));
+    const snapshot = submissionStore.getSnapshot();
+    if (
+      snapshot.contextKey !== startSnapshot.contextKey
+      || snapshot.mode !== "TRAKE"
+    ) return;
+    const ordered = frames
+      .map((frame, index) => ({ ...frame, event_order: Number(items[index]?.event_order) || index + 1 }))
+      .sort((left, right) => left.event_order - right.event_order);
+    const result = submissionStore.addSequence(ordered, {
+      source: "ordered-sequence",
+      validation: "canonical",
+    });
+    if (!result.ok) throw new Error("The ordered sequence contains an invalid frame identity.");
+    showToast(`Added ${ordered.length} exact ordered events from ${videoId}.`, "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
 }
 
 function setSearchBusy(isBusy) {
@@ -1737,7 +2358,10 @@ function updateDiscoveryButtonState(isBusy = false) {
 }
 
 function getUsableTemporalEvents() {
-  const editorLines = String(el.temporalEventsEditor?.value || "")
+  const sourceEditor = state.activeWorkspace === "kis_fusion" && state.taskType === "TRAKE"
+    ? el.kisTrakeSequenceEditor
+    : el.temporalEventsEditor;
+  const editorLines = String(sourceEditor?.value || "")
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/^E\d+\s*[:.)-]\s*/i, ""))
     .filter(Boolean)
@@ -2173,36 +2797,103 @@ async function handleExecuteJsonClick() {
 }
 
 async function runTemporalIntersection() {
-  const events = getUsableTemporalEvents();
+  const isKisOrdered = state.activeWorkspace === "kis_fusion";
+  const events = isKisOrdered ? kisSequenceEvents() : getUsableTemporalEvents();
   if (events.length < 2) {
-    showToast("Ordered search needs at least two trake_events with non-empty scene_en values.", "error");
+    showToast(
+      isKisOrdered
+        ? "Ordered KIS search needs at least two non-empty event lines."
+        : "Ordered search needs at least two trake_events with non-empty scene_en values.",
+      "error",
+    );
     return;
   }
+  let queryBundle = null;
+  if (isKisOrdered) {
+    if (!validateKisFusionEditor()) return;
+    queryBundle = parseKisFusionBundle();
+  }
 
-  temporalAbortController?.abort();
-  temporalAbortController = new AbortController();
-  const requestId = ++temporalRequestId;
+  const requestController = new AbortController();
+  let requestId;
+  if (isKisOrdered) {
+    kisTemporalAbortController?.abort();
+    kisTemporalAbortController = requestController;
+    requestId = ++kisTemporalRequestId;
+  } else {
+    temporalAbortController?.abort();
+    temporalAbortController = requestController;
+    requestId = ++temporalRequestId;
+  }
+  const isCurrentRequest = () => isKisOrdered
+    ? requestId === kisTemporalRequestId
+    : requestId === temporalRequestId;
+  if (isKisOrdered) state.kisTemporalIntersection = null;
+  else state.temporalIntersection = null;
   const previousTopK = el.selectTopK.value;
   const previousActiveModality = state.activeModality;
   const previousTimingText = el.timingBadge.textContent;
-  const maxGapSeconds = Number(el.selectTemporalGap.value) || 30;
-  const anchorQuery = String(state.parsedQuery?.global_scene_en || "").trim();
+  const maxGapSeconds = Number(
+    isKisOrdered ? el.kisTrakeGap.value : el.selectTemporalGap.value,
+  ) || 30;
+  // Ordered KIS focuses the complete six-role bundle independently for every
+  // event. Never let a stale diagnostic shared-scene anchor alter that path.
+  const anchorQuery = isKisOrdered
+    ? ""
+    : String(state.parsedQuery?.global_scene_en || "").trim();
 
   setSearchBusy(true);
+  if (isKisOrdered) {
+    state.kisFusionBusy = true;
+    el.btnRunKisFusion.disabled = true;
+    el.btnRunKisTrake.disabled = true;
+    el.btnRunKisTrake.textContent = "Running full KIS per event…";
+    setSubmissionContext(
+      "kis_fusion",
+      `ordered-kis:${JSON.stringify({ query_bundle: queryBundle, events })}`,
+    );
+    if (state.taskType === "TRAKE") {
+      submissionStore.setTrakeEvents(events.map((event) => ({
+        order: event.order,
+        label: event.description,
+      })));
+    }
+  }
   clearSubmissionSelection();
   if (!el.modal.classList.contains("hidden")) closeInspector();
   state.searchResults = [];
-  el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
-  el.resultsCount.textContent = `Searching ${events.length} ordered events…`;
-  el.resultsGrid.innerHTML = `<div class="empty-placeholder" aria-live="polite"><div class="empty-icon">⛓</div><div class="empty-title">Intersecting ordered visual events</div><div class="empty-desc">Every event runs as an independent SigLIP search. Candidate video IDs are intersected before timestamp order is enforced.</div></div>`;
-  el.timingBadge.textContent = `Searching ${events.length} SigLIP event pools...`;
-  setServerStatus("Ordered SigLIP intersection…", "pending");
+  const resultsGrid = isKisOrdered ? el.kisFusionResultsGrid : el.resultsGrid;
+  const resultsCount = isKisOrdered ? el.kisFusionResultsCount : el.resultsCount;
+  const timingBadge = isKisOrdered ? el.kisFusionTiming : el.timingBadge;
+  if (isKisOrdered) el.kisFusionResultsHeading.textContent = "ORDERED KIS RESULTS";
+  else el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
+  resultsCount.textContent = `Searching ${events.length} ordered events…`;
+  resultsGrid.innerHTML = `<div class="empty-placeholder" aria-live="polite"><div class="empty-icon">⛓</div><div class="empty-title">${isKisOrdered ? "Running full KIS for every event" : "Intersecting ordered visual events"}</div><div class="empty-desc">${isKisOrdered ? "Each event uses Branch 1, Branch 2, OCR, ASR, weighted RRF and final BEiT-3 reranking before same-video source-frame ordering." : "Every prompt runs as an independent sequence search. Candidate video IDs are intersected before timestamp order is enforced."}</div></div>`;
+  timingBadge.textContent = `Searching ${events.length} event pools...`;
+  setServerStatus(
+    isKisOrdered ? "Ordered full KIS fusion…" : "Ordered SigLIP intersection…",
+    "pending",
+  );
 
   try {
-    const response = await fetch("/api/search/temporal-intersection", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const endpoint = isKisOrdered
+      ? "/api/search/fusion/kis/temporal"
+      : "/api/search/temporal-intersection";
+    const requestBody = isKisOrdered
+      ? {
+        task_type: state.taskType,
+        query_bundle: queryBundle,
+        events,
+        branch_weights: {
+          branch1: Number(el.kisFusionWeightBranch1.value),
+          branch2: Number(el.kisFusionWeightBranch2.value),
+          ocr: Number(el.kisFusionWeightOcr.value),
+          asr: Number(el.kisFusionWeightAsr.value),
+        },
+        top_k_sequences: Number(el.kisTrakeSequences.value) || 100,
+        max_gap_seconds: maxGapSeconds,
+      }
+      : {
         events,
         anchor_query: anchorQuery || null,
         top_k_per_event: Number(el.selectTemporalCandidates.value) || 300,
@@ -2212,27 +2903,43 @@ async function runTemporalIntersection() {
           ? null
           : Number(el.selectTemporalReservoir.value),
         max_gap_seconds: maxGapSeconds,
-      }),
-      signal: temporalAbortController.signal,
+      };
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal: requestController.signal,
     });
     if (!response.ok) throw await responseError(response, "Ordered search failed");
     const data = await response.json();
-    if (requestId !== temporalRequestId) return;
+    if (!isCurrentRequest()) return;
 
-    state.temporalIntersection = {
+    const intersectionState = {
       data,
       previousTopK,
       previousActiveModality,
       previousTimingText,
     };
+    if (isKisOrdered) {
+      state.kisTemporalIntersection = intersectionState;
+      state.kisFusionView = "sequence";
+    } else {
+      state.temporalIntersection = intersectionState;
+    }
     el.selectTopK.value = "20";
     el.modalityTabs.forEach((tab) => {
       tab.classList.remove("active");
       tab.setAttribute("aria-selected", "false");
     });
-    el.timingBadge.textContent = `${data.event_count} event pools intersected in ${data.execution_time_ms}ms`;
-    setServerStatus("Ordered SigLIP · cross-modal fusion off", "ready");
-    renderModalityResults();
+    timingBadge.textContent = `${data.event_count} event pools completed in ${data.execution_time_ms}ms`;
+    setServerStatus(
+      isKisOrdered
+        ? "Ordered KIS · full fusion per event"
+        : "Ordered SigLIP · cross-modal fusion off",
+      "ready",
+    );
+    if (isKisOrdered) renderTemporalIntersection(20, ++resultsRenderId);
+    else renderModalityResults();
     const count = Number(data.ordered_sequence_count ?? data.sequences?.length ?? 0);
     showToast(
       count > 0 ? `Found ${count} ordered video sequence${count === 1 ? "" : "s"}.` : "No video satisfied every event in order.",
@@ -2241,13 +2948,28 @@ async function runTemporalIntersection() {
   } catch (error) {
     if (error.name === "AbortError") return;
     console.error(error);
-    el.resultsHeading.textContent = "🎯 RAW MODALITY RESULTS";
-    el.timingBadge.textContent = previousTimingText;
-    setServerStatus("No fusion / no reranking", "ready");
-    renderModalityResults();
+    if (isKisOrdered) {
+      el.kisFusionResultsCount.textContent = "Sequence search failed";
+      el.kisFusionTiming.textContent = "Ready";
+      el.kisFusionResultsGrid.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Ordered KIS failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
+    } else {
+      el.resultsHeading.textContent = "🎯 RAW MODALITY RESULTS";
+      el.timingBadge.textContent = previousTimingText;
+      renderModalityResults();
+    }
+    setServerStatus(isKisOrdered ? "Ordered KIS failed" : "No fusion / no reranking", isKisOrdered ? "error" : "ready");
     showToast(error.message, "error");
   } finally {
-    if (requestId === temporalRequestId) setSearchBusy(false);
+    if (isCurrentRequest()) setSearchBusy(false);
+    if (isKisOrdered && isCurrentRequest()) {
+      state.kisFusionBusy = false;
+      kisTemporalAbortController = null;
+      el.btnRunKisTrake.textContent = "Run ordered KIS fusion";
+      el.btnRunKisFusion.disabled = !state.kisFusionReady || !state.kisFusionBundleValid;
+      updateKisTaskUi();
+    } else if (!isKisOrdered && isCurrentRequest()) {
+      temporalAbortController = null;
+    }
   }
 }
 
@@ -2517,13 +3239,43 @@ async function fetchVideoTimeline(videoId, signal = undefined) {
         continue;
       }
       const data = await response.json();
+      const responseVideoId = normalizeRequestedVideoId(data.video_id || canonicalId);
+      if (responseVideoId !== canonicalId) {
+        throw new Error("Timeline response returned a different video identity.");
+      }
       const keyframes = (data.keyframes || [])
         .map((frame) => ({ ...frame, video_id: canonicalId, validation: "canonical" }))
-        .sort((left, right) => Number(left.pts_time_s) - Number(right.pts_time_s));
+        .sort((left, right) => Number(left.frame_idx) - Number(right.frame_idx));
       if (!keyframes.length) throw new Error(`No indexed keyframes were found for ${canonicalId}.`);
+      const fps = Number(data.fps) || deriveTimelineFps(keyframes);
+      if (!Number.isFinite(fps) || fps <= 0) throw new Error(`FPS metadata is invalid for ${canonicalId}.`);
+      const validAnchors = keyframes.every((frame, index) => (
+        Number.isInteger(Number(frame.frame_idx))
+        && Number(frame.frame_idx) >= 0
+        && Number.isFinite(Number(frame.pts_time_s))
+        && Number(frame.pts_time_s) >= 0
+        && (
+          index === 0
+          || (
+            Number(frame.frame_idx) > Number(keyframes[index - 1].frame_idx)
+            && Number(frame.pts_time_s) > Number(keyframes[index - 1].pts_time_s)
+          )
+        )
+      ));
+      if (!validAnchors) throw new Error(`Indexed-frame anchors are inconsistent for ${canonicalId}.`);
+      const frameIndexBase = Number(data.frame_index_base ?? 0);
+      const fallbackMax = Number(keyframes[keyframes.length - 1].frame_idx);
+      const maxFrameIdx = Number(data.max_frame_idx ?? fallbackMax);
+      if (frameIndexBase !== 0 || !Number.isInteger(maxFrameIdx) || maxFrameIdx < fallbackMax) {
+        throw new Error(`Source-frame bounds are inconsistent for ${canonicalId}.`);
+      }
       return {
-        videoId: data.video_id || canonicalId,
-        fps: Number(data.fps) || deriveTimelineFps(keyframes),
+        videoId: responseVideoId,
+        fps,
+        durationS: Number(data.duration_s) || Number(keyframes[keyframes.length - 1].pts_time_s),
+        frameIndexBase,
+        maxFrameIdx,
+        timingMethod: String(data.timing_method || "exact-anchor-piecewise-linear-v1"),
         keyframes,
       };
     } catch (error) {
@@ -2551,14 +3303,22 @@ async function loadStandaloneVideo(requestedVideoId) {
   const requestId = ++watchLoadRequestId;
   state.watch.videoId = "";
   state.watch.fps = null;
+  state.watch.durationS = null;
+  state.watch.frameIndexBase = 0;
+  state.watch.maxFrameIdx = null;
+  state.watch.currentFrameIdx = null;
+  state.watch.timingMethod = "";
   state.watch.keyframes = [];
   state.watch.nearest = null;
+  state.watch.selected = null;
   state.watch.searchResults = [];
+  el.watchExactFrameInput.value = "";
+  el.watchSelectedFrameStatus.textContent = "No source frame selected";
   updateWatchMapping(0);
   el.standaloneVideoSearchResults.replaceChildren();
   el.standaloneVideoSearchResults.classList.add("hidden");
   el.btnStandaloneVideoSearch.disabled = true;
-  el.standaloneVideoSource.textContent = "Loading canonical timeline…";
+  el.standaloneVideoSource.textContent = "Loading verified source-frame timeline…";
   el.standaloneVideoSource.classList.remove("ready", "error");
   el.standaloneVideoArea.classList.remove("hidden");
   el.btnSubmitWatchFrame.disabled = true;
@@ -2568,17 +3328,29 @@ async function loadStandaloneVideo(requestedVideoId) {
     if (requestId !== watchLoadRequestId) return;
     state.watch.videoId = timeline.videoId;
     state.watch.fps = timeline.fps;
+    state.watch.durationS = timeline.durationS;
+    state.watch.frameIndexBase = timeline.frameIndexBase;
+    state.watch.maxFrameIdx = timeline.maxFrameIdx;
+    state.watch.timingMethod = timeline.timingMethod;
     state.watch.keyframes = timeline.keyframes;
     state.watch.nearest = nearestKeyframe(timeline.keyframes, 0);
-    const firstFrame = timeline.keyframes[0];
-    standaloneVideoController.setFrame(toVideoFrame(firstFrame));
-    updateWatchMapping(Number(firstFrame.pts_time_s) || 0);
-    await standaloneVideoController.preload(toVideoFrame(firstFrame));
+    const initialSourceFrame = await resolveSourceFrame(
+      { video_id: timeline.videoId, frame_idx: timeline.frameIndexBase },
+      watchLoadAbortController.signal,
+    );
+    if (requestId !== watchLoadRequestId) return;
+    el.watchExactFrameInput.min = String(timeline.frameIndexBase);
+    el.watchExactFrameInput.max = String(timeline.maxFrameIdx);
+    el.watchExactFrameInput.value = String(timeline.frameIndexBase);
+    standaloneVideoController.setFrame(toVideoFrame(initialSourceFrame));
+    updateWatchMapping(Number(initialSourceFrame.pts_time_s) || 0);
+    await standaloneVideoController.preload(toVideoFrame(initialSourceFrame));
     if (requestId !== watchLoadRequestId) return;
     await standaloneVideoController.activate();
     if (requestId !== watchLoadRequestId) return;
-    el.standaloneVideoSource.textContent = `${timeline.videoId} · ${timeline.keyframes.length} indexed keyframes`;
+    el.standaloneVideoSource.textContent = `${timeline.videoId} · source frames ${timeline.frameIndexBase}–${timeline.maxFrameIdx} · ${timeline.keyframes.length} indexed previews`;
     el.btnStandaloneVideoSearch.disabled = false;
+    updateWatchSubmitButton();
     showToast(`Loaded ${timeline.videoId}.`, "success");
   } catch (error) {
     if (error.name === "AbortError" || requestId !== watchLoadRequestId) return;
@@ -2592,8 +3364,15 @@ async function loadStandaloneVideo(requestedVideoId) {
 function updateWatchMapping(playbackSeconds) {
   const seconds = Number(playbackSeconds);
   el.watchPlaybackTime.textContent = Number.isFinite(seconds) ? `${seconds.toFixed(1)}s` : "—";
-  const estimated = estimateRawFrame(seconds, state.watch.fps);
-  el.watchEstimatedFrame.textContent = estimated === null ? "—" : String(estimated);
+  const currentFrameIdx = secondsToFrameIndex(
+    seconds,
+    state.watch.keyframes,
+    state.watch.fps,
+    state.watch.frameIndexBase,
+    state.watch.maxFrameIdx,
+  );
+  state.watch.currentFrameIdx = currentFrameIdx;
+  el.watchEstimatedFrame.textContent = currentFrameIdx === null ? "—" : String(currentFrameIdx);
   const match = nearestKeyframe(state.watch.keyframes, seconds);
   state.watch.nearest = match;
   if (!match) {
@@ -2611,27 +3390,82 @@ function updateWatchMapping(playbackSeconds) {
   el.watchMappingDelta.textContent = `${sign}${match.deltaSeconds.toFixed(3)}s`;
   const poster = document.getElementById("standalone-video-poster");
   if (poster && poster.getAttribute("src") !== getImageUrl(match.frame)) poster.setAttribute("src", getImageUrl(match.frame));
-  el.btnWatchPrevKeyframe.disabled = match.index <= 0;
-  el.btnWatchNextKeyframe.disabled = match.index >= state.watch.keyframes.length - 1;
   updateWatchSubmitButton();
 }
 
 function updateWatchSubmitButton() {
   if (!el.btnSubmitWatchFrame) return;
-  const frame = state.watch.nearest?.frame;
+  const frame = state.watch.selected;
   el.btnSubmitWatchFrame.disabled = !frame;
   const selected = frame ? submissionStore.hasFrame(frame) : false;
   el.btnSubmitWatchFrame.classList.toggle("in-submit", selected);
-  el.btnSubmitWatchFrame.textContent = selected ? "✓ Added to submission" : "+ Add nearest indexed frame";
+  el.btnSubmitWatchFrame.textContent = selected
+    ? "✓ Selected source frame is in submission"
+    : "+ Add selected source frame";
+  const activeFrameIdx = frame?.frame_idx ?? state.watch.currentFrameIdx;
+  el.btnWatchPrevKeyframe.disabled = !Number.isInteger(Number(activeFrameIdx))
+    || Number(activeFrameIdx) <= state.watch.frameIndexBase;
+  el.btnWatchNextKeyframe.disabled = !Number.isInteger(Number(activeFrameIdx))
+    || !Number.isInteger(Number(state.watch.maxFrameIdx))
+    || Number(activeFrameIdx) >= Number(state.watch.maxFrameIdx);
 }
 
-function seekWatchNeighbor(direction) {
-  const match = state.watch.nearest;
-  if (!match) return;
-  const next = state.watch.keyframes[match.index + direction];
-  if (!next) return;
-  standaloneVideoController.seekTo(Number(next.pts_time_s));
-  updateWatchMapping(Number(next.pts_time_s));
+function stepWatchSourceFrame(direction) {
+  const typed = Number(el.watchExactFrameInput.value);
+  const current = Number.isInteger(typed)
+    ? typed
+    : state.watch.selected?.frame_idx ?? state.watch.currentFrameIdx;
+  if (!Number.isInteger(Number(current))) return;
+  const next = Math.max(
+    state.watch.frameIndexBase,
+    Math.min(Number(state.watch.maxFrameIdx), Number(current) + direction),
+  );
+  if (next === Number(current)) return;
+  void selectWatchSourceFrame(next, true);
+}
+
+async function selectWatchSourceFrame(frameIndex, seek = false) {
+  if (
+    !state.watch.videoId
+    || !Number.isInteger(frameIndex)
+    || frameIndex < state.watch.frameIndexBase
+    || frameIndex > state.watch.maxFrameIdx
+  ) {
+    showToast(
+      `Enter a whole frame index from ${state.watch.frameIndexBase} to ${state.watch.maxFrameIdx}.`,
+      "error",
+    );
+    return;
+  }
+  el.btnSelectWatchFrame.disabled = true;
+  try {
+    const sourceFrame = await resolveSourceFrame({
+      video_id: state.watch.videoId,
+      frame_idx: frameIndex,
+    });
+    if (state.watch.videoId !== sourceFrame.video_id) return;
+    state.watch.selected = sourceFrame;
+    el.watchExactFrameInput.value = String(sourceFrame.frame_idx);
+    el.watchSelectedFrameStatus.textContent = sourceFrame.indexed_keyframe
+      ? `Selected source frame ${sourceFrame.frame_idx} · indexed KF ${sourceFrame.keyframe_n} · ${Number(sourceFrame.pts_time_s).toFixed(3)}s`
+      : `Selected source frame ${sourceFrame.frame_idx} · ${Number(sourceFrame.pts_time_s).toFixed(3)}s · nearest indexed preview is frame ${sourceFrame.preview_frame_idx}`;
+    el.watchSelectedFrameStatus.classList.remove("error");
+    if (seek) {
+      standaloneVideoController.seekTo(Number(sourceFrame.pts_time_s));
+      updateWatchMapping(Number(sourceFrame.pts_time_s));
+    }
+    const poster = document.getElementById("standalone-video-poster");
+    if (poster) poster.setAttribute("src", getImageUrl(sourceFrame));
+    updateWatchSubmitButton();
+  } catch (error) {
+    state.watch.selected = null;
+    el.watchSelectedFrameStatus.textContent = error.message;
+    el.watchSelectedFrameStatus.classList.add("error");
+    updateWatchSubmitButton();
+    showToast(error.message, "error");
+  } finally {
+    el.btnSelectWatchFrame.disabled = false;
+  }
 }
 
 function directParsedQuery(query) {
@@ -2647,6 +3481,20 @@ function directParsedQuery(query) {
     trake_events: [],
     vqa_question: "",
   };
+}
+
+function currentVisualQuery() {
+  if (state.activeWorkspace === "kis_fusion") {
+    try {
+      const bundle = JSON.parse(el.kisFusionJsonEditor.value);
+      const original = (bundle.queries || []).find((query) => query.role === "original");
+      const text = String(original?.en || original?.vi || "").trim();
+      if (text) return text;
+    } catch {
+      // The scoped-search input stays editable when the main bundle is invalid.
+    }
+  }
+  return String(state.parsedQuery?.global_scene_en || "").trim();
 }
 
 async function parseScopedQuery(query, engine, signal = undefined) {
@@ -2670,10 +3518,23 @@ async function searchVideoWithText(videoId, query, engine = "direct", topK = 50,
   if (!canonicalId) throw new Error("The active frame has no valid dataset video ID.");
   if (!String(query || "").trim()) throw new Error("Enter a visual description to search inside this video.");
   const parsedQuery = await parseScopedQuery(String(query).trim(), engine, signal);
-  const response = await fetch(`/api/video/${encodeURIComponent(canonicalId)}/search/siglip`, {
+  const visualQuery = String(parsedQuery.global_scene_en || query).trim();
+  let contextBundle;
+  if (state.activeWorkspace === "kis_fusion" && state.kisFusionBundleValid) {
+    try {
+      contextBundle = parseKisFusionBundle();
+    } catch {
+      contextBundle = undefined;
+    }
+  }
+  const response = await fetch(`/api/video/${encodeURIComponent(canonicalId)}/search/visual-fusion`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ parsed_query: parsedQuery, top_k: topK }),
+    body: JSON.stringify({
+      query: visualQuery,
+      query_bundle: contextBundle,
+      top_k: topK,
+    }),
     signal,
   });
   if (!response.ok) throw await responseError(response, "Inside-video search failed");
@@ -2703,7 +3564,12 @@ async function runStandaloneVideoSearch() {
     if (requestId !== standaloneScopedRequestId) return;
     state.watch.searchResults = data.modality_result?.results || [];
     el.standaloneVideoSearchResults.replaceChildren();
-    renderStandardCards(state.watch.searchResults, el.standaloneVideoSearchResults, "siglip", ++resultsRenderId);
+    renderStandardCards(
+      state.watch.searchResults,
+      el.standaloneVideoSearchResults,
+      "visual_fusion",
+      ++resultsRenderId,
+    );
   } catch (error) {
     if (error.name === "AbortError") return;
     el.standaloneVideoSearchResults.innerHTML = `<div class="empty-placeholder"><div class="empty-title">Search failed</div><div class="empty-desc">${escapeHtml(error.message)}</div></div>`;
@@ -2752,7 +3618,7 @@ function renderInspectorLocalResults(results) {
       <button type="button" class="inspector-local-open"><strong>#${item.rank || index + 1}</strong><span>frame ${item.frame_idx} · ${Number(item.pts_time_s || 0).toFixed(1)}s</span><em>${Number(item.score || 0).toFixed(4)}</em></button>
       <button type="button" class="inspector-local-add" aria-label="Add frame ${item.frame_idx} to submission">+</button>`;
     row.querySelector(".inspector-local-open").addEventListener("click", () => void openStandardInspector(item, true));
-    row.querySelector(".inspector-local-add").addEventListener("click", () => addFrameToSubmission(item, { source: "video-scoped-siglip" }));
+    row.querySelector(".inspector-local-add").addEventListener("click", () => void addFrameToSubmission(item, { source: "video-scoped-visual-fusion" }));
     el.inspectorLocalResults.appendChild(row);
   });
   if (!results.length) el.inspectorLocalResults.innerHTML = `<div class="inspector-local-status">No frames returned.</div>`;
@@ -2763,7 +3629,7 @@ function renderInspectorLocalResults(results) {
 // ──────────────────────────────────────────────────────────────────────────────
 function getImageUrl(item) {
   const vid = item.video_id;
-  const relpath = String(item.image_relpath || "").replace(/^\/+/, "");
+  const relpath = String(item.image_relpath || item.preview_image_relpath || "").replace(/^\/+/, "");
   const filename = relpath ? relpath.split("/").pop() : `${String(item.frame_idx || 0).padStart(8, "0")}.jpg`;
   if (window.location.protocol === "file:") {
     return `file://${state.keyframesRoot}/${vid}/${filename}`;
@@ -2889,13 +3755,24 @@ function mergeUniqueCandidates(...candidateLists) {
 }
 
 function renderTemporalIntersection(limit, renderId) {
-  const data = state.temporalIntersection.data;
+  const kisTarget = state.activeWorkspace === "kis_fusion"
+    && state.kisFusionView === "sequence";
+  const intersection = kisTarget
+    ? state.kisTemporalIntersection
+    : state.temporalIntersection;
+  if (!intersection) return;
+  const data = intersection.data;
+  const fullKis = data.event_fusion_applied === true;
+  const targetGrid = kisTarget ? el.kisFusionResultsGrid : el.resultsGrid;
+  const targetCount = kisTarget ? el.kisFusionResultsCount : el.resultsCount;
   const sequences = (data.sequences || []).slice(0, limit);
   const allSequenceFrames = (data.sequences || [])
     .flatMap((sequence) => sequence.matched_events || []);
   state.searchResults = mergeUniqueCandidates(allSequenceFrames, getAllSearchCandidates());
-  el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
-  el.resultsCount.textContent = `${sequences.length} shown of ${data.ordered_sequence_count || 0} ordered video sequences`;
+  if (kisTarget) el.kisFusionResultsHeading.textContent = "ORDERED KIS RESULTS";
+  else el.resultsHeading.textContent = "⛓ ORDERED SIGLIP INTERSECTION";
+  targetCount.textContent = `${sequences.length} shown of ${data.ordered_sequence_count || 0} ordered video sequences`;
+  targetGrid.replaceChildren();
 
   const overview = document.createElement("section");
   overview.className = "temporal-overview-section";
@@ -2906,31 +3783,32 @@ function renderTemporalIntersection(limit, renderId) {
     <div class="video-drilldown-header">
       <div>
         <div class="video-drilldown-eyebrow">Same-video intersection · strictly increasing timestamps</div>
-        <div class="video-drilldown-title">Ordered sequence search using SigLIP only</div>
+        <div class="video-drilldown-title">${fullKis ? "Ordered sequence search using full KIS Fusion per event" : "Ordered sequence search using SigLIP only"}</div>
         <div class="video-drilldown-query">${eventTrace}</div>
       </div>
-      <button type="button" class="btn-back-pools">← Back to four raw pools</button>
+      ${kisTarget ? "" : '<button type="button" class="btn-back-pools">← Back to four raw pools</button>'}
     </div>
     <div class="video-drilldown-audit">
-      <span>${data.event_count} independent event pools</span>
+      <span>${data.event_count} ${fullKis ? "full KIS event runs" : "independent event pools"}</span>
       <span>Top ${data.top_k_per_event} frames/event</span>
       <span>${data.paths_per_video || 1} path${Number(data.paths_per_video || 1) === 1 ? "" : "s"}/video</span>
       <span>${data.sequence_reservoir_count ?? data.ordered_sequence_count ?? 0}/${data.sequence_reservoir_size ?? data.top_k_sequences} sequence reservoir</span>
       <span>${data.intersection_video_count || 0} common videos</span>
-      <span>shared-scene anchor ${data.anchor_query_applied ? "ON" : "OFF"}</span>
+      ${fullKis ? "" : `<span>shared-scene anchor ${data.anchor_query_applied ? "ON" : "OFF"}</span>`}
       <span>max consecutive gap ${data.max_gap_seconds}s</span>
-      <span>cross-modal fusion OFF</span>
-      <span>score = (anchor + weakest event) / 2</span>
-      <span>reranking OFF</span>
+      ${fullKis ? "<span>0-based canonical source-frame order</span>" : ""}
+      <span>${fullKis ? "Branch 1 + Branch 2 + OCR + ASR" : "cross-modal fusion OFF"}</span>
+      <span>${fullKis ? "score = weakest KIS final score" : "score = (anchor + weakest event) / 2"}</span>
+      <span>${fullKis ? "BEiT-3 final rerank ON" : "reranking OFF"}</span>
     </div>`;
-  overview.querySelector(".btn-back-pools").addEventListener("click", exitTemporalIntersection);
-  el.resultsGrid.appendChild(overview);
+  overview.querySelector(".btn-back-pools")?.addEventListener("click", exitTemporalIntersection);
+  targetGrid.appendChild(overview);
 
   if (sequences.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-placeholder temporal-empty-state";
-    empty.innerHTML = `<div class="empty-icon">∅</div><div class="empty-title">No ordered intersection</div><div class="empty-desc">The event searches returned individual frames, but no common video contained every event in the requested timestamp order. Edit the event scene_en queries or increase the maximum gap.</div>`;
-    el.resultsGrid.appendChild(empty);
+    empty.innerHTML = `<div class="empty-icon">∅</div><div class="empty-title">No ordered intersection</div><div class="empty-desc">The event searches returned individual frames, but no common video contained every event in the requested timestamp order. Edit the event prompts or increase the maximum gap.</div>`;
+    targetGrid.appendChild(empty);
     return;
   }
 
@@ -2938,6 +3816,8 @@ function renderTemporalIntersection(limit, renderId) {
     const section = document.createElement("section");
     section.className = "temporal-sequence-section";
     const gaps = (sequence.gaps_seconds || []).map((gap) => `${Number(gap).toFixed(1)}s`).join(" · ");
+    const sequenceIsComplete = Array.isArray(sequence.matched_events)
+      && sequence.matched_events.length === Number(data.event_count);
     section.innerHTML = `
       <div class="temporal-sequence-header">
         <div>
@@ -2945,20 +3825,18 @@ function renderTemporalIntersection(limit, renderId) {
           <div class="temporal-sequence-title">${escapeHtml(sequence.video_id)}</div>
         </div>
         <div class="temporal-sequence-metrics">
-          <span title="Primary sequence score: arithmetic mean of shared-scene anchor cosine and weakest event cosine">sequence ${Number(sequence.sequence_score || 0).toFixed(4)}</span>
+          <span title="${fullKis ? "Primary sequence score: weakest event-level KIS final score" : "Primary sequence score: arithmetic mean of shared-scene anchor cosine and weakest event cosine"}">sequence ${Number(sequence.sequence_score || 0).toFixed(4)}</span>
           ${data.anchor_query_applied ? `<span title="Primary discovery rank: raw SigLIP cosine for the shared global scene">anchor cosine ${Number(sequence.context_anchor_score || 0).toFixed(4)}</span>` : ""}
-          <span title="Primary sequence rank: the weakest event-level raw SigLIP cosine">min cosine ${Number(sequence.minimum_event_score || 0).toFixed(4)}</span>
-          <span title="Secondary sequence rank: arithmetic mean of event-level raw SigLIP cosines">mean cosine ${Number(sequence.mean_event_score || 0).toFixed(4)}</span>
+          <span title="Primary sequence rank: the weakest event-level ${fullKis ? "KIS final score" : "raw SigLIP cosine"}">min ${fullKis ? "KIS" : "cosine"} ${Number(sequence.minimum_event_score || 0).toFixed(4)}</span>
+          <span title="Secondary sequence rank: arithmetic mean of event-level ${fullKis ? "KIS final scores" : "raw SigLIP cosines"}">mean ${fullKis ? "KIS" : "cosine"} ${Number(sequence.mean_event_score || 0).toFixed(4)}</span>
           <span>span ${Number(sequence.span_seconds || 0).toFixed(1)}s</span>
           <span>gaps ${escapeHtml(gaps || "-")}</span>
           <span>global rank sum ${sequence.global_rank_sum}</span>
         </div>
-        <button type="button" class="btn-add-sequence">+ Add whole sequence</button>
+        ${state.taskType === "TRAKE" && sequenceIsComplete ? '<button type="button" class="btn-add-sequence">+ Add whole sequence</button>' : ""}
       </div>`;
-    section.querySelector(".btn-add-sequence").addEventListener("click", () => {
-      submissionStore.setMode("TRAKE");
-      submissionStore.addSequence(sequence.matched_events || [], { source: "ordered-sequence" });
-      showToast(`Added ${sequence.matched_events?.length || 0} ordered events from ${sequence.video_id}.`, "success");
+    section.querySelector(".btn-add-sequence")?.addEventListener("click", () => {
+      void addCanonicalTrakeSequence(sequence.matched_events || [], sequence.video_id);
     });
 
     const eventGrid = document.createElement("div");
@@ -2976,7 +3854,7 @@ function renderTemporalIntersection(limit, renderId) {
         </div>`;
       const cardGrid = document.createElement("div");
       cardGrid.className = "temporal-event-card";
-      renderStandardCards([match], cardGrid, "siglip", renderId);
+      renderStandardCards([match], cardGrid, fullKis ? "kis_fusion" : "siglip", renderId);
       event.appendChild(cardGrid);
       eventGrid.appendChild(event);
 
@@ -2989,7 +3867,7 @@ function renderTemporalIntersection(limit, renderId) {
       }
     });
     section.appendChild(eventGrid);
-    el.resultsGrid.appendChild(section);
+    targetGrid.appendChild(section);
   });
 }
 
@@ -3124,6 +4002,14 @@ function resultEvidence(item, modality) {
   if (modality === "kis_fusion") {
     return fusionEvidence(item);
   }
+  if (modality === "visual_fusion") {
+    const modelLabel = { siglip2: "SigLIP2", metaclip2: "MetaCLIP2", beit3: "BEiT-3" };
+    const evidence = Object.entries(item.model_provenance || {}).map(([model, value]) => {
+      if (!value?.observed) return `${modelLabel[model] || model} missing→0.000`;
+      return `${modelLabel[model] || model} ${Number(value.raw_cosine || 0).toFixed(3)}→${Number(value.normalized_score || 0).toFixed(3)}`;
+    });
+    return evidence.join(" · ") || "SigLIP2 + MetaCLIP2 + BEIT3 visual fusion";
+  }
   if (modality === "branch2") {
     const evidence = (raw, normalized, observed, digits = 3) => {
       if (observed === false || raw == null) return `missing→${Number(normalized || 0).toFixed(3)}`;
@@ -3186,13 +4072,14 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
     card.setAttribute("role", "group");
     card.setAttribute("aria-label", `${item.video_id}, frame ${item.frame_idx}, rank ${rank}`);
 
-    const canDrillDown = !state.drilldown;
+    const canDrillDown = !state.drilldown && modality !== "visual_fusion";
+    const modalityLabel = modality === "visual_fusion" ? "VISUAL TRIO" : modality.toUpperCase();
 
     card.innerHTML = `
       <div class="card-media">
         <img src="${imgUrl}" alt="Keyframe from ${escapeHtml(item.video_id)}" loading="lazy" decoding="async">
         <span class="card-rank-badge">#${rank}</span>
-        <span class="card-modality-badge">${escapeHtml(modality.toUpperCase())}</span>
+        <span class="card-modality-badge">${escapeHtml(modalityLabel)}</span>
         <span class="card-time-badge">${timeS}</span>
       </div>
       <div class="card-body">
@@ -3221,7 +4108,7 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
     const addButton = card.querySelector(".btn-add-submission-card");
     addButton.addEventListener("click", (event) => {
       event.stopPropagation();
-      addFrameToSubmission(item, { source: modality, eventOrder: item.event_order });
+      void addFrameToSubmission(item, { source: modality, eventOrder: item.event_order });
     });
     addButton.addEventListener("keydown", (event) => event.stopPropagation());
     const drilldownButton = card.querySelector(".btn-video-drilldown");
@@ -3229,7 +4116,7 @@ function renderStandardCards(list, container = el.resultsGrid, modality = state.
       drilldownButton.addEventListener("click", (event) => {
         event.stopPropagation();
         void openStandardInspector(item).then(() => {
-          el.inspectorVideoQuery.value = String(state.parsedQuery?.global_scene_en || "");
+          el.inspectorVideoQuery.value = String(item.event_query || currentVisualQuery());
           el.inspectorVideoQuery.focus();
         });
       });
@@ -3287,6 +4174,16 @@ function setInspectorMediaMode(mode) {
 
 // KIS frame inspector
 async function openStandardInspector(item, preserveMediaMode = false) {
+  const openRequestId = ++inspectorOpenRequestId;
+  let canonicalItem;
+  try {
+    canonicalItem = await resolveCanonicalFrame(item);
+  } catch (error) {
+    if (openRequestId === inspectorOpenRequestId) showToast(error.message, "error");
+    return;
+  }
+  if (openRequestId !== inspectorOpenRequestId) return;
+  item = canonicalItem;
   if (el.modal.classList.contains("hidden")) lastInspectorFocus = document.activeElement;
   const videoChanged = state.activeInspectorItem?.video_id !== item.video_id;
   state.activeInspectorItem = item;
@@ -3399,7 +4296,9 @@ function populateInspectorCommon(item) {
   if (el.inspAsrContext) el.inspAsrContext.textContent = "(Loading macro audio context...)";
   el.inspDamText.textContent = item.retrieval_modality === "kis_fusion"
     ? fusionInspectorEvidence(item)
-    : item.dam_summary || "(No visual description available)";
+    : item.retrieval_modality === "visual_fusion"
+      ? resultEvidence(item, "visual_fusion")
+      : item.dam_summary || "(No visual description available)";
   if (el.inspOcrText) {
     el.inspOcrText.textContent = item.ocr_text || "(No text detected on screen)";
   }
@@ -3418,7 +4317,7 @@ function populateInspectorCommon(item) {
     .then((data) => {
       if (data && requestId === inspectorRequestId && state.activeInspectorItem) {
         const active = state.activeInspectorItem;
-        if (active.video_id !== item.video_id) return;
+        if (frameIdentity(active) !== frameIdentity(item)) return;
         state.activeBBoxObjects = data.dam_objects || [];
         if (el.inspAsrContext) {
           el.inspAsrContext.textContent = data.macro_audio_transcript || "(No macro audio context)";
@@ -3553,6 +4452,8 @@ async function loadFilmstrip(videoId, currentKeyframeN) {
     filmstripAbortController = new AbortController();
     const requestId = ++filmstripRequestId;
     state.activeVideoKeyframes = [];
+    state.filmstripSelection.clear();
+    state.filmstripSelectionAnchor = null;
     el.filmstripScroll.innerHTML = `<div class="filmstrip-loading" aria-live="polite">Loading timeline…</div>`;
     try {
       const res = await fetch(`/api/video/${encodeURIComponent(videoId)}/keyframes`, {
@@ -3576,7 +4477,7 @@ async function loadFilmstrip(videoId, currentKeyframeN) {
 function renderFilmstripWindow(currentKeyframeN) {
   const keyframes = state.activeVideoKeyframes;
   el.filmstripScroll.innerHTML = "";
-  el.filmstripCount.textContent = `${keyframes.length} keyframes`;
+  updateFilmstripSelectionUi();
   if (!keyframes.length) return;
 
   const activeIndex = Math.max(0, keyframes.findIndex((kf) => kf.keyframe_n === currentKeyframeN));
@@ -3585,7 +4486,9 @@ function renderFilmstripWindow(currentKeyframeN) {
   const fragment = document.createDocumentFragment();
 
   if (start > 0) fragment.appendChild(createFilmstripJump(keyframes, start, -1));
-  keyframes.slice(start, end).forEach((kf) => fragment.appendChild(createFilmstripItem(kf, currentKeyframeN)));
+  keyframes.slice(start, end).forEach((kf, offset) => {
+    fragment.appendChild(createFilmstripItem(kf, currentKeyframeN, start + offset));
+  });
   if (end < keyframes.length) fragment.appendChild(createFilmstripJump(keyframes, end, 1));
   el.filmstripScroll.appendChild(fragment);
 
@@ -3606,11 +4509,14 @@ function createFilmstripJump(keyframes, edgeIndex, direction) {
   return jump;
 }
 
-function createFilmstripItem(kf, currentKeyframeN) {
+function createFilmstripItem(kf, currentKeyframeN, absoluteIndex) {
   const isActive = kf.keyframe_n === currentKeyframeN;
+  const identity = frameIdentity(kf);
+  const isSelected = state.filmstripSelection.has(identity);
   const item = document.createElement("div");
-  item.className = "filmstrip-item" + (isActive ? " active" : "");
+  item.className = "filmstrip-item" + (isActive ? " active" : "") + (isSelected ? " selected" : "");
   item.dataset.keyframeN = kf.keyframe_n;
+  item.dataset.frameUid = identity;
   item.tabIndex = 0;
   item.setAttribute("role", "button");
   item.setAttribute("aria-label", `Open keyframe ${kf.keyframe_n}, frame ${kf.frame_idx}`);
@@ -3626,16 +4532,17 @@ function createFilmstripItem(kf, currentKeyframeN) {
   }, { once: true });
   const label = document.createElement("span");
   label.className = "filmstrip-lbl";
-  label.textContent = String(kf.keyframe_n).padStart(3, "0");
+  label.innerHTML = `<strong>F${kf.frame_idx}</strong><small>KF ${kf.keyframe_n}</small>`;
   const addButton = document.createElement("button");
   addButton.type = "button";
   addButton.className = "filmstrip-add";
-  addButton.textContent = "+";
-  addButton.title = "Add this frame to submission";
-  addButton.setAttribute("aria-label", `Add keyframe ${kf.keyframe_n} to submission`);
+  addButton.textContent = isSelected ? "✓" : "+";
+  addButton.title = "Select this frame; Shift-click selects the range";
+  addButton.setAttribute("aria-label", `Select exact frame ${kf.frame_idx}`);
+  addButton.setAttribute("aria-pressed", String(isSelected));
   addButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    addFrameToSubmission(kf, { source: "filmstrip" });
+    toggleFilmstripSelection(kf, absoluteIndex, event.shiftKey);
   });
   item.append(image, label, addButton);
 
@@ -3647,6 +4554,110 @@ function createFilmstripItem(kf, currentKeyframeN) {
     }
   });
   return item;
+}
+
+function updateFilmstripSelectionUi() {
+  const count = state.filmstripSelection.size;
+  el.filmstripCount.textContent = `${state.activeVideoKeyframes.length} keyframes · ${count} selected`;
+  el.btnClearFilmstripSelection.disabled = count === 0;
+  el.btnAddFilmstripSelection.disabled = count === 0;
+  el.btnAddFilmstripSelection.textContent = `Add selected (${count})`;
+  el.filmstripScroll.querySelectorAll(".filmstrip-item").forEach((item) => {
+    const selected = state.filmstripSelection.has(
+      /** @type {HTMLElement} */ (item).dataset.frameUid || "",
+    );
+    item.classList.toggle("selected", selected);
+    const button = item.querySelector(".filmstrip-add");
+    if (button) {
+      button.textContent = selected ? "✓" : "+";
+      button.setAttribute("aria-pressed", String(selected));
+    }
+  });
+}
+
+function toggleFilmstripSelection(frame, absoluteIndex, selectRange = false) {
+  const identity = frameIdentity(frame);
+  if (!identity) return;
+  if (selectRange && Number.isInteger(state.filmstripSelectionAnchor)) {
+    const start = Math.min(state.filmstripSelectionAnchor, absoluteIndex);
+    const end = Math.max(state.filmstripSelectionAnchor, absoluteIndex);
+    for (let index = start; index <= end && state.filmstripSelection.size < 100; index += 1) {
+      const candidateIdentity = frameIdentity(state.activeVideoKeyframes[index]);
+      if (candidateIdentity) state.filmstripSelection.add(candidateIdentity);
+    }
+  } else if (state.filmstripSelection.has(identity)) {
+    state.filmstripSelection.delete(identity);
+  } else if (state.filmstripSelection.size < 100) {
+    state.filmstripSelection.add(identity);
+  } else {
+    showToast("A submission can contain at most 100 selected frames.", "error");
+  }
+  state.filmstripSelectionAnchor = absoluteIndex;
+  updateFilmstripSelectionUi();
+}
+
+function clearFilmstripSelection() {
+  state.filmstripSelection.clear();
+  state.filmstripSelectionAnchor = null;
+  updateFilmstripSelectionUi();
+}
+
+async function addFilmstripSelection() {
+  const selectedFrames = state.activeVideoKeyframes.filter((frame) => (
+    state.filmstripSelection.has(frameIdentity(frame))
+  ));
+  if (!selectedFrames.length) return;
+  const startSnapshot = submissionStore.getSnapshot();
+  el.btnAddFilmstripSelection.disabled = true;
+  el.btnAddFilmstripSelection.textContent = "Verifying exact frames…";
+  try {
+    const canonicalFrames = await Promise.all(
+      selectedFrames.map((frame) => resolveCanonicalFrame(frame)),
+    );
+    const snapshot = submissionStore.getSnapshot();
+    if (
+      snapshot.contextKey !== startSnapshot.contextKey
+      || snapshot.mode !== startSnapshot.mode
+    ) return;
+    if (snapshot.mode === "TRAKE") {
+      const draft = currentSubmissionDraft(snapshot);
+      const eventCount = draft.events?.length || 0;
+      if (eventCount < 2 || canonicalFrames.length !== eventCount) {
+        throw new Error(
+          `TRAKE needs exactly ${eventCount || "the configured number of"} selected frames, one for each sequencing prompt.`,
+        );
+      }
+      const sequence = [...canonicalFrames]
+        .sort((left, right) => Number(left.pts_time_s) - Number(right.pts_time_s))
+        .map((frame, index) => ({ ...frame, event_order: index + 1 }));
+      const result = submissionStore.addSequence(sequence, {
+        source: "filmstrip-range",
+        validation: "canonical",
+      });
+      if (!result.ok) {
+        throw new Error("The selected frames must belong to one video and increase in exact frame order.");
+      }
+      showToast(`Added ${sequence.length} exact frames as one ordered TRAKE sequence.`, "success");
+    } else {
+      const result = submissionStore.addFrames(canonicalFrames, {
+        source: "filmstrip-range",
+        validation: "canonical",
+      });
+      if (!result.ok) throw new Error("No new exact frame could be added to the draft.");
+      showToast(`Added ${result.added} exact frame${result.added === 1 ? "" : "s"}.`, "success");
+      if (result.firstManual) {
+        void fillRelatedSubmissionFrames(
+          canonicalFrames[0],
+          snapshot.contextKey,
+          snapshot.mode,
+        );
+      }
+    }
+    clearFilmstripSelection();
+  } catch (error) {
+    showToast(error.message, "error");
+    updateFilmstripSelectionUi();
+  }
 }
 
 function selectFilmstripKeyframe(kf) {
@@ -3673,6 +4684,7 @@ function navigateFilmstrip(step) {
 }
 
 function closeInspector() {
+  inspectorOpenRequestId += 1;
   inspectorScopedAbortController?.abort();
   inspectorScopedRequestId += 1;
   inspectorAbortController?.abort();
@@ -3687,6 +4699,9 @@ function closeInspector() {
   el.filmstripCount.textContent = "0 frames";
   el.inspectorImg.removeAttribute("src");
   state.activeVideoKeyframes = [];
+  state.filmstripSelection.clear();
+  state.filmstripSelectionAnchor = null;
+  updateFilmstripSelectionUi();
   state.activeBBoxObjects = [];
   state.activeInspectorItem = null;
   drawBBoxesOnCanvas();
@@ -3701,10 +4716,10 @@ function toggleCurrentInSubmission() {
   const draft = currentSubmissionDraft(snapshot);
   const eventOrder = snapshot.mode === "TRAKE" ? draft.activeEvent : null;
   if (submissionStore.hasFrame(item, snapshot.mode, eventOrder)) {
-    submissionStore.removeFrame(snapshot.mode === "TRAKE" ? eventOrder : frameIdentity(item));
+    removeSubmissionFrame(snapshot.mode === "TRAKE" ? eventOrder : frameIdentity(item));
     showToast(`Removed ${item.video_id}, ${item.frame_idx} from the draft.`);
   } else {
-    addFrameToSubmission(item, { source: item.retrieval_modality || "inspector", eventOrder });
+    void addFrameToSubmission(item, { source: item.retrieval_modality || "inspector", eventOrder });
   }
   updateInspectorSubmitBtn();
 }
@@ -4035,6 +5050,13 @@ function activeCandidateReservoir() {
     candidates = state.branch3AsrResults;
   } else if (state.activeWorkspace === "branch3_ocr") {
     candidates = state.branch3OcrResults;
+  } else if (state.activeWorkspace === "kis_fusion") {
+    candidates = state.kisFusionView === "sequence" && state.kisTemporalIntersection
+      ? [
+        ...(state.kisTemporalIntersection?.data?.sequences || []),
+        ...(state.kisTemporalIntersection?.data?.reserve_sequences || []),
+      ].flatMap((sequence) => sequence.matched_events || [])
+      : state.kisFusionResults;
   } else if (state.activeWorkspace === "video") {
     candidates = state.watch.searchResults;
   } else if (state.temporalIntersection) {
@@ -4063,6 +5085,17 @@ function compactFrame(item) {
     frame_idx: Number(item.frame_idx),
     keyframe_n: Number(item.keyframe_n) || null,
     pts_time_s: Number.isFinite(Number(item.pts_time_s)) ? Number(item.pts_time_s) : null,
+    image_relpath: item.image_relpath || "",
+    preview_image_relpath: item.preview_image_relpath || "",
+    indexed_keyframe: item.indexed_keyframe === true,
+    validation: item.validation || "unverified",
+    frame_index_base: item.frame_index_base ?? null,
+    max_frame_idx: item.max_frame_idx ?? null,
+    timing_method: item.timing_method || "",
+    preview_frame_idx: item.preview_frame_idx ?? null,
+    preview_keyframe_n: item.preview_keyframe_n ?? null,
+    preview_pts_time_s: item.preview_pts_time_s ?? null,
+    related_seed_frame_idx: item.related_seed_frame_idx ?? null,
     source: item.source || item.retrieval_modality || "candidate",
   };
 }
@@ -4092,9 +5125,13 @@ function trakeSequenceIdentity(sequence) {
 }
 
 function orderedCandidateSequences(eventCount, excluded = new Set()) {
+  const intersection = state.activeWorkspace === "kis_fusion"
+    && state.kisFusionView === "sequence"
+    ? state.kisTemporalIntersection
+    : state.temporalIntersection;
   const rawSequences = [
-    ...(state.temporalIntersection?.data?.sequences || []),
-    ...(state.temporalIntersection?.data?.reserve_sequences || []),
+    ...(intersection?.data?.sequences || []),
+    ...(intersection?.data?.reserve_sequences || []),
   ];
   const seen = new Set(excluded);
   return rawSequences.flatMap((sequence) => {
@@ -4116,7 +5153,10 @@ function buildSubmissionPrepareRequest(queryId) {
     query_id: queryId,
     target_rows: 100,
     manual_selections: snapshot.mode === "TRAKE" ? [] : (draft.items || []).map(compactFrame),
-    candidate_reservoir: activeCandidateReservoir().map(compactFrame),
+    candidate_reservoir: mergeUniqueCandidates(
+      draft.suggestedItems || [],
+      activeCandidateReservoir(),
+    ).map(compactFrame),
   };
   if (snapshot.mode === "VQA") request.vqa_answer = draft.answer || "";
   if (snapshot.mode === "TRAKE") {
@@ -4217,7 +5257,7 @@ function prepareSubmissionClientFallback(queryId) {
       answer: snapshot.mode === "VQA" ? draft.answer || "" : undefined,
     });
   };
-  (draft.items || []).forEach(addCandidate);
+  submissionDraftItems(draft).forEach(addCandidate);
   activeCandidateReservoir().forEach(addCandidate);
   const answerMissing = snapshot.mode === "VQA" && !String(draft.answer || "").trim();
   return {

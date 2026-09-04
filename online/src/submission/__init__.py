@@ -1,4 +1,4 @@
-"""Task-aware, canonical submission construction utilities."""
+"""Task-aware submission construction and source-frame indexing utilities."""
 
 from online.src.submission.core import (
     SubmissionValidationError,
@@ -7,6 +7,8 @@ from online.src.submission.core import (
     validate_frame_reference,
     validate_trake_sequence,
 )
+from online.src.submission.frame_index import SourceFrameIndex
+from online.src.submission.related import RelatedFrameSearch, fuse_related_pools
 
 __all__ = [
     "SubmissionValidationError",
@@ -14,4 +16,7 @@ __all__ = [
     "prepare_submission",
     "validate_frame_reference",
     "validate_trake_sequence",
+    "RelatedFrameSearch",
+    "fuse_related_pools",
+    "SourceFrameIndex",
 ]

@@ -51,9 +51,7 @@ def validate_and_manifest(data_root: Path, state_root: Path) -> dict[str, object
     if not finite:
         raise ValueError("DAM matrix contains non-finite values")
     if min_norm < 0.995 or max_norm > 1.005:
-        raise ValueError(
-            f"DAM vectors are not L2-normalized ({min_norm}, {max_norm})"
-        )
+        raise ValueError(f"DAM vectors are not L2-normalized ({min_norm}, {max_norm})")
     metadata_count = 0
     frame_metadata_path = data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
     frame_records: dict[str, dict[str, object]] = {}
@@ -84,10 +82,7 @@ def validate_and_manifest(data_root: Path, state_root: Path) -> dict[str, object
                 raise ValueError(f"DAM row {metadata_count} maps to unknown frame {frame_uid}")
             exported_keyframe_n = item.get("keyframe_n")
             canonical_keyframe_n = int(frame_record["keyframe_n"])
-            if (
-                exported_keyframe_n is not None
-                and int(exported_keyframe_n) != canonical_keyframe_n
-            ):
+            if exported_keyframe_n is not None and int(exported_keyframe_n) != canonical_keyframe_n:
                 raise ValueError(
                     f"DAM row {metadata_count} keyframe_n disagrees with canonical metadata"
                 )
@@ -108,9 +103,9 @@ def validate_and_manifest(data_root: Path, state_root: Path) -> dict[str, object
     if not online_revision:
         try:
             query_models = json.loads(
-                Path(os.environ.get("AIC_QUERY_MODEL_MANIFEST", "/models/query_models.json")).read_text(
-                    encoding="utf-8"
-                )
+                Path(
+                    os.environ.get("AIC_QUERY_MODEL_MANIFEST", "/models/query_models.json")
+                ).read_text(encoding="utf-8")
             )
             online_revision = str(query_models["models"]["bge_m3"]["revision"])
         except (OSError, ValueError, TypeError, KeyError):
@@ -165,8 +160,12 @@ def validate_and_manifest(data_root: Path, state_root: Path) -> dict[str, object
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data")))
-    parser.add_argument("--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state")))
+    parser.add_argument(
+        "--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data"))
+    )
+    parser.add_argument(
+        "--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state"))
+    )
     parser.add_argument("--skip-bm25", action="store_true")
     args = parser.parse_args()
     args.state_root.mkdir(parents=True, exist_ok=True)

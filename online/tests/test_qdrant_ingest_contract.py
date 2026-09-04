@@ -52,9 +52,7 @@ def _source(vector: np.ndarray | None = None) -> dict:
     return {
         "id": 1,
         "vectors": {
-            "dam": vector
-            if vector is not None
-            else np.asarray([1, 0, 0, 0], dtype=np.float16)
+            "dam": vector if vector is not None else np.asarray([1, 0, 0, 0], dtype=np.float16)
         },
         "payload": {
             "point_id": 1,
@@ -134,27 +132,19 @@ class QdrantIngestBehaviourTests(unittest.TestCase):
         valid_record = {
             "id": 1,
             "payload": dict(source["payload"]),
-            "vector": {
-                "dam": np.asarray(source["vectors"]["dam"], dtype=np.float32)
-            },
+            "vector": {"dam": np.asarray(source["vectors"]["dam"], dtype=np.float32)},
         }
-        self.assertTrue(
-            ingest._record_matches_source(valid_record, source, {"dam": 4})[0]
-        )
+        self.assertTrue(ingest._record_matches_source(valid_record, source, {"dam": 4})[0])
         wrong_vector = {
             **valid_record,
             "vector": {"dam": np.asarray([0, 1, 0, 0], dtype=np.float32)},
         }
-        self.assertFalse(
-            ingest._record_matches_source(wrong_vector, source, {"dam": 4})[0]
-        )
+        self.assertFalse(ingest._record_matches_source(wrong_vector, source, {"dam": 4})[0])
         wrong_payload = {
             **valid_record,
             "payload": {**valid_record["payload"], "frame_idx": 99},
         }
-        self.assertFalse(
-            ingest._record_matches_source(wrong_payload, source, {"dam": 4})[0]
-        )
+        self.assertFalse(ingest._record_matches_source(wrong_payload, source, {"dam": 4})[0])
 
     def test_verify_only_detects_same_dimension_wrong_vector_without_mutating(self) -> None:
         source = _source()
@@ -164,9 +154,7 @@ class QdrantIngestBehaviourTests(unittest.TestCase):
             "vector": {"dam": np.asarray([0, 1, 0, 0], dtype=np.float32)},
         }
         client = _RepairClient(existing)
-        with patch.object(ingest, "validate_collection_definition"), self.assertRaises(
-            ValueError
-        ):
+        with patch.object(ingest, "validate_collection_definition"), self.assertRaises(ValueError):
             ingest.reconcile_collection(
                 client,
                 "http://qdrant",
@@ -203,8 +191,9 @@ class QdrantIngestBehaviourTests(unittest.TestCase):
                     "vector": {"dam": vectors["dam"][index]},
                 }
 
-        with patch.object(ingest, "validate_collection_definition"), patch.object(
-            ingest, "upsert_with_retry", fake_upsert
+        with (
+            patch.object(ingest, "validate_collection_definition"),
+            patch.object(ingest, "upsert_with_retry", fake_upsert),
         ):
             result = ingest.reconcile_collection(
                 client,
@@ -230,10 +219,7 @@ class QdrantIngestBehaviourTests(unittest.TestCase):
             artifact = data_root / "dense_text_embeddings" / "dam_vectors.f16.npy"
             metadata = data_root / "dense_text_embeddings" / "dam_metadata.jsonl"
             frame_metadata = (
-                data_root
-                / "visual_embeddings"
-                / "metaclip2"
-                / "keyframes_metadata.jsonl"
+                data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
             )
             for path in (artifact, metadata, frame_metadata):
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,17 +246,11 @@ class QdrantIngestBehaviourTests(unittest.TestCase):
                 },
             )
             report = json.loads(
-                (state_root / "qdrant_ingestion_manifest.json").read_text(
-                    encoding="utf-8"
-                )
+                (state_root / "qdrant_ingestion_manifest.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(
-                report["schema_version"], ingest.INGEST_MANIFEST_SCHEMA_VERSION
-            )
+            self.assertEqual(report["schema_version"], ingest.INGEST_MANIFEST_SCHEMA_VERSION)
             self.assertTrue(
-                report["verification"][ingest.DAM_COLLECTION][
-                    "vector_content_verified"
-                ]
+                report["verification"][ingest.DAM_COLLECTION]["vector_content_verified"]
             )
 
     def test_ready_manifest_requires_verification_evidence(self) -> None:

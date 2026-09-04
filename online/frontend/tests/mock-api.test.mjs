@@ -84,12 +84,102 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
   assert.equal(kis.results[0].branch_provenance.branch2.dense_best_query_language, "en");
   assert.equal("dense_query_scores" in kis.results[0].branch_provenance.branch2, false);
 
+  const orderedKisResponse = await fetch(`${base}/api/search/fusion/kis/temporal`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      task_type: "KIS",
+      events: [
+        { order: 1, description: "first action", en: "first action" },
+        { order: 2, description: "second action", en: "second action" },
+      ],
+      top_k_sequences: 20,
+      max_gap_seconds: 30,
+    }),
+  });
+  assert.equal(orderedKisResponse.status, 200);
+  const orderedKis = await orderedKisResponse.json();
+  assert.equal(orderedKis.operation, "ordered_kis_fusion");
+  assert.equal(orderedKis.event_count, 2);
+  assert.equal(orderedKis.event_fusion_applied, true);
+  assert.equal(orderedKis.cross_modal_fusion_applied, true);
+  assert.equal(orderedKis.reranking_applied, true);
+  assert.equal(orderedKis.frame_index_base, 0);
+  assert.deepEqual(
+    orderedKis.sequences[0].matched_events.map((event) => event.event_order),
+    [1, 2],
+  );
+  assert(orderedKis.sequences[0].matched_events.every(
+    (event, index, values) => index === 0
+      || event.frame_idx > values[index - 1].frame_idx,
+  ));
+
+  const planResponse = await fetch(`${base}/api/query/kis/plan`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "A chef prepares shrimp, then grills the shrimp",
+      task_type: "TRAKE",
+    }),
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(plan.schema_version, "kis.query-plan.v1");
+  assert.equal(plan.event_count, 2);
+  assert.equal(plan.query_bundle.schema_version, "branch1.query.v1");
+  assert.equal(plan.retrieval_invoked, false);
+
   const timelineResponse = await fetch(`${base}/api/video/L21_V001/timeline`);
   assert.equal(timelineResponse.status, 200);
   const timeline = await timelineResponse.json();
+  assert.equal(timeline.schema_version, "video.frame-timeline.v1");
+  assert.equal(timeline.frame_index_base, 0);
   assert.equal(timeline.fps, 30);
+  assert.equal(timeline.max_frame_idx, 7199);
   assert.equal(timeline.keyframe_count, 128);
   assert.equal(timeline.keyframes[0].video_id, "L21_V001");
+
+  const exactFrameResponse = await fetch(
+    `${base}/api/frame/L21-V001/${kis.results[0].frame_idx}`,
+  );
+  assert.equal(exactFrameResponse.status, 200);
+  const exactFrame = await exactFrameResponse.json();
+  assert.equal(exactFrame.schema_version, "frame.identity.v1");
+  assert.equal(exactFrame.exact_match, true);
+  assert.equal(exactFrame.keyframe.frame_uid, `L21_V001:${kis.results[0].frame_idx}`);
+  assert.equal(exactFrame.keyframe.validation, "canonical");
+  const missingExactFrame = await fetch(`${base}/api/frame/L21_V001/5`);
+  assert.equal(missingExactFrame.status, 404);
+
+  const sourceFrameResponse = await fetch(`${base}/api/video/L21-V001/source-frame/5`);
+  assert.equal(sourceFrameResponse.status, 200);
+  const sourceFrame = await sourceFrameResponse.json();
+  assert.equal(sourceFrame.schema_version, "video.source-frame.v1");
+  assert.equal(sourceFrame.exact_match, true);
+  assert.equal(sourceFrame.source_frame.frame_uid, "L21_V001:5");
+  assert.equal(sourceFrame.source_frame.frame_idx, 5);
+  assert.equal(sourceFrame.source_frame.indexed_keyframe, false);
+  assert.equal(sourceFrame.source_frame.preview_frame_idx, 4);
+
+  const relatedResponse = await fetch(`${base}/api/submission/related-frames`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      video_id: sourceFrame.source_frame.video_id,
+      frame_idx: sourceFrame.source_frame.frame_idx,
+      limit: 12,
+    }),
+  });
+  assert.equal(relatedResponse.status, 200);
+  const related = await relatedResponse.json();
+  assert.equal(related.schema_version, "submission.related-frames.v1");
+  assert.equal(related.query_pipeline_invoked, false);
+  assert.equal(related.result_count, 12);
+  assert.equal(related.requested_seed.frame_idx, 5);
+  assert.equal(related.embedding_seed.frame_idx, 4);
+  assert.equal(related.results.length, 12);
+  assert(related.results.every((item) => item.frame_uid !== exactFrame.keyframe.frame_uid));
+  assert.equal(new Set(related.results.map((item) => item.frame_uid)).size, 12);
 
   const imageBody = new FormData();
   imageBody.append("file", new Blob(["mock"], { type: "image/png" }), "query.png");
@@ -108,7 +198,7 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
       task_type: "KIS",
       query_id: "Q1",
       target_rows: 100,
-      manual_selections: [timeline.keyframes[10]],
+      manual_selections: [sourceFrame.source_frame],
       candidate_reservoir: timeline.keyframes,
     }),
   });
@@ -116,11 +206,11 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
   const prepared = await prepareResponse.json();
   assert.equal(prepared.complete, true);
   assert.equal(prepared.rows.length, 100);
-  assert.equal(prepared.rows[0].frame_idx, timeline.keyframes[10].frame_idx);
+  assert.equal(prepared.rows[0].frame_idx, 5);
   assert.equal(prepared.valid_for_download, true);
   assert.equal(prepared.official_csv.has_header, false);
   assert.equal(prepared.official_csv.row_count, 100);
-  assert.equal(prepared.official_csv.content.split(/\r?\n/)[0], `${timeline.keyframes[10].video_id},${timeline.keyframes[10].frame_idx}`);
+  assert.equal(prepared.official_csv.content.split(/\r?\n/)[0], `${timeline.video_id},5`);
   assert(!prepared.official_csv.content.includes("Q1,"));
 
   const toSequence = (start) => ({
@@ -170,7 +260,7 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
   assert.equal(invalidPrepareResponse.status, 400);
   const invalidPrepared = await invalidPrepareResponse.json();
   assert.equal(invalidPrepared.complete, false);
-  assert.match(invalidPrepared.errors[0], /not present/i);
+  assert.match(invalidPrepared.errors[0], /outside the verified/i);
 
   const drilldownResponse = await fetch(`${base}/api/video/L21-V001/search/siglip`, {
     method: "POST",
@@ -186,6 +276,19 @@ test("mock API serves enough deterministic candidates and valid placeholder imag
   assert.equal(drilldown.reranking_applied, false);
   assert.equal(drilldown.modality_result.results.length, 100);
   assert(drilldown.modality_result.results.every((item) => item.video_id === "L21_V001"));
+
+  const visualFusionResponse = await fetch(`${base}/api/video/L21-V001/search/visual-fusion`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query: "a cyclist", top_k: 25 }),
+  });
+  assert.equal(visualFusionResponse.status, 200);
+  const visualFusion = await visualFusionResponse.json();
+  assert.equal(visualFusion.operation, "visual_video_drilldown");
+  assert.deepEqual(visualFusion.models, ["siglip2", "metaclip2", "beit3"]);
+  assert.equal(visualFusion.cross_modal_fusion_applied, false);
+  assert.equal(visualFusion.modality_result.results.length, 25);
+  assert(visualFusion.modality_result.results.every((item) => item.video_id === "L21_V001"));
 
   const cascadeResponse = await fetch(`${base}/api/discover/dam-to-siglip`, {
     method: "POST",

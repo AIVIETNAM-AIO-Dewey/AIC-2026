@@ -23,8 +23,8 @@ from online.src.retrieval.modalities.asr import (  # noqa: E402
     ASR_INDEX_SCHEMA_VERSION,
     AsrFtsIndex,
     artifact_record,
-    build_id_for,
     build_asr_manifest,
+    build_id_for,
     load_canonical_frame_index,
     validate_asr_sources,
 )
@@ -32,8 +32,12 @@ from online.src.retrieval.modalities.asr import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data")))
-    parser.add_argument("--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state")))
+    parser.add_argument(
+        "--data-root", type=Path, default=Path(os.environ.get("AIC_DATA_ROOT", "/data"))
+    )
+    parser.add_argument(
+        "--state-root", type=Path, default=Path(os.environ.get("AIC_STATE_ROOT", "/state"))
+    )
     args = parser.parse_args()
 
     data_root = args.data_root
@@ -88,10 +92,9 @@ def main() -> int:
         for record in source_facts["source_files"]:
             source_path = data_root / str(record["path"])
             source_stat = source_path.stat()
-            if (
-                int(record.get("size", -1)) != int(source_stat.st_size)
-                or int(record.get("mtime_ns", -1)) != int(source_stat.st_mtime_ns)
-            ):
+            if int(record.get("size", -1)) != int(source_stat.st_size) or int(
+                record.get("mtime_ns", -1)
+            ) != int(source_stat.st_mtime_ns):
                 raise RuntimeError(f"ASR source changed during preparation: {source_path}")
         manifest = build_asr_manifest(
             data_root=data_root,
@@ -106,8 +109,10 @@ def main() -> int:
         recorded_canonical = manifest.get("canonical_metadata") or {}
         if (
             canonical_before_record.get("sha256") != recorded_canonical.get("sha256")
-            or int(canonical_before_record.get("size", -1)) != int(recorded_canonical.get("size", -1))
-            or int(canonical_before_record.get("mtime_ns", -1)) != int(recorded_canonical.get("mtime_ns", -1))
+            or int(canonical_before_record.get("size", -1))
+            != int(recorded_canonical.get("size", -1))
+            or int(canonical_before_record.get("mtime_ns", -1))
+            != int(recorded_canonical.get("mtime_ns", -1))
         ):
             raise RuntimeError("Canonical frame metadata changed during ASR preparation")
         # The stage file is moved atomically below; publish the stable public
@@ -121,18 +126,24 @@ def main() -> int:
         # The manifest is written only after the database has been fully
         # committed and atomically moved into its final location.
         os.replace(staging_manifest, manifest_path)
-        print(json.dumps({
-            "schema_version": ASR_INDEX_SCHEMA_VERSION,
-            "status": "ready",
-            "passed": True,
-            "database": str(database_path),
-            "manifest": str(manifest_path),
-            "segment_count": source_facts["segment_count"],
-            "video_count": source_facts["video_count"],
-            "indexed_video_count": source_facts["indexed_video_count"],
-            "empty_video_count": source_facts["empty_video_count"],
-            "empty_video_ids": source_facts["empty_video_ids"],
-        }, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "schema_version": ASR_INDEX_SCHEMA_VERSION,
+                    "status": "ready",
+                    "passed": True,
+                    "database": str(database_path),
+                    "manifest": str(manifest_path),
+                    "segment_count": source_facts["segment_count"],
+                    "video_count": source_facts["video_count"],
+                    "indexed_video_count": source_facts["indexed_video_count"],
+                    "empty_video_count": source_facts["empty_video_count"],
+                    "empty_video_ids": source_facts["empty_video_ids"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     finally:
         if index is not None:

@@ -74,9 +74,7 @@ class Branch3AsrSearch:
             }
             if set(query_by_role) != set(QUERY_ROLES) or len(query_by_role) != len(QUERY_ROLES):
                 raise ValueError("ASR query roles must contain each role exactly once")
-            if any(
-                not value["vi"] or not value["en"] for value in query_by_role.values()
-            ):
+            if any(not value["vi"] or not value["en"] for value in query_by_role.values()):
                 raise ValueError("ASR Vietnamese and English query variants must not be empty")
             stream_queries = {
                 f"{role}:{language}": value[language]

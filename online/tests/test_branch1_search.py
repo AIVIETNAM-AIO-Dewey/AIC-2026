@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from online.src.retrieval.branches.branch1.service import (
+    QUERY_ROLES,
     Branch1Search,
     PersistentQueryEmbeddingCache,
-    QUERY_ROLES,
     aggregate_model_streams,
     fuse_model_candidates,
 )
@@ -50,6 +50,22 @@ class FakeEncoder:
         self.unloads += 1
 
 
+class FallbackEncoder(FakeEncoder):
+    cache_device = "mps"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.devices = {name: "mps" for name in self.revisions}
+
+    def cache_device_for_model(self, model_name: str) -> str:
+        return self.devices[model_name]
+
+    def encode(self, model_name: str, texts: list[str]):
+        vectors, diagnostics = super().encode(model_name, texts)
+        self.devices[model_name] = "cpu"
+        return vectors, diagnostics
+
+
 class FakeQdrant:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int]] = []
@@ -63,13 +79,21 @@ class FakeQdrant:
         ]
 
 
+class ScopedFakeQdrant(FakeQdrant):
+    def __init__(self) -> None:
+        super().__init__()
+        self.filters: list[dict | None] = []
+
+    def query(self, collection, vector_name, vector, limit, query_filter=None):
+        self.filters.append(query_filter)
+        return super().query(collection, vector_name, vector, limit)
+
+
 class Branch1RankingTests(unittest.TestCase):
     def test_bilingual_streams_keep_language_provenance_and_max_score(self) -> None:
         streams = []
         stream_keys = tuple(
-            f"{role}:{language}"
-            for role in QUERY_ROLES
-            for language in ("vi", "en")
+            f"{role}:{language}" for role in QUERY_ROLES for language in ("vi", "en")
         )
         for index, _stream in enumerate(stream_keys):
             streams.append([point(1, "L01_V001:1", 0.2 + index * 0.01)])
@@ -82,9 +106,7 @@ class Branch1RankingTests(unittest.TestCase):
         self.assertEqual(result["query_scores"]["original:en"]["language"], "en")
 
     def test_max_cosine_and_best_query_provenance(self) -> None:
-        streams = [
-            [point(1, "L01_V001:1", 0.1 + index * 0.1)] for index in range(6)
-        ]
+        streams = [[point(1, "L01_V001:1", 0.1 + index * 0.1)] for index in range(6)]
         result = aggregate_model_streams(QUERY_ROLES, streams)["L01_V001:1"]
         self.assertAlmostEqual(result["raw_score"], 0.6)
         self.assertEqual(result["best_query_role"], "keyword")
@@ -98,9 +120,7 @@ class Branch1RankingTests(unittest.TestCase):
         self.assertEqual(result["L01_V001:2"]["normalized_score"], 0.5)
 
     def test_missing_model_score_is_zero_and_weights_are_applied(self) -> None:
-        siglip = aggregate_model_streams(
-            QUERY_ROLES, [[point(1, "L01_V001:1", 0.5)]] * 6
-        )
+        siglip = aggregate_model_streams(QUERY_ROLES, [[point(1, "L01_V001:1", 0.5)]] * 6)
         results = fuse_model_candidates(
             {"siglip2": siglip, "metaclip2": {}, "beit3": {}},
             {"siglip2": 0.45, "metaclip2": 0.30, "beit3": 0.25},
@@ -146,8 +166,7 @@ class Branch1RankingTests(unittest.TestCase):
         bundle = {
             "schema_version": "branch1.query.v1",
             "queries": [
-                {"role": role, "vi": f"vi {role}", "en": f"en {role}"}
-                for role in QUERY_ROLES
+                {"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in QUERY_ROLES
             ],
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -160,6 +179,110 @@ class Branch1RankingTests(unittest.TestCase):
                     2000,
                     1499,
                 )
+
+    def test_video_scope_uses_all_three_models_and_filters_every_vector_query(self) -> None:
+        encoder = FakeEncoder()
+        qdrant = ScopedFakeQdrant()
+        bundle = {
+            "schema_version": "branch1.query.v1",
+            "queries": [
+                {"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in QUERY_ROLES
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache = PersistentQueryEmbeddingCache(Path(directory) / "cache.sqlite3")
+            try:
+                response = Branch1Search(qdrant, encoder, cache).execute_in_video(
+                    bundle,
+                    "L01_V001",
+                    2,
+                )
+            finally:
+                cache.close()
+
+        expected_filter = {"must": [{"key": "video_id", "match": {"value": "L01_V001"}}]}
+        self.assertEqual(
+            [name for name, _texts in encoder.calls],
+            [
+                "siglip2",
+                "metaclip2",
+                "beit3",
+            ],
+        )
+        self.assertEqual(len(qdrant.calls), 30)
+        self.assertTrue(all(value == expected_filter for value in qdrant.filters))
+        self.assertEqual(response["scope"], "video")
+        self.assertEqual(response["video_id"], "L01_V001")
+        self.assertEqual(
+            response["weights"],
+            {
+                "siglip2": 0.45,
+                "metaclip2": 0.30,
+                "beit3": 0.25,
+            },
+        )
+        self.assertEqual(response["final_top_k"], 2)
+        self.assertFalse(response["future_fusion_eligible"])
+
+    def test_video_scope_fails_closed_if_the_vector_store_leaks_another_video(self) -> None:
+        bundle = {
+            "schema_version": "branch1.query.v1",
+            "queries": [
+                {"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in QUERY_ROLES
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cache = PersistentQueryEmbeddingCache(Path(directory) / "cache.sqlite3")
+            try:
+                service = Branch1Search(ScopedFakeQdrant(), FakeEncoder(), cache)
+                with self.assertRaisesRegex(ValueError, "outside the requested video"):
+                    service.execute_in_video(bundle, "L02_V001", 2)
+            finally:
+                cache.close()
+
+    def test_fallback_embeddings_are_cached_under_actual_cpu_device(self) -> None:
+        encoder = FallbackEncoder()
+        qdrant = FakeQdrant()
+        bundle = {
+            "schema_version": "branch1.query.v1",
+            "queries": [
+                {"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in QUERY_ROLES
+            ],
+        }
+        texts = [value for role in QUERY_ROLES for value in (f"vi {role}", f"en {role}")]
+        stream_contract = [
+            {"role": role, "language": language, "text": text}
+            for role in QUERY_ROLES
+            for language, text in (("vi", f"vi {role}"), ("en", f"en {role}"))
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            cache = PersistentQueryEmbeddingCache(Path(directory) / "cache.sqlite3")
+            try:
+                service = Branch1Search(qdrant, encoder, cache)
+                service.execute(
+                    bundle,
+                    {"siglip2": 0.45, "metaclip2": 0.30, "beit3": 0.25},
+                    2000,
+                    1500,
+                )
+                key_arguments = {
+                    "tokenizer_config": "languages=vi,en;max_tokens=64;normalization=l2",
+                    "stream_contract": stream_contract,
+                }
+                cpu_key = cache.key("siglip2", "s", texts, device="cpu", **key_arguments)
+                mps_key = cache.key("siglip2", "s", texts, device="mps", **key_arguments)
+                self.assertIsNotNone(cache.get(cpu_key))
+                self.assertIsNone(cache.get(mps_key))
+
+                service.execute(
+                    bundle,
+                    {"siglip2": 0.45, "metaclip2": 0.30, "beit3": 0.25},
+                    2000,
+                    1500,
+                )
+                self.assertEqual(len(encoder.calls), 3)
+            finally:
+                cache.close()
 
 
 if __name__ == "__main__":

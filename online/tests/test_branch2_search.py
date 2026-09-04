@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +14,11 @@ import numpy as np
 from online.src.retrieval.branches.branch2.contracts import normalize_weights
 from online.src.retrieval.branches.branch2.dense import DamDenseRetriever, normalized_lse
 from online.src.retrieval.branches.branch2.fusion import fuse_dense_sparse
+from online.src.retrieval.branches.branch2.service import Branch2Search
 from online.src.retrieval.branches.rerankers.beit3_cosine import Beit3CosineReranker
+from online.src.retrieval.infrastructure.persistent_cache import (
+    PersistentQueryEmbeddingCache,
+)
 
 
 class FakeQdrant:
@@ -31,6 +36,104 @@ class FakeQdrant:
 
 
 class Branch2ContractTests(unittest.TestCase):
+    def test_bge_fallback_cache_uses_actual_cpu_device(self) -> None:
+        roles = ("original", "entity", "action", "context", "synonym", "keyword")
+        bundle = {
+            "schema_version": "branch1.query.v1",
+            "queries": [{"role": role, "vi": f"vi {role}", "en": f"en {role}"} for role in roles],
+        }
+
+        class FallbackBge:
+            bge_id = "test-bge"
+            bge_revision = "test-revision"
+            cache_device = "mps"
+            manager = None
+
+            def __init__(self) -> None:
+                self.device = "mps"
+                self.calls = 0
+
+            def cache_device_for_bge(self) -> str:
+                return self.device
+
+            def encode_bge_text(self, texts):
+                self.calls += 1
+                self.device = "cpu"
+                return np.ones((len(texts), 1024), dtype=np.float32), [
+                    {"token_count": 1, "max_tokens": 512, "truncated": False} for _ in texts
+                ]
+
+            def unload_all(self) -> None:
+                return None
+
+        class EmptyDense:
+            last_timing: dict[str, object] = {}
+
+            @staticmethod
+            def search(*_args):
+                return {}
+
+        class EmptySparse:
+            @staticmethod
+            def search(*_args):
+                return {}
+
+        class UnusedBeit:
+            @staticmethod
+            def unload() -> None:
+                return None
+
+        encoder = FallbackBge()
+        with tempfile.TemporaryDirectory() as directory:
+            cache = PersistentQueryEmbeddingCache(Path(directory) / "cache.sqlite3")
+            try:
+                service = object.__new__(Branch2Search)
+                service.bge_encoders = encoder
+                service.beit_encoders = UnusedBeit()
+                service.cache = cache
+                service.search_lock = threading.Lock()
+                service.dense = EmptyDense()
+                service.sparse = EmptySparse()
+                service._frame_point_ids = None
+                service._reranker = None
+                service._resource_lock = threading.RLock()
+                service.execute(
+                    bundle, {"dense": 0.7, "sparse": 0.3}, {"beit3": 0.4, "previous": 0.6}
+                )
+
+                texts = [f"en {role}" for role in roles]
+                streams = [
+                    {"role": role, "language": "en", "text": text}
+                    for role, text in zip(roles, texts, strict=True)
+                ]
+                key_args = {
+                    "tokenizer_config": "max_tokens=512;pooling=cls;normalization=l2",
+                    "stream_contract": streams,
+                }
+                cpu_key = cache.key(
+                    "bge_m3",
+                    "test-bge@test-revision",
+                    texts,
+                    device="cpu",
+                    **key_args,
+                )
+                mps_key = cache.key(
+                    "bge_m3",
+                    "test-bge@test-revision",
+                    texts,
+                    device="mps",
+                    **key_args,
+                )
+                self.assertIsNotNone(cache.get(cpu_key))
+                self.assertIsNone(cache.get(mps_key))
+
+                service.execute(
+                    bundle, {"dense": 0.7, "sparse": 0.3}, {"beit3": 0.4, "previous": 0.6}
+                )
+                self.assertEqual(encoder.calls, 1)
+            finally:
+                cache.close()
+
     def test_dam_health_exposes_ingestion_fingerprints(self) -> None:
         class MatrixHeader:
             shape = (681_355, 1024)
@@ -92,12 +195,13 @@ class Branch2ContractTests(unittest.TestCase):
         self.assertTrue(health["ready"])
         self.assertEqual(health["matrix_sha256"], "matrix-sha256")
         self.assertEqual(health["metadata_sha256"], "metadata-sha256")
-        self.assertEqual(
-            health["frame_metadata_sha256"], "frame-metadata-sha256"
-        )
+        self.assertEqual(health["frame_metadata_sha256"], "frame-metadata-sha256")
 
     def test_weights_are_normalized(self) -> None:
-        self.assertEqual(normalize_weights({"dense": 7, "sparse": 3}, ("dense", "sparse")), {"dense": 0.7, "sparse": 0.3})
+        self.assertEqual(
+            normalize_weights({"dense": 7, "sparse": 3}, ("dense", "sparse")),
+            {"dense": 0.7, "sparse": 0.3},
+        )
 
     def test_hybrid_fusion_preserves_missing_scores_and_order(self) -> None:
         dense = {
@@ -125,14 +229,37 @@ class Branch2ContractTests(unittest.TestCase):
 
     def test_hybrid_provenance_is_bound_to_each_frame(self) -> None:
         dense = {
-            "f1": {"frame_uid": "f1", "dense_raw": 0.9, "dense_rank": 1, "dense_best_query_role": "entity"},
-            "f2": {"frame_uid": "f2", "dense_raw": 0.1, "dense_rank": 2, "dense_best_query_role": "context"},
+            "f1": {
+                "frame_uid": "f1",
+                "dense_raw": 0.9,
+                "dense_rank": 1,
+                "dense_best_query_role": "entity",
+            },
+            "f2": {
+                "frame_uid": "f2",
+                "dense_raw": 0.1,
+                "dense_rank": 2,
+                "dense_best_query_role": "context",
+            },
         }
         sparse = {
-            "f1": {"frame_uid": "f1", "sparse_raw": 0.01, "sparse_rank": 2, "sparse_best_query_role": "keyword"},
-            "f2": {"frame_uid": "f2", "sparse_raw": 0.02, "sparse_rank": 1, "sparse_best_query_role": "original"},
+            "f1": {
+                "frame_uid": "f1",
+                "sparse_raw": 0.01,
+                "sparse_rank": 2,
+                "sparse_best_query_role": "keyword",
+            },
+            "f2": {
+                "frame_uid": "f2",
+                "sparse_raw": 0.02,
+                "sparse_rank": 1,
+                "sparse_best_query_role": "original",
+            },
         }
-        results = {item["frame_uid"]: item for item in fuse_dense_sparse(dense, sparse, {"dense": 0.7, "sparse": 0.3}, 10)}
+        results = {
+            item["frame_uid"]: item
+            for item in fuse_dense_sparse(dense, sparse, {"dense": 0.7, "sparse": 0.3}, 10)
+        }
         self.assertEqual(results["f1"]["hybrid_provenance"]["dense"]["best_query_role"], "entity")
         self.assertEqual(results["f2"]["hybrid_provenance"]["dense"]["best_query_role"], "context")
 

@@ -42,7 +42,9 @@ def fuse_dense_sparse(
         item["sparse_observed"] = sparse_item is not None
         records[uid] = item
     dense_obs = {uid: {"raw": item["dense_raw"], "observed": True} for uid, item in dense.items()}
-    sparse_obs = {uid: {"raw": item["sparse_raw"], "observed": True} for uid, item in sparse.items()}
+    sparse_obs = {
+        uid: {"raw": item["sparse_raw"], "observed": True} for uid, item in sparse.items()
+    }
     normalize_scores(dense_obs, "raw")
     normalize_scores(sparse_obs, "raw")
     for uid, item in records.items():
@@ -54,7 +56,10 @@ def fuse_dense_sparse(
         item["dense_normalization_std"] = dense_obs.get(uid, {}).get("normalization_std")
         item["sparse_normalization_mean"] = sparse_obs.get(uid, {}).get("normalization_mean")
         item["sparse_normalization_std"] = sparse_obs.get(uid, {}).get("normalization_std")
-        item["hybrid_score"] = normalized["dense"] * item["dense_normalized"] + normalized["sparse"] * item["sparse_normalized"]
+        item["hybrid_score"] = (
+            normalized["dense"] * item["dense_normalized"]
+            + normalized["sparse"] * item["sparse_normalized"]
+        )
         item["score"] = item["hybrid_score"]
         item["score_type"] = "dam_dense_bm25_hybrid"
         if dense_item:
@@ -71,13 +76,17 @@ def fuse_dense_sparse(
             item["sparse_rank"] = sparse_item.get("sparse_rank")
             item["sparse_query_scores"] = sparse_item.get("sparse_query_scores", {})
         item["hybrid_provenance"] = {
-            "dense": None if dense_item is None else {
+            "dense": None
+            if dense_item is None
+            else {
                 "rank": dense_item.get("dense_rank"),
                 "raw": dense_item.get("dense_raw"),
                 "best_query_role": dense_item.get("dense_best_query_role"),
                 "best_query_language": dense_item.get("dense_best_query_language", "en"),
             },
-            "sparse": None if sparse_item is None else {
+            "sparse": None
+            if sparse_item is None
+            else {
                 "rank": sparse_item.get("sparse_rank"),
                 "raw": sparse_item.get("sparse_raw"),
                 "bm25_raw": sparse_item.get("sparse_bm25_raw"),
@@ -86,7 +95,14 @@ def fuse_dense_sparse(
             },
             "weights": normalized,
         }
-    ordered = sorted(records.values(), key=lambda value: (-float(value["hybrid_score"]), min(value.get("dense_rank") or math.inf, value.get("sparse_rank") or math.inf), value["frame_uid"]))
+    ordered = sorted(
+        records.values(),
+        key=lambda value: (
+            -float(value["hybrid_score"]),
+            min(value.get("dense_rank") or math.inf, value.get("sparse_rank") or math.inf),
+            value["frame_uid"],
+        ),
+    )
     for rank, item in enumerate(ordered[:top_k], 1):
         item["hybrid_rank"] = rank
         item["rank"] = rank

@@ -81,11 +81,19 @@ class DamBm25Index:
                 return False
             count = int(db.execute("SELECT COUNT(*) FROM dam_regions").fetchone()[0])
             fts_count = int(db.execute("SELECT COUNT(*) FROM dam_fts").fetchone()[0])
-            fingerprint = db.execute("SELECT value FROM branch2_meta WHERE key='fingerprint'").fetchone()
+            fingerprint = db.execute(
+                "SELECT value FROM branch2_meta WHERE key='fingerprint'"
+            ).fetchone()
             version = db.execute("SELECT value FROM branch2_meta WHERE key='version'").fetchone()
-            document_count = db.execute("SELECT value FROM branch2_meta WHERE key='document_count'").fetchone()
-            schema = db.execute("SELECT value FROM branch2_meta WHERE key='schema_version'").fetchone()
-            frame_fingerprint = db.execute("SELECT value FROM branch2_meta WHERE key='frame_metadata_fingerprint'").fetchone()
+            document_count = db.execute(
+                "SELECT value FROM branch2_meta WHERE key='document_count'"
+            ).fetchone()
+            schema = db.execute(
+                "SELECT value FROM branch2_meta WHERE key='schema_version'"
+            ).fetchone()
+            frame_fingerprint = db.execute(
+                "SELECT value FROM branch2_meta WHERE key='frame_metadata_fingerprint'"
+            ).fetchone()
             return (
                 count == EXPECTED_DAM_REGIONS
                 and fts_count == EXPECTED_DAM_REGIONS
@@ -114,7 +122,9 @@ class DamBm25Index:
         frame_metadata_sha256: str,
     ) -> Path:
         if not metadata_sha256 or not frame_metadata_sha256:
-            raise ValueError("DAM and canonical metadata fingerprints are required for BM25 preparation")
+            raise ValueError(
+                "DAM and canonical metadata fingerprints are required for BM25 preparation"
+            )
         metadata_path = data_root / "dense_text_embeddings" / "dam_metadata.jsonl"
         frame_metadata_path = (
             data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
@@ -163,7 +173,9 @@ class DamBm25Index:
                     "region_id TEXT NOT NULL, "
                     "bbox_json TEXT NOT NULL)"
                 )
-                db.execute("CREATE VIRTUAL TABLE dam_fts USING fts5(description_en, class_entity, content='dam_regions', content_rowid='id', tokenize='unicode61 remove_diacritics 2')")
+                db.execute(
+                    "CREATE VIRTUAL TABLE dam_fts USING fts5(description_en, class_entity, content='dam_regions', content_rowid='id', tokenize='unicode61 remove_diacritics 2')"
+                )
             batch: list[tuple[Any, ...]] = []
             total = 0
             with metadata_path.open("r", encoding="utf-8") as handle:
@@ -204,7 +216,9 @@ class DamBm25Index:
                         )
                     )
                     if len(batch) >= 5000:
-                        db.executemany("INSERT INTO dam_regions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", batch)
+                        db.executemany(
+                            "INSERT INTO dam_regions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", batch
+                        )
                         total += len(batch)
                         batch.clear()
             if batch:
@@ -262,17 +276,20 @@ class DamBm25Index:
             raise ValueError("DAM BM25 retrieval requires six queries and top_k in 1..2000")
         db = self._connection()
         if not self._ready(db):
-            raise RuntimeError(
-                "Branch-2 BM25 index is not ready; rerun prepare_branch2.py"
-            )
+            raise RuntimeError("Branch-2 BM25 index is not ready; rerun prepare_branch2.py")
         hits: dict[str, dict[str, Any]] = {}
-        for role, query in zip(("original", "entity", "action", "context", "synonym", "keyword"), queries, strict=True):
+        for role, query in zip(
+            ("original", "entity", "action", "context", "synonym", "keyword"), queries, strict=True
+        ):
             tokens = self._tokens(query)
             if not tokens:
                 continue
             expression = " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
             with self._lock:
-                rows = db.execute("SELECT r.*, bm25(dam_fts) AS bm25_raw FROM dam_fts JOIN dam_regions r ON r.id=dam_fts.rowid WHERE dam_fts MATCH ? ORDER BY bm25_raw LIMIT ?", (expression, top_k)).fetchall()
+                rows = db.execute(
+                    "SELECT r.*, bm25(dam_fts) AS bm25_raw FROM dam_fts JOIN dam_regions r ON r.id=dam_fts.rowid WHERE dam_fts MATCH ? ORDER BY bm25_raw LIMIT ?",
+                    (expression, top_k),
+                ).fetchall()
             for rank, row in enumerate(rows, 1):
                 frame_uid = str(row["frame_uid"])
                 score = 1.0 / (60.0 + rank)
@@ -295,7 +312,9 @@ class DamBm25Index:
                         role_scores[role] = evidence
                 if current is not None and current["sparse_raw"] >= score:
                     continue
-                query_scores = dict(current.get("sparse_query_scores", {})) if current is not None else {}
+                query_scores = (
+                    dict(current.get("sparse_query_scores", {})) if current is not None else {}
+                )
                 query_scores[role] = evidence
                 payload = {
                     "point_id": int(row["parent_point_id"]),
@@ -308,10 +327,42 @@ class DamBm25Index:
                     "image_relpath": str(row["image_relpath"]),
                 }
                 frame = base_frame(payload, score=score, rank=rank, score_type="bm25_rank")
-                frame.update({"frame_uid": frame_uid, "global_idx": int(row["parent_point_id"]), "sparse_raw": score, "sparse_observed": True, "sparse_rank": rank, "sparse_bm25_raw": bm25_raw, "sparse_best_query_role": role, "sparse_best_query_language": "en", "sparse_query_scores": query_scores, "sparse_winner": {"region_id": row["region_id"], "class_entity": row["class_entity"], "description_en": row["description_en"], "bbox": json.loads(row["bbox_json"]), "query_role": role, "query_language": "en", "rank": rank, "bm25_raw": bm25_raw}})
+                frame.update(
+                    {
+                        "frame_uid": frame_uid,
+                        "global_idx": int(row["parent_point_id"]),
+                        "sparse_raw": score,
+                        "sparse_observed": True,
+                        "sparse_rank": rank,
+                        "sparse_bm25_raw": bm25_raw,
+                        "sparse_best_query_role": role,
+                        "sparse_best_query_language": "en",
+                        "sparse_query_scores": query_scores,
+                        "sparse_winner": {
+                            "region_id": row["region_id"],
+                            "class_entity": row["class_entity"],
+                            "description_en": row["description_en"],
+                            "bbox": json.loads(row["bbox_json"]),
+                            "query_role": role,
+                            "query_language": "en",
+                            "rank": rank,
+                            "bm25_raw": bm25_raw,
+                        },
+                    }
+                )
                 hits[frame_uid] = frame
         for frame in hits.values():
             scores = frame.setdefault("sparse_query_scores", {})
             for role in ("original", "entity", "action", "context", "synonym", "keyword"):
-                scores.setdefault(role, {"rank": None, "rank_score": None, "bm25_raw": None, "region_id": None, "language": "en", "observed": False})
+                scores.setdefault(
+                    role,
+                    {
+                        "rank": None,
+                        "rank_score": None,
+                        "bm25_raw": None,
+                        "region_id": None,
+                        "language": "en",
+                        "observed": False,
+                    },
+                )
         return hits

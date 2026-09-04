@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import threading
-import unittest
-import json
 import hashlib
+import json
 import os
 import sqlite3
 import tempfile
-from pathlib import Path
+import threading
+import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from online.src.retrieval.branches.branch3.asr import Branch3AsrSearch
@@ -94,7 +94,9 @@ class Branch3AsrContractTests(unittest.TestCase):
 
     def test_vietnamese_fold_and_tokens_are_diacritic_insensitive(self) -> None:
         self.assertEqual(fold_text("Đặng Văn A"), "dang van a")
-        self.assertEqual(query_tokens("các thông tin về Đà Nẵng"), ["thong", "tin", "ve", "da", "nang"])
+        self.assertEqual(
+            query_tokens("các thông tin về Đà Nẵng"), ["thong", "tin", "ve", "da", "nang"]
+        )
 
     def test_service_sends_six_vietnamese_streams_and_returns_contract(self) -> None:
         index = _FakeAsrIndex()
@@ -109,7 +111,14 @@ class Branch3AsrContractTests(unittest.TestCase):
         response = service.execute(bundle, 2000, 500)
         self.assertEqual(response["schema_version"], "branch3.asr.result.v1")
         self.assertEqual(len(index.received[0]), 12)
-        self.assertEqual(set(index.received[0]), {f"{role}:{language}" for role in ("original", "entity", "action", "context", "synonym", "keyword") for language in ("vi", "en")})
+        self.assertEqual(
+            set(index.received[0]),
+            {
+                f"{role}:{language}"
+                for role in ("original", "entity", "action", "context", "synonym", "keyword")
+                for language in ("vi", "en")
+            },
+        )
         self.assertEqual(index.received[1:], (2000, 500))
         self.assertEqual(response["result_count"], 1)
 
@@ -141,12 +150,24 @@ class Branch3AsrContractTests(unittest.TestCase):
         index._runtime_ready_fast_locked = lambda: True  # type: ignore[method-assign]
         index.health = lambda: {"ready": True}  # type: ignore[method-assign]
         index._query_stream = lambda _query, _limit: (  # type: ignore[method-assign]
-            [{
-                "segment_id": "seg-1", "video_id": "L00_V001", "start_ms": 0, "end_ms": 1000,
-                "transcript": "one two", "transcript_search": "one two", "frame_uid": "L00_V001:0",
-                "point_id": 1, "keyframe_n": 1, "frame_idx": 0, "pts_time_s": 0.0,
-                "fps": 25.0, "image_relpath": "L00_V001/00000000.jpg", "bm25_score": -1.0,
-            }],
+            [
+                {
+                    "segment_id": "seg-1",
+                    "video_id": "L00_V001",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "transcript": "one two",
+                    "transcript_search": "one two",
+                    "frame_uid": "L00_V001:0",
+                    "point_id": 1,
+                    "keyframe_n": 1,
+                    "frame_idx": 0,
+                    "pts_time_s": 0.0,
+                    "fps": 25.0,
+                    "image_relpath": "L00_V001/00000000.jpg",
+                    "bm25_score": -1.0,
+                }
+            ],
             query_tokens("one in two"),
         )
         result = index.search_many({"original": "one in two"}, _allow_single=True)
@@ -159,12 +180,24 @@ class Branch3AsrContractTests(unittest.TestCase):
         index._runtime_ready_fast_locked = lambda: True  # type: ignore[method-assign]
         index.health = lambda: {"ready": True}  # type: ignore[method-assign]
         index._query_stream = lambda _query, _limit: (  # type: ignore[method-assign]
-            [{
-                "segment_id": "seg-1", "video_id": "L00_V001", "start_ms": 0, "end_ms": 1000,
-                "transcript": "alpha beta", "transcript_search": "alpha beta", "frame_uid": "L00_V001:0",
-                "point_id": 1, "keyframe_n": 1, "frame_idx": 0, "pts_time_s": 0.0,
-                "fps": 25.0, "image_relpath": "L00_V001/00000000.jpg", "bm25_score": -1.0,
-            }],
+            [
+                {
+                    "segment_id": "seg-1",
+                    "video_id": "L00_V001",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "transcript": "alpha beta",
+                    "transcript_search": "alpha beta",
+                    "frame_uid": "L00_V001:0",
+                    "point_id": 1,
+                    "keyframe_n": 1,
+                    "frame_idx": 0,
+                    "pts_time_s": 0.0,
+                    "fps": 25.0,
+                    "image_relpath": "L00_V001/00000000.jpg",
+                    "bm25_score": -1.0,
+                }
+            ],
             query_tokens("alpha alpha beta"),
         )
         result = index.search_many({"original": "alpha alpha beta"}, _allow_single=True)
@@ -178,16 +211,36 @@ class Branch3AsrContractTests(unittest.TestCase):
         index.health = lambda: {"ready": True}  # type: ignore[method-assign]
         rows = [
             {
-                "segment_id": "seg-best", "video_id": "L00_V001", "start_ms": 0, "end_ms": 1000,
-                "transcript": "alpha beta", "transcript_search": "alpha beta", "frame_uid": "L00_V001:0",
-                "point_id": 1, "keyframe_n": 1, "frame_idx": 0, "pts_time_s": 0.0,
-                "fps": 25.0, "image_relpath": "L00_V001/00000000.jpg", "bm25_score": -2.0,
+                "segment_id": "seg-best",
+                "video_id": "L00_V001",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "transcript": "alpha beta",
+                "transcript_search": "alpha beta",
+                "frame_uid": "L00_V001:0",
+                "point_id": 1,
+                "keyframe_n": 1,
+                "frame_idx": 0,
+                "pts_time_s": 0.0,
+                "fps": 25.0,
+                "image_relpath": "L00_V001/00000000.jpg",
+                "bm25_score": -2.0,
             },
             {
-                "segment_id": "seg-weaker", "video_id": "L00_V001", "start_ms": 1000, "end_ms": 2000,
-                "transcript": "alpha", "transcript_search": "alpha", "frame_uid": "L00_V001:0",
-                "point_id": 1, "keyframe_n": 1, "frame_idx": 0, "pts_time_s": 0.0,
-                "fps": 25.0, "image_relpath": "L00_V001/00000000.jpg", "bm25_score": -1.0,
+                "segment_id": "seg-weaker",
+                "video_id": "L00_V001",
+                "start_ms": 1000,
+                "end_ms": 2000,
+                "transcript": "alpha",
+                "transcript_search": "alpha",
+                "frame_uid": "L00_V001:0",
+                "point_id": 1,
+                "keyframe_n": 1,
+                "frame_idx": 0,
+                "pts_time_s": 0.0,
+                "fps": 25.0,
+                "image_relpath": "L00_V001/00000000.jpg",
+                "bm25_score": -1.0,
             },
         ]
         index._query_stream = lambda _query, _limit: (rows, ["alpha", "beta"])  # type: ignore[method-assign]
@@ -272,7 +325,17 @@ class Branch3AsrContractTests(unittest.TestCase):
                 )
                 connection.execute(
                     "INSERT INTO asr_meta VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    ("branch3.asr-index.v2", 4, build_id, "source", "canonical", "nearest_keyframe_to_segment_midpoint", 0, 0, datetime.now(timezone.utc).isoformat()),
+                    (
+                        "branch3.asr-index.v2",
+                        4,
+                        build_id,
+                        "source",
+                        "canonical",
+                        "nearest_keyframe_to_segment_midpoint",
+                        0,
+                        0,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
                 )
                 connection.commit()
                 connection.close()
@@ -304,7 +367,12 @@ class Branch3AsrContractTests(unittest.TestCase):
             artifact.write_bytes(b"actual")
             index = AsrFtsIndex(root / "asr_segments", root / "asr.sqlite3")
             matched, stat_matches, fingerprint_present = index._artifact_status(  # type: ignore[protected-access]
-                {"path": artifact.name, "size": artifact.stat().st_size, "mtime_ns": artifact.stat().st_mtime_ns, "sha256": "0" * 64},
+                {
+                    "path": artifact.name,
+                    "size": artifact.stat().st_size,
+                    "mtime_ns": artifact.stat().st_mtime_ns,
+                    "sha256": "0" * 64,
+                },
                 relative_root=root,
             )
             self.assertFalse(matched)
@@ -323,7 +391,9 @@ class Branch3AsrContractTests(unittest.TestCase):
                 "sha256": hashlib.sha256(b"actual").hexdigest(),
             }
             index = AsrFtsIndex(root / "asr_segments", root / "asr.sqlite3")
-            with patch("online.src.retrieval.modalities.asr._sha256_file", side_effect=AssertionError):
+            with patch(
+                "online.src.retrieval.modalities.asr._sha256_file", side_effect=AssertionError
+            ):
                 matched, stat_matches, fingerprint_present = index._artifact_status(
                     record,
                     relative_root=root,

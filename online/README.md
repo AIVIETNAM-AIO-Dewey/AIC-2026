@@ -1,8 +1,46 @@
-# AIC-2026 CPU Retrieval Workbench
+# AIC-2026 Native Retrieval Workbench
+
+## Native Apple Silicon run (no Docker)
+
+On Apple Silicon, the local launcher uses MPS for SigLIP2, MetaCLIP2,
+BGE-M3, BEIT3, and DAM exact tensor scoring. Qdrant and SQLite FTS5 run as
+native ARM64 CPU services. An unsupported Metal operation falls back only its
+own encoder worker to CPU and is exposed in `/api/health`.
+
+```bash
+./scripts/native_macos/aic_local.sh setup
+./scripts/native_macos/aic_local.sh start
+./scripts/native_macos/aic_local.sh status
+./scripts/native_macos/aic_local.sh stop
+```
+
+`setup` validates and copies the downloaded MetaCLIP2/BEIT3 artifacts into the
+main artifact tree, creates a Python 3.12 environment, installs native Qdrant,
+builds all indexes and collections, runs the frontend build gate, and starts
+the compiled UI at <http://127.0.0.1:8890>. It deliberately performs no model
+inference or retrieval query; the first inference is initiated from the UI.
+
+Paths can be overridden with `AIC_DATA_ROOT`, `AIC_METACLIP2_SOURCE`,
+`AIC_BEIT3_SOURCE`, `AIC_LOCAL_RUNTIME_ROOT`, and `AIC_LOCAL_VENV_ROOT`.
+Because the main dataset is under `Downloads`, macOS may ask once for file
+access. If the launcher reports that access is blocked, enable Downloads for
+your terminal app under **System Settings → Privacy & Security → Files and
+Folders**, then run `start` again.
 
 The workbench runs locally through `online.cpu_server:app`, Qdrant, persistent
-SQLite indexes, and CPU-only encoder workers. Gemini, Qwen, the former BGE
+SQLite indexes, and isolated encoder workers. Gemini, Qwen, the former BGE
 cross-encoder, and the legacy server/CLI are not part of this runtime.
+
+### Source-frame indexing contract
+
+Video submission uses the original zero-based `frame_idx`, not the sparse
+keyframe number. `GET /api/video/{video_id}/timeline` publishes the verified
+frame range and exact organizer keyframe anchors. `GET
+/api/video/{video_id}/source-frame/{frame_idx}` validates any in-range source
+frame without replacing its identity. Exact anchors keep their stored
+timestamps; frames between anchors use deterministic piecewise-linear timing.
+The nearest indexed frame is labelled separately and is used only for image
+preview and stored-vector related-frame suggestions.
 
 ## Prepare data
 
@@ -59,6 +97,27 @@ BEiT-3 COCO cosine to ranks 1-100 with a `25% BEiT-3 + 75% RRF` blend. Ranks
 The BEiT-3 stage is dual-encoder cosine scoring through its `language_head`
 against precomputed full-frame vectors; it is not cross-attention and is never
 trained online.
+
+`Ordered KIS Events` is an opt-in KIS/VQA/TRAKE action. It focuses the same
+six-role bundle on each of two to six events, runs the complete unchanged KIS
+pipeline once per event, and then keeps only same-video paths with strictly
+increasing source-frame indexes and timestamps. Its retrieval cost therefore
+scales with the number of events; ordinary KIS search is unaffected. The
+sticky overall-query editor is the authoring source for both the six-role
+bundle and ordered events. `Prepare bundle & events` uses only the local
+deterministic parser and does not run retrieval or model inference. Matching
+manually authored bilingual bundles are preserved; manual changes are never
+silently overwritten, and lexical mismatch checks warn without blocking. Each
+ordered event receives its own text plus only the parent's shared `context`
+role, so actions or entities belonging to other events do not leak into its
+search. Ordered results always contain every event, but indexed-frame search
+does not by itself prove a first appearance or camera motion; verify those in
+the video player.
+
+`Search inside this video` is deliberately narrower: it filters Qdrant
+to the selected video and fuses only SigLIP2, MetaCLIP2, and BEIT3 at their
+Branch-1 weights. DAM, OCR, ASR, and final cross-branch KIS reranking are not
+invoked for that scoped action.
 
 After code updates, rebuild the ASR index explicitly and then recreate only the
 API service so its read-only SQLite connection observes the new build:

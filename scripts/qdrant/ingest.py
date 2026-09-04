@@ -13,14 +13,14 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 from qdrant_client import QdrantClient, models
 from safetensors.numpy import load_file
-
 
 LOGGER = logging.getLogger("aic-qdrant-ingest")
 
@@ -129,8 +129,7 @@ def write_ingestion_manifest(
             collection_name = collection_names[selected_name]
             evidence = merged_verification.get(collection_name) or {}
             if not (
-                int(merged_collections.get(collection_name, -1))
-                == expected_counts[collection_name]
+                int(merged_collections.get(collection_name, -1)) == expected_counts[collection_name]
                 and evidence.get("expected_count") == expected_counts[collection_name]
                 and evidence.get("verified_count") == expected_counts[collection_name]
                 and evidence.get("payload_verified") is True
@@ -152,6 +151,7 @@ def write_ingestion_manifest(
     if status != "ready" and previous.get("artifacts"):
         payload["artifacts"] = dict(previous["artifacts"])
     if status == "ready":
+
         def artifact_key(path: Path) -> str:
             try:
                 return path.relative_to(data_root).as_posix()
@@ -159,14 +159,16 @@ def write_ingestion_manifest(
                 return path.resolve().as_posix()
 
         artifacts = dict(previous.get("artifacts") or {})
-        artifacts.update({
-            artifact_key(path): {
-                "size": path.stat().st_size,
-                "mtime_ns": path.stat().st_mtime_ns,
-                "sha256": sha256_file(path),
+        artifacts.update(
+            {
+                artifact_key(path): {
+                    "size": path.stat().st_size,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                    "sha256": sha256_file(path),
+                }
+                for path in _artifact_paths(data_root, selected, beit3_dir)
             }
-            for path in _artifact_paths(data_root, selected, beit3_dir)
-        })
+        )
         payload["artifacts"] = artifacts
     if error:
         payload["error"] = error
@@ -367,9 +369,7 @@ def validate_collection_definition(
                 "use --recreate explicitly"
             )
         if str(definition.get("distance", "")).lower() != "cosine":
-            raise ValueError(
-                f"{collection}/{name} is not Cosine; use --recreate explicitly"
-            )
+            raise ValueError(f"{collection}/{name} is not Cosine; use --recreate explicitly")
     return result
 
 
@@ -391,7 +391,10 @@ def enable_hnsw(base_url: str, collection: str) -> None:
 
 
 def qdrant_count(client: QdrantClient, collection: str) -> int:
-    return int(client.count(collection_name=collection, exact=True).count)
+    result = client.count(collection_name=collection, exact=True)
+    # QdrantClient returns CountResult, while lightweight/native adapters may
+    # return the count directly.  Supporting both keeps verification portable.
+    return int(getattr(result, "count", result))
 
 
 def validate_numpy_matrix(path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
@@ -414,7 +417,9 @@ def upsert_with_retry(
 ) -> None:
     batch = models.Batch(
         ids=ids,
-        vectors={name: value.astype(np.float32, copy=False).tolist() for name, value in vectors.items()},
+        vectors={
+            name: value.astype(np.float32, copy=False).tolist() for name, value in vectors.items()
+        },
         payloads=payloads,
     )
     for attempt in range(1, 6):
@@ -449,7 +454,9 @@ def ensure_frame_collection(base_url: str, recreate: bool, verify_only: bool = F
             indexes,
         )
     elif not verify_only:
-        validate_collection_definition(base_url, FRAME_COLLECTION, {"siglip2": 768, "metaclip2": 1024})
+        validate_collection_definition(
+            base_url, FRAME_COLLECTION, {"siglip2": 768, "metaclip2": 1024}
+        )
         ensure_payload_indexes(base_url, FRAME_COLLECTION, indexes)
 
 
@@ -616,7 +623,7 @@ def _payload_value_matches(actual: Any, expected: Any) -> bool:
             and len(actual) == len(expected)
             and all(
                 _payload_value_matches(actual_item, expected_item)
-                for actual_item, expected_item in zip(actual, expected)
+                for actual_item, expected_item in zip(actual, expected, strict=False)
             )
         )
     if isinstance(expected, dict):
@@ -698,11 +705,7 @@ def _upsert_source_batch(
             raise ValueError(
                 f"Invalid canonical payload for {collection}/{source.get('id')}"
             ) from error
-        if (
-            payload_id != source_id
-            or not video_id
-            or frame_uid != f"{video_id}:{frame_idx}"
-        ):
+        if payload_id != source_id or not video_id or frame_uid != f"{video_id}:{frame_idx}":
             raise ValueError(
                 f"Payload identity does not match source point {source_id} in {collection}"
             )
@@ -788,7 +791,9 @@ def reconcile_collection(
         )
     existing_ids = _validate_existing_ids(client, collection, expected_count, current_count)
     if current_count == expected_count and len(existing_ids) != expected_count:
-        raise ValueError(f"{collection} has incomplete canonical ID coverage; no repair was attempted")
+        raise ValueError(
+            f"{collection} has incomplete canonical ID coverage; no repair was attempted"
+        )
 
     source_batch: list[dict[str, Any]] = []
     repaired = 0
@@ -813,17 +818,13 @@ def reconcile_collection(
         for source_item in source_batch:
             point_id = int(source_item["id"])
             record = by_id.get(point_id)
-            valid, diagnostic = _record_matches_source(
-                record, source_item, vector_dimensions
-            )
+            valid, diagnostic = _record_matches_source(record, source_item, vector_dimensions)
             if not valid:
                 needs_repair.append(source_item)
                 reason = str(diagnostic.get("reason", "mismatch"))
                 mismatches[reason] = mismatches.get(reason, 0) + 1
                 if len(mismatch_diagnostics) < 100:
-                    mismatch_diagnostics.append(
-                        {"point_id": point_id, **diagnostic}
-                    )
+                    mismatch_diagnostics.append({"point_id": point_id, **diagnostic})
                 # Keep enough samples for diagnosis without emitting one log
                 # line per legacy point during a full schema migration.
                 if len(mismatch_diagnostics) <= 10:
@@ -867,8 +868,7 @@ def reconcile_collection(
                 with_vectors=True,
             )
             repaired_by_id = {
-                int(_record_value(record, "id")): record
-                for record in repaired_records
+                int(_record_value(record, "id")): record for record in repaired_records
             }
             for source_item in needs_repair:
                 point_id = int(source_item["id"])
@@ -952,7 +952,9 @@ def _frame_sources(data_root: Path) -> Iterable[dict[str, Any]]:
                     raise ValueError(f"Unexpected tensors in {tensor_path}: {sorted(tensors)}")
                 siglip = tensors["embeddings"]
                 if siglip.ndim != 2 or siglip.shape[1] != 768 or siglip.dtype != np.float16:
-                    raise ValueError(f"Invalid SigLIP shard {tensor_path}: {siglip.shape} {siglip.dtype}")
+                    raise ValueError(
+                        f"Invalid SigLIP shard {tensor_path}: {siglip.shape} {siglip.dtype}"
+                    )
                 current_video = video_id
             assert siglip is not None
             local_row = int(item["vector_row"])
@@ -985,7 +987,10 @@ def _beit3_sources(data_root: Path, artifact_dir: Path | None) -> Iterable[dict[
         (EXPECTED_FRAMES, 768),
     )
     _validate_finite_matrix(vectors, beit3_dir / "keyframes_visual_vectors.f16.npy")
-    with metadata_path.open("r", encoding="utf-8") as beit_handle, canonical_path.open("r", encoding="utf-8") as canonical_handle:
+    with (
+        metadata_path.open("r", encoding="utf-8") as beit_handle,
+        canonical_path.open("r", encoding="utf-8") as canonical_handle,
+    ):
         for row, pair in enumerate(itertools.zip_longest(beit_handle, canonical_handle)):
             beit_line, canonical_line = pair
             if beit_line is None or canonical_line is None:
@@ -1032,7 +1037,9 @@ def _dam_sources(data_root: Path) -> Iterable[dict[str, Any]]:
             point_id = row + 1
             region_id = str(item.get("region_id") or "")
             if not region_id or region_id in seen_region_ids:
-                raise ValueError(f"DAM metadata has a missing or duplicate region_id at row {row + 1}")
+                raise ValueError(
+                    f"DAM metadata has a missing or duplicate region_id at row {row + 1}"
+                )
             seen_region_ids.add(region_id)
             if len(item.get("bbox") or []) != 4:
                 raise ValueError(f"DAM metadata has an invalid bbox at row {row + 1}")
@@ -1041,8 +1048,12 @@ def _dam_sources(data_root: Path) -> Iterable[dict[str, Any]]:
             if frame_record is None:
                 raise KeyError(f"No parent frame for DAM region {item.get('region_id')}")
             exported_keyframe_n = item.get("keyframe_n")
-            if exported_keyframe_n is not None and int(exported_keyframe_n) != int(frame_record["keyframe_n"]):
-                raise ValueError(f"DAM keyframe_n disagrees with canonical metadata for {frame_uid}")
+            if exported_keyframe_n is not None and int(exported_keyframe_n) != int(
+                frame_record["keyframe_n"]
+            ):
+                raise ValueError(
+                    f"DAM keyframe_n disagrees with canonical metadata for {frame_uid}"
+                )
             yield {
                 "id": point_id,
                 "vectors": {"dam": vectors[row]},
@@ -1062,7 +1073,9 @@ def _dam_sources(data_root: Path) -> Iterable[dict[str, Any]]:
             }
 
 
-def ingest_frames(client: QdrantClient, base_url: str, data_root: Path, batch_size: int, repair: bool = True) -> int:
+def ingest_frames(
+    client: QdrantClient, base_url: str, data_root: Path, batch_size: int, repair: bool = True
+) -> int:
     return reconcile_collection(
         client,
         base_url,
@@ -1102,7 +1115,9 @@ def ingest_beit3(
     )
 
 
-def ingest_dam(client: QdrantClient, base_url: str, data_root: Path, batch_size: int, repair: bool = True) -> int:
+def ingest_dam(
+    client: QdrantClient, base_url: str, data_root: Path, batch_size: int, repair: bool = True
+) -> int:
     return reconcile_collection(
         client,
         base_url,
@@ -1138,11 +1153,13 @@ def main() -> int:
     selected_beit3 = args.only in ("all", "beit3")
     selected_dam = args.only in ("all", "dam")
     selected_names = tuple(
-        name for name, enabled in (
+        name
+        for name, enabled in (
             ("frames", selected_frames),
             ("beit3", selected_beit3),
             ("dam", selected_dam),
-        ) if enabled
+        )
+        if enabled
     )
     write_ingestion_manifest(
         args.state_root,
@@ -1155,21 +1172,32 @@ def main() -> int:
     collection_results: dict[str, int] = {}
     if selected_frames:
         ensure_frame_collection(args.url, args.recreate, args.verify_only)
-        count = ingest_frames(client, args.url, args.data_root, args.frame_batch_size, not args.verify_only)
+        count = ingest_frames(
+            client, args.url, args.data_root, args.frame_batch_size, not args.verify_only
+        )
         collection_results[FRAME_COLLECTION] = count
         LOGGER.info("Frame collection count: %s", count)
         if not args.skip_index and not args.verify_only:
             enable_hnsw(args.url, FRAME_COLLECTION)
     if selected_beit3:
         ensure_beit3_collection(args.url, args.recreate, args.verify_only)
-        count = ingest_beit3(client, args.url, args.data_root, args.beit3_dir, args.frame_batch_size, not args.verify_only)
+        count = ingest_beit3(
+            client,
+            args.url,
+            args.data_root,
+            args.beit3_dir,
+            args.frame_batch_size,
+            not args.verify_only,
+        )
         collection_results[BEIT3_COLLECTION] = count
         LOGGER.info("BEiT-3 collection count: %s", count)
         if not args.skip_index and not args.verify_only:
             enable_hnsw(args.url, BEIT3_COLLECTION)
     if selected_dam:
         ensure_dam_collection(args.url, args.recreate, args.verify_only)
-        count = ingest_dam(client, args.url, args.data_root, args.dam_batch_size, not args.verify_only)
+        count = ingest_dam(
+            client, args.url, args.data_root, args.dam_batch_size, not args.verify_only
+        )
         collection_results[DAM_COLLECTION] = count
         LOGGER.info("DAM collection count: %s", count)
         if not args.skip_index and not args.verify_only:

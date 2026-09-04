@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA = "aic.runtime-fingerprint.v1"
 
 

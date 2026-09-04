@@ -6,12 +6,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..branch1.health import _collection_status, _gate_fingerprints, _ingestion_status, _offline_identity
-from ...encoders.sequential_manager import SequentialBranch1Encoders
 from ...encoders.cpu import CpuTextEncoders
+from ...encoders.sequential_manager import SequentialBranch1Encoders
 from ...infrastructure.qdrant import QdrantHttpClient
 from ...infrastructure.resources import current_process_rss_bytes, resource_qualification
 from ..branch1.contracts import EXPECTED_FRAMES
+from ..branch1.health import (
+    _collection_status,
+    _gate_fingerprints,
+    _ingestion_status,
+    _offline_identity,
+)
 from .dense import DamDenseRetriever
 from .sparse import DamBm25Index
 
@@ -25,8 +30,12 @@ def branch2_health(
     beit_encoders: SequentialBranch1Encoders,
     state_root: Path | None = None,
 ) -> dict[str, Any]:
-    dam_collection = _collection_status(qdrant, "aic_dam_regions", "dam", 1024, expected_count=681_355)
-    beit_collection = _collection_status(qdrant, "aic_beit3_frames", "beit3", 768, expected_count=EXPECTED_FRAMES)
+    dam_collection = _collection_status(
+        qdrant, "aic_dam_regions", "dam", 1024, expected_count=681_355
+    )
+    beit_collection = _collection_status(
+        qdrant, "aic_beit3_frames", "beit3", 768, expected_count=EXPECTED_FRAMES
+    )
     ingestion_root = state_root or (data_root / "visual_embeddings")
     beit_health_raw = beit_encoders.health()
     beit_health = beit_health_raw if isinstance(beit_health_raw, dict) else {}
@@ -41,15 +50,16 @@ def branch2_health(
         "ready": bge_compatible,
         "expected_revision": expected_bge_revision,
         "actual_revision": actual_bge_revision,
-        "warnings": [] if bge_compatible else ["Online BGE-M3 revision does not match the DAM migration manifest"],
+        "warnings": []
+        if bge_compatible
+        else ["Online BGE-M3 revision does not match the DAM migration manifest"],
     }
     frame_mapping_path = data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl"
     try:
         frame_stat = frame_mapping_path.stat()
-        frame_files_match = (
-            frame_stat.st_size == int(dam_data.get("frame_metadata_size", -1))
-            and frame_stat.st_mtime_ns == int(dam_data.get("frame_metadata_mtime_ns", -1))
-        )
+        frame_files_match = frame_stat.st_size == int(
+            dam_data.get("frame_metadata_size", -1)
+        ) and frame_stat.st_mtime_ns == int(dam_data.get("frame_metadata_mtime_ns", -1))
     except (OSError, TypeError, ValueError):
         frame_files_match = False
     frame_mapping = {
@@ -126,26 +136,29 @@ def branch2_health(
         "frame_mapping": frame_mapping,
     }
     ready = all(value.get("ready") is True for value in parts.values())
-    warnings = [
-        warning
-        for value in parts.values()
-        for warning in value.get("warnings", [])
-    ]
+    warnings = [warning for value in parts.values() for warning in value.get("warnings", [])]
     managers = [getattr(bge_encoders, "manager", None), getattr(beit_encoders, "manager", None)]
     peak_worker_rss = max(
         (int(manager.peak_worker_rss_bytes) for manager in managers if manager is not None),
         default=0,
     )
-    memory_ready = all(
-        manager is None or manager.production_ready for manager in managers
-    )
+    memory_ready = all(manager is None or manager.production_ready for manager in managers)
     resource_state = resource_qualification(ingestion_root)
     estimated_peak_total_rss = max(
-        (int(manager.estimated_peak_total_rss_bytes) for manager in managers if manager is not None),
+        (
+            int(manager.estimated_peak_total_rss_bytes)
+            for manager in managers
+            if manager is not None
+        ),
         default=0,
     )
-    production_ready = ready and memory_ready and resource_state.get("production_ready") is True and all(
-        value.get("production_ready", value.get("ready")) is True for value in parts.values()
+    production_ready = (
+        ready
+        and memory_ready
+        and resource_state.get("production_ready") is True
+        and all(
+            value.get("production_ready", value.get("ready")) is True for value in parts.values()
+        )
     )
     return {
         "status": "ready" if ready else "not_ready",

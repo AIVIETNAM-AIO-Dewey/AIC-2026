@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from online.src.retrieval.branches.branch1.health import (
     DATA_GATE_SCHEMA_VERSION,
-    _gate_artifacts_current,
     _collection_status,
+    _gate_artifacts_current,
     _gate_fingerprints,
     _gate_model_status,
 )
@@ -25,11 +25,7 @@ class Branch1HealthGateTests(unittest.TestCase):
                     "status": "green",
                     "points_count": 248_116,
                     "config": {
-                        "params": {
-                            "vectors": {
-                                "beit3": {"size": 768, "distance": "Cosine"}
-                            }
-                        }
+                        "params": {"vectors": {"beit3": {"size": 768, "distance": "Cosine"}}}
                     },
                 }
 
@@ -74,8 +70,15 @@ class Branch1HealthGateTests(unittest.TestCase):
             "passed": True,
             "canonical_metadata": record(paths["canonical"]),
             "metaclip2": {"matrix": record(paths["meta_matrix"])},
-            "beit3": {"matrix": record(paths["beit_matrix"]), "metadata": record(paths["beit_metadata"])},
-            "siglip2": {"shards": [{"path": "scene_embeddings/L01_V001.safetensors", **record(paths["siglip"])}]},
+            "beit3": {
+                "matrix": record(paths["beit_matrix"]),
+                "metadata": record(paths["beit_metadata"]),
+            },
+            "siglip2": {
+                "shards": [
+                    {"path": "scene_embeddings/L01_V001.safetensors", **record(paths["siglip"])}
+                ]
+            },
         }
         artifacts = (
             paths["meta_matrix"],
@@ -113,14 +116,10 @@ class Branch1HealthGateTests(unittest.TestCase):
             with patch.object(
                 prepare_branch1, "build_data_gate_report", return_value=gate
             ) as builder:
-                result = prepare_branch1.validate_data(
-                    root, root / "visual_embeddings" / "beit3"
-                )
+                result = prepare_branch1.validate_data(root, root / "visual_embeddings" / "beit3")
             self.assertIs(result, gate)
             self.assertEqual(result["beit3"]["metadata"]["sha256"], "fixture-hash")
-            builder.assert_called_once_with(
-                root, root / "visual_embeddings" / "beit3"
-            )
+            builder.assert_called_once_with(root, root / "visual_embeddings" / "beit3")
 
     def test_model_gate_requires_an_explicit_offline_identity_record(self) -> None:
         gate = {

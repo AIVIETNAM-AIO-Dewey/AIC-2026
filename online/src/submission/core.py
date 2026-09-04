@@ -1,8 +1,8 @@
 """Pure submission validation, completion, and official CSV policies.
 
 The module intentionally knows nothing about FastAPI or the on-disk dataset.
-Callers inject canonical lookup functions, which keeps request validation,
-preview, and final export on one deterministic policy path.
+Callers inject an authoritative source-frame lookup, which keeps request
+validation, preview, and final export on one deterministic policy path.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 SubmissionTaskType = Literal["KIS", "VQA", "QA", "TRAKE"]
-CanonicalFrameLookup = Callable[[str, int], Mapping[str, Any] | None]
+VerifiedFrameLookup = Callable[[str, int], Mapping[str, Any] | None]
 VideoFramesLookup = Callable[[str], Sequence[Mapping[str, Any]]]
 
 _PROVENANCE_FIELDS = (
@@ -27,7 +27,23 @@ _PROVENANCE_FIELDS = (
     "scope",
     "query_id",
 )
-_DISPLAY_FIELDS = ("image_relpath", "image_available")
+_DISPLAY_FIELDS = (
+    "frame_uid",
+    "fps",
+    "image_relpath",
+    "image_available",
+    "indexed_keyframe",
+    "validation",
+    "frame_index_base",
+    "max_frame_idx",
+    "duration_s",
+    "timing_method",
+    "preview_frame_idx",
+    "preview_keyframe_n",
+    "preview_pts_time_s",
+    "preview_image_relpath",
+    "related_seed_frame_idx",
+)
 _SEQUENCE_PROVENANCE_FIELDS = (
     "source",
     "modality",
@@ -81,7 +97,7 @@ def _strict_non_negative_float(value: Any, field_name: str) -> float:
     return parsed
 
 
-def _canonical_frame(
+def _verified_frame(
     value: Mapping[str, Any],
     *,
     expected_video_id: str | None = None,
@@ -91,17 +107,22 @@ def _canonical_frame(
     if not video_id:
         raise SubmissionValidationError("video_id is required")
     frame_idx = _strict_non_negative_int(value.get("frame_idx"), "frame_idx")
-    keyframe_n = _strict_non_negative_int(value.get("keyframe_n"), "keyframe_n")
+    keyframe_value = value.get("keyframe_n")
+    keyframe_n = (
+        None
+        if keyframe_value is None
+        else _strict_non_negative_int(keyframe_value, "keyframe_n")
+    )
     pts_time_s = _strict_non_negative_float(value.get("pts_time_s"), "pts_time_s")
 
     if expected_video_id is not None and video_id != expected_video_id:
         raise SubmissionValidationError(
-            "Canonical lookup returned a different video_id "
+            "Frame lookup returned a different video_id "
             f"({video_id!r} instead of {expected_video_id!r})"
         )
     if expected_frame_idx is not None and frame_idx != expected_frame_idx:
         raise SubmissionValidationError(
-            "Canonical lookup returned a different frame_idx "
+            "Frame lookup returned a different frame_idx "
             f"({frame_idx} instead of {expected_frame_idx})"
         )
 
@@ -120,9 +141,9 @@ def _canonical_frame(
 
 def validate_frame_reference(
     value: Mapping[str, Any],
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
 ) -> dict[str, Any]:
-    """Resolve a user/result reference to a verified canonical frame."""
+    """Resolve a user/result reference to a verified zero-based source frame."""
     if not isinstance(value, Mapping):
         raise SubmissionValidationError("A frame reference must be an object")
     video_id = str(value.get("video_id", "")).strip()
@@ -132,10 +153,10 @@ def validate_frame_reference(
     resolved = frame_lookup(video_id, frame_idx)
     if resolved is None:
         raise SubmissionValidationError(
-            f"Frame {video_id}:{frame_idx} does not exist in the canonical dataset"
+            f"Frame {video_id}:{frame_idx} is outside the verified source timeline"
         )
 
-    frame = _canonical_frame(
+    frame = _verified_frame(
         resolved,
         expected_video_id=video_id,
         expected_frame_idx=frame_idx,
@@ -148,6 +169,24 @@ def validate_frame_reference(
 
 def _frame_identity(frame: Mapping[str, Any]) -> tuple[str, int]:
     return str(frame["video_id"]), int(frame["frame_idx"])
+
+
+def _nearest_timeline_position(
+    frames: Sequence[Mapping[str, Any]],
+    seed: Mapping[str, Any],
+) -> int | None:
+    """Locate an exact indexed frame or the closest earlier-tie anchor."""
+
+    if not frames:
+        return None
+    target = int(seed["frame_idx"])
+    return min(
+        range(len(frames)),
+        key=lambda position: (
+            abs(int(frames[position]["frame_idx"]) - target),
+            int(frames[position]["frame_idx"]),
+        ),
+    )
 
 
 def _frame_row(
@@ -177,7 +216,7 @@ def _load_video_frames(
     video_id: str,
     *,
     video_frames_lookup: VideoFramesLookup,
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     frames: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -195,7 +234,9 @@ def _load_video_frames(
         frames.append(frame)
     frames.sort(
         key=lambda frame: (
-            int(frame["keyframe_n"]),
+            int(frame["keyframe_n"])
+            if frame.get("keyframe_n") is not None
+            else math.inf,
             float(frame["pts_time_s"]),
             int(frame["frame_idx"]),
         )
@@ -207,7 +248,7 @@ def _complete_frame_rows(
     *,
     manual_items: Sequence[Mapping[str, Any]],
     candidate_items: Sequence[Mapping[str, Any]],
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
     video_frames_lookup: VideoFramesLookup | None,
     target_rows: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -219,7 +260,9 @@ def _complete_frame_rows(
         try:
             frame = validate_frame_reference(value, frame_lookup)
         except SubmissionValidationError as exc:
-            raise SubmissionValidationError(f"Invalid manual frame at position {offset + 1}: {exc}") from exc
+            raise SubmissionValidationError(
+                f"Invalid manual frame at position {offset + 1}: {exc}"
+            ) from exc
         identity = _frame_identity(frame)
         if identity in seen:
             continue
@@ -263,7 +306,7 @@ def _complete_frame_rows(
             warnings.extend(load_warnings)
         video_frames = cached_video_frames[video_id]
         seed_identity = _frame_identity(seed)
-        seed_offset = next(
+        exact_seed_offset = next(
             (
                 offset
                 for offset, frame in enumerate(video_frames)
@@ -271,11 +314,35 @@ def _complete_frame_rows(
             ),
             None,
         )
+        seed_offset = (
+            exact_seed_offset
+            if exact_seed_offset is not None
+            else _nearest_timeline_position(video_frames, seed)
+        )
         if seed_offset is None:
             warnings.append(
-                f"Could not locate seed {video_id}:{seed['frame_idx']} in its canonical timeline"
+                f"Could not locate seed {video_id}:{seed['frame_idx']} in its indexed timeline"
             )
             continue
+
+        # A verified non-keyframe has no identical sparse timeline row. Admit
+        # its nearest indexed anchor before walking outward; the submitted
+        # source-frame identity remains untouched and first in the draft.
+        if exact_seed_offset is None:
+            nearest_anchor = video_frames[seed_offset]
+            identity = _frame_identity(nearest_anchor)
+            if identity not in seen:
+                seen.add(identity)
+                rows.append(
+                    _frame_row(
+                        nearest_anchor,
+                        origin="canonical_neighbor",
+                        manual=False,
+                        seed=seed,
+                    )
+                )
+                if len(rows) >= target_rows:
+                    return rows, warnings
 
         for distance in range(1, len(video_frames)):
             for neighbor_offset in (seed_offset - distance, seed_offset + distance):
@@ -317,7 +384,7 @@ def _sequence_values(value: Any) -> Sequence[Mapping[str, Any]]:
 def validate_trake_sequence(
     value: Any,
     *,
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
     event_count: int,
 ) -> dict[str, Any]:
     """Validate one complete same-video, strictly increasing TRAKE sequence."""
@@ -375,17 +442,17 @@ def validate_trake_sequence(
 
     for previous, current in zip(frames, frames[1:], strict=False):
         if float(current["pts_time_s"]) <= float(previous["pts_time_s"]):
+            raise SubmissionValidationError("TRAKE event timestamps must be strictly increasing")
+        if (
+            current.get("keyframe_n") is not None
+            and previous.get("keyframe_n") is not None
+            and int(current["keyframe_n"]) <= int(previous["keyframe_n"])
+        ):
             raise SubmissionValidationError(
-                "TRAKE event timestamps must be strictly increasing"
-            )
-        if int(current["keyframe_n"]) <= int(previous["keyframe_n"]):
-            raise SubmissionValidationError(
-                "TRAKE canonical keyframe indexes must be strictly increasing"
+                "TRAKE indexed-keyframe numbers must be strictly increasing"
             )
         if int(current["frame_idx"]) <= int(previous["frame_idx"]):
-            raise SubmissionValidationError(
-                "TRAKE frame indexes must be strictly increasing"
-            )
+            raise SubmissionValidationError("TRAKE frame indexes must be strictly increasing")
 
     video_id = str(frames[0]["video_id"])
     sequence = {
@@ -406,7 +473,7 @@ def _complete_trake_rows(
     *,
     manual_items: Sequence[Any],
     candidate_items: Sequence[Any],
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
     video_frames_lookup: VideoFramesLookup | None,
     event_count: int,
     target_rows: int,
@@ -430,9 +497,7 @@ def _complete_trake_rows(
                     raise SubmissionValidationError(
                         f"Invalid manual TRAKE sequence at position {offset + 1}: {exc}"
                     ) from exc
-                warnings.append(
-                    f"Skipped invalid TRAKE candidate at position {offset + 1}: {exc}"
-                )
+                warnings.append(f"Skipped invalid TRAKE candidate at position {offset + 1}: {exc}")
                 continue
 
             identity = (
@@ -502,7 +567,9 @@ def _complete_trake_rows(
                 add(values)
         for width in range(1, event_total):
             for direction in (-1, 1):
-                prefix = [direction * radius if index < width else 0 for index in range(event_total)]
+                prefix = [
+                    direction * radius if index < width else 0 for index in range(event_total)
+                ]
                 suffix = [
                     direction * radius if index >= event_total - width else 0
                     for index in range(event_total)
@@ -543,16 +610,13 @@ def _complete_trake_rows(
             cached_video_frames[video_id] = frames
             warnings.extend(load_warnings)
         timeline = cached_video_frames[video_id]
-        positions_by_identity = {
-            _frame_identity(frame): position for position, frame in enumerate(timeline)
-        }
         seed_positions: list[int] = []
         for event in seed["events"]:
-            position = positions_by_identity.get(_frame_identity(event))
+            position = _nearest_timeline_position(timeline, event)
             if position is None:
                 warnings.append(
                     "Could not locate TRAKE expansion seed event "
-                    f"{video_id}:{event['frame_idx']} in its canonical timeline"
+                    f"{video_id}:{event['frame_idx']} in its indexed timeline"
                 )
                 return
             seed_positions.append(position)
@@ -565,7 +629,8 @@ def _complete_trake_rows(
         for radius in range(1, max_radius + 1):
             for offsets in offset_patterns(event_count, radius):
                 positions = [
-                    position + delta for position, delta in zip(seed_positions, offsets, strict=True)
+                    position + delta
+                    for position, delta in zip(seed_positions, offsets, strict=True)
                 ]
                 if any(position < 0 or position >= len(timeline) for position in positions):
                     continue
@@ -588,9 +653,7 @@ def _complete_trake_rows(
     generators = [alternatives(seed) for seed in seed_rows]
     active_generators = list(enumerate(generators))
     while (
-        active_generators
-        and len(rows) < target_rows
-        and attempts < _MAX_TRAKE_EXPANSION_ATTEMPTS
+        active_generators and len(rows) < target_rows and attempts < _MAX_TRAKE_EXPANSION_ATTEMPTS
     ):
         next_active: list[tuple[int, Any]] = []
         for seed_index, generator in active_generators:
@@ -628,16 +691,12 @@ def _complete_trake_rows(
                     "selection_origin": "canonical_temporal_neighbor",
                     "neighbor_seed": {
                         "video_id": str(seed["video_id"]),
-                        "matched_frames": [
-                            int(frame_idx) for frame_idx in seed["matched_frames"]
-                        ],
+                        "matched_frames": [int(frame_idx) for frame_idx in seed["matched_frames"]],
                     },
                     "expansion_offsets": list(offsets),
                     "expansion_radius": radius,
                     "expansion_max_keyframe_radius": _MAX_TRAKE_NEIGHBOR_RADIUS,
-                    "expansion_max_time_delta_seconds": (
-                        _MAX_TRAKE_NEIGHBOR_TIME_DELTA_SECONDS
-                    ),
+                    "expansion_max_time_delta_seconds": (_MAX_TRAKE_NEIGHBOR_TIME_DELTA_SECONDS),
                 }
             )
             rows.append(sequence)
@@ -718,6 +777,8 @@ def _provenance_policy() -> dict[str, Any]:
         "manual_rows_first": True,
         "duplicates_allowed": False,
         "fabricated_frames_allowed": False,
+        "verified_source_timeline_frames_allowed": True,
+        "source_frame_index_base": 0,
         "trake_neighbor_fill_allowed": True,
         "trake_neighbor_fill_requires_canonical_timeline": True,
         "trake_neighbor_max_keyframe_radius": _MAX_TRAKE_NEIGHBOR_RADIUS,
@@ -746,7 +807,7 @@ def build_submission(
     *,
     manual_items: Sequence[Any],
     candidate_items: Sequence[Any],
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
     video_frames_lookup: VideoFramesLookup | None = None,
     target_rows: int = 100,
     vqa_answer: str | None = None,
@@ -851,7 +912,7 @@ def _payload_sequence(payload: Mapping[str, Any], field_name: str) -> Sequence[A
 def prepare_submission(
     payload: Mapping[str, Any],
     *,
-    frame_lookup: CanonicalFrameLookup,
+    frame_lookup: VerifiedFrameLookup,
     video_frames_lookup: VideoFramesLookup | None = None,
 ) -> dict[str, Any]:
     """Prepare a normalized API response from a compact request-shaped payload.

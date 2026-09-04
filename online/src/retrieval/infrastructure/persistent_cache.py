@@ -36,14 +36,15 @@ class PersistentQueryEmbeddingCache:
         texts: list[str],
         tokenizer_config: str | None = None,
         stream_contract: list[dict[str, Any]] | None = None,
+        device: str = "cpu",
     ) -> str:
         canonical = json.dumps(
             {
                 "model": model_name,
                 "revision": revision,
                 "tokenizer_config": tokenizer_config or "default",
-                "streams": stream_contract
-                or [{"text": text} for text in texts],
+                "device": str(device or "cpu"),
+                "streams": stream_contract or [{"text": text} for text in texts],
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -67,14 +68,24 @@ class PersistentQueryEmbeddingCache:
         matrix = np.frombuffer(blob, dtype=np.float32).reshape(int(rows), int(dimension)).copy()
         return matrix, json.loads(diagnostics_json)
 
-    def put(self, cache_key: str, model_name: str, matrix: np.ndarray, diagnostics: list[dict[str, Any]]) -> None:
+    def put(
+        self, cache_key: str, model_name: str, matrix: np.ndarray, diagnostics: list[dict[str, Any]]
+    ) -> None:
         value = np.asarray(matrix, dtype=np.float32)
         with self._lock:
             self._db.execute(
                 """INSERT OR REPLACE INTO branch1_embeddings
                 (cache_key, model_name, dimension, rows, vector_blob, diagnostics_json, accessed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (cache_key, model_name, value.shape[1], value.shape[0], value.tobytes(), json.dumps(diagnostics, ensure_ascii=False), time.time()),
+                (
+                    cache_key,
+                    model_name,
+                    value.shape[1],
+                    value.shape[0],
+                    value.tobytes(),
+                    json.dumps(diagnostics, ensure_ascii=False),
+                    time.time(),
+                ),
             )
             self._db.execute(
                 """DELETE FROM branch1_embeddings WHERE cache_key IN (

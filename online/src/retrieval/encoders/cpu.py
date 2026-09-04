@@ -1,12 +1,13 @@
-"""Lazy CPU text encoders used by the local Qdrant search server."""
+"""Lazy text encoders used by the local Qdrant search server."""
 
 from __future__ import annotations
 
+import gc
+import json
 import logging
 import os
 import threading
-import gc
-import json
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,15 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoConfig, AutoModel, AutoProcessor, AutoTokenizer
 
+from .device import (
+    clear_accelerator_cache,
+    cpu_fallback_allowed,
+    device_contract,
+    move_tensors,
+    requested_device,
+    resolve_device,
+    transformers_dtype_kwargs,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,20 +37,24 @@ class CpuTextEncoders:
         siglip_revision: str = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
         bge_id: str = "BAAI/bge-m3",
         bge_revision: str | None = None,
+        device: str | None = None,
+        allow_cpu_fallback: bool | None = None,
     ) -> None:
         threads = max(1, int(os.environ.get("AIC_CPU_THREADS", "8")))
         torch.set_num_threads(threads)
-        try:
+        with suppress(RuntimeError):
             torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
         self.siglip_id = siglip_id
         self.siglip_revision = siglip_revision
         self.bge_id = bge_id
         self.bge_revision = (
-            bge_revision
-            or os.environ.get("AIC_BGE_REVISION")
-            or self._manifest_revision("bge_m3")
+            bge_revision or os.environ.get("AIC_BGE_REVISION") or self._manifest_revision("bge_m3")
+        )
+        self.requested_device = requested_device(device)
+        self.allow_cpu_fallback = cpu_fallback_allowed(allow_cpu_fallback)
+        self.device = resolve_device(
+            self.requested_device,
+            allow_fallback=self.allow_cpu_fallback,
         )
         self._siglip_tokenizer = None
         self._siglip_processor = None
@@ -48,6 +62,7 @@ class CpuTextEncoders:
         self._bge_tokenizer = None
         self._bge_model = None
         self._lock = threading.RLock()
+        self._health_bge_probe: dict[str, object] | None = None
 
     @staticmethod
     def _manifest_revision(model_name: str) -> str | None:
@@ -91,15 +106,29 @@ class CpuTextEncoders:
     def health(self) -> dict[str, object]:
         """Report whether the configured BGE-M3 config is available locally."""
         try:
-            kwargs = {"revision": self.bge_revision} if self.bge_revision else {}
-            config = AutoConfig.from_pretrained(self.bge_id, local_files_only=True, **kwargs)
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.bge_id,
-                trust_remote_code=False,
-                local_files_only=True,
-                **kwargs,
-            )
-            dimension = int(getattr(config, "hidden_size", 0))
+            with self._lock:
+                probe = self._health_bge_probe
+                if probe is None:
+                    kwargs = {"revision": self.bge_revision} if self.bge_revision else {}
+                    config = AutoConfig.from_pretrained(
+                        self.bge_id,
+                        local_files_only=True,
+                        **kwargs,
+                    )
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        self.bge_id,
+                        trust_remote_code=False,
+                        local_files_only=True,
+                        **kwargs,
+                    )
+                    probe = {
+                        "dimension": int(getattr(config, "hidden_size", 0)),
+                        "tokenizer_ready": tokenizer is not None,
+                    }
+                    if probe["dimension"] == 1024 and probe["tokenizer_ready"] is True:
+                        self._health_bge_probe = probe
+                dimension = int(probe["dimension"])
+                tokenizer_ready = probe["tokenizer_ready"] is True
             asset_health = self._manifest_assets(
                 "bge_m3",
                 self.bge_id,
@@ -107,12 +136,17 @@ class CpuTextEncoders:
                 "max_tokens=512;pooling=cls;normalization=l2",
             )
             return {
-                "ready": dimension == 1024 and tokenizer is not None and asset_health["ready"] is True,
+                "ready": dimension == 1024 and tokenizer_ready and asset_health["ready"] is True,
                 "model_id": self.bge_id,
                 "revision": self.bge_revision or "local-cache",
                 "dimension": dimension,
                 "local_files_only": True,
                 "snapshot_assets": asset_health,
+                "execution_device": self.device,
+                "device": device_contract(
+                    self.requested_device,
+                    allow_fallback=self.allow_cpu_fallback,
+                ),
             }
         except Exception as error:  # transformers raises several cache-specific exception types
             return {
@@ -121,13 +155,18 @@ class CpuTextEncoders:
                 "revision": self.bge_revision or "local-cache",
                 "dimension": 1024,
                 "local_files_only": True,
+                "execution_device": self.device,
+                "device": device_contract(
+                    self.requested_device,
+                    allow_fallback=self.allow_cpu_fallback,
+                ),
                 "error": str(error),
             }
 
     def _load_siglip(self) -> None:
         if self._siglip_model is not None:
             return
-        LOGGER.info("Loading SigLIP2 text encoder on CPU: %s", self.siglip_id)
+        LOGGER.info("Loading SigLIP2 encoder on %s: %s", self.device, self.siglip_id)
         self._siglip_tokenizer = AutoTokenizer.from_pretrained(
             self.siglip_id,
             revision=self.siglip_revision,
@@ -139,22 +178,23 @@ class CpuTextEncoders:
             revision=self.siglip_revision,
             trust_remote_code=False,
             local_files_only=True,
+            use_fast=False,
         )
         self._siglip_model = AutoModel.from_pretrained(
             self.siglip_id,
             revision=self.siglip_revision,
             trust_remote_code=False,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
             local_files_only=True,
+            **transformers_dtype_kwargs(torch.float32),
         )
-        self._siglip_model.eval()
-        LOGGER.info("SigLIP2 CPU encoder ready")
+        self._siglip_model.to(self.device).eval()
+        LOGGER.info("SigLIP2 %s encoder ready", self.device)
 
     def _load_bge(self) -> None:
         if self._bge_model is not None:
             return
-        LOGGER.info("Loading BGE-M3 dense encoder on CPU: %s", self.bge_id)
+        LOGGER.info("Loading BGE-M3 dense encoder on %s: %s", self.device, self.bge_id)
         kwargs = {"revision": self.bge_revision} if self.bge_revision else {}
         self._bge_tokenizer = AutoTokenizer.from_pretrained(
             self.bge_id,
@@ -166,12 +206,12 @@ class CpuTextEncoders:
             self.bge_id,
             trust_remote_code=False,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
             local_files_only=True,
+            **transformers_dtype_kwargs(torch.float32),
             **kwargs,
         )
-        self._bge_model.eval()
-        LOGGER.info("BGE-M3 CPU encoder ready")
+        self._bge_model.to(self.device).eval()
+        LOGGER.info("BGE-M3 %s encoder ready", self.device)
 
     def warm(self) -> None:
         self.embed_siglip_text("warmup")
@@ -186,6 +226,7 @@ class CpuTextEncoders:
             self._bge_tokenizer = None
             self._bge_model = None
         gc.collect()
+        clear_accelerator_cache(self.device)
 
     def siglip_text_diagnostics(self, text: str) -> dict[str, object]:
         with self._lock:
@@ -209,6 +250,7 @@ class CpuTextEncoders:
                 max_length=64,
                 return_tensors="pt",
             )
+            inputs = move_tensors(inputs, self.device)
             output = self._siglip_model.get_text_features(**inputs)
             if isinstance(output, torch.Tensor):
                 features = output
@@ -227,6 +269,7 @@ class CpuTextEncoders:
         with self._lock:
             self._load_siglip()
             inputs = self._siglip_processor(images=image.convert("RGB"), return_tensors="pt")
+            inputs = move_tensors(inputs, self.device)
             output = self._siglip_model.get_image_features(**inputs)
             if isinstance(output, torch.Tensor):
                 features = output
@@ -254,6 +297,7 @@ class CpuTextEncoders:
                 max_length=512,
                 return_tensors="pt",
             )
+            inputs = move_tensors(inputs, self.device)
             output = self._bge_model(**inputs)
             vectors = F.normalize(output.last_hidden_state[:, 0], p=2, dim=-1)
             result = vectors.to(torch.float32).cpu().numpy()
@@ -277,6 +321,7 @@ class CpuTextEncoders:
                 max_length=512,
                 return_tensors="pt",
             )
+            inputs = move_tensors(inputs, self.device)
             output = self._bge_model(**inputs)
             vectors = F.normalize(output.last_hidden_state[:, 0], p=2, dim=-1)
             result = vectors.to(torch.float32).cpu().numpy()

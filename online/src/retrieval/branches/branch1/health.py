@@ -10,7 +10,6 @@ from ...encoders.sequential_manager import SequentialBranch1Encoders
 from ...infrastructure.qdrant import QdrantHttpClient
 from ...infrastructure.resources import current_process_rss_bytes, resource_qualification
 
-
 EXPECTED_FRAMES = 247_956
 DATA_GATE_SCHEMA_VERSION = "branch1.data-gate.v4"
 COMPATIBILITY_SCHEMA_VERSION = "branch1.encoder-compatibility.v2"
@@ -45,7 +44,8 @@ def _ingestion_status(
         checks = {
             "manifest_passed": manifest.get("passed") is True,
             "manifest_status": manifest.get("status") == "ready",
-            "manifest_schema_version": manifest.get("schema_version") == INGEST_MANIFEST_SCHEMA_VERSION,
+            "manifest_schema_version": manifest.get("schema_version")
+            == INGEST_MANIFEST_SCHEMA_VERSION,
             "point_schema_version": manifest.get("ingest_schema_version") == POINT_SCHEMA_VERSION,
             "collection_count": count == expected_count,
         }
@@ -86,10 +86,14 @@ def _ingestion_status(
         )
         threshold = verification.get("verification_threshold") or {}
         checks["verification_threshold"] = (
-            threshold.get("cosine_min") == 0.99999
-            and threshold.get("max_abs_error") == 0.002
+            threshold.get("cosine_min") == 0.99999 and threshold.get("max_abs_error") == 0.002
         )
-        return {"ready": all(checks.values()), "checks": checks, "manifest": manifest, "verification": verification}
+        return {
+            "ready": all(checks.values()),
+            "checks": checks,
+            "manifest": manifest,
+            "verification": verification,
+        }
     except (OSError, ValueError, TypeError, AttributeError):
         return {"ready": False, "checks": {}, "manifest": None}
 
@@ -128,20 +132,26 @@ def _gate_model_status(
     checks = {
         "gate_passed": gate.get("passed") is True,
         "schema_version": gate.get("schema_version") == DATA_GATE_SCHEMA_VERSION,
-        "vector_count": _safe_int(section.get("vector_count", matrix.get("shape", [0])[0] if matrix.get("shape") else 0)) == EXPECTED_FRAMES,
-        "dimension": _safe_int(section.get("dimension", matrix.get("shape", [0, 0])[1] if matrix.get("shape") else 0)) == dimension,
+        "vector_count": _safe_int(
+            section.get("vector_count", matrix.get("shape", [0])[0] if matrix.get("shape") else 0)
+        )
+        == EXPECTED_FRAMES,
+        "dimension": _safe_int(
+            section.get("dimension", matrix.get("shape", [0, 0])[1] if matrix.get("shape") else 0)
+        )
+        == dimension,
         "dtype": section.get("dtype", matrix.get("dtype")) == "float16",
         "finite_verified": (
             section.get("finite_verified") is True
             if "finite_verified" in section
-            else isinstance(matrix.get("min_norm"), (int, float))
-            and isinstance(matrix.get("max_norm"), (int, float))
+            else isinstance(matrix.get("min_norm"), int | float)
+            and isinstance(matrix.get("max_norm"), int | float)
         ),
         "l2_normalized": (
             section.get("l2_normalized") is True
             if "l2_normalized" in section
-            else isinstance(matrix.get("min_norm"), (int, float))
-            and isinstance(matrix.get("max_norm"), (int, float))
+            else isinstance(matrix.get("min_norm"), int | float)
+            and isinstance(matrix.get("max_norm"), int | float)
             and float(matrix.get("min_norm")) >= 0.995
             and float(matrix.get("max_norm")) <= 1.005
         ),
@@ -201,7 +211,10 @@ def _gate_artifacts_current(gate: dict[str, Any] | None, data_root: Path) -> boo
         metaclip = (gate or {})["metaclip2"]["matrix"]
         beit3 = (gate or {})["beit3"]["matrix"]
         for section, path in (
-            (metaclip, data_root / "visual_embeddings" / "metaclip2" / "keyframes_visual_vectors.f16.npy"),
+            (
+                metaclip,
+                data_root / "visual_embeddings" / "metaclip2" / "keyframes_visual_vectors.f16.npy",
+            ),
             (beit3, data_root / "visual_embeddings" / "beit3" / "keyframes_visual_vectors.f16.npy"),
         ):
             stat = path.stat()
@@ -247,7 +260,10 @@ def _gate_artifacts_current(gate: dict[str, Any] | None, data_root: Path) -> boo
 
 
 def _collection_status(
-    qdrant: QdrantHttpClient, collection: str, vector_name: str, dimension: int,
+    qdrant: QdrantHttpClient,
+    collection: str,
+    vector_name: str,
+    dimension: int,
     expected_count: int = EXPECTED_FRAMES,
 ) -> dict[str, Any]:
     try:
@@ -368,9 +384,12 @@ def branch1_health(
         compatibility_ready = (
             compatibility.get("passed") is True
             and compatibility.get("schema_version") == COMPATIBILITY_SCHEMA_VERSION
-            and compatibility.get("text_encoder_contract", {}).get("siglip2", {}).get("languages") == ["vi", "en"]
-            and compatibility.get("text_encoder_contract", {}).get("metaclip2", {}).get("languages") == ["vi", "en"]
-            and compatibility.get("text_encoder_contract", {}).get("beit3", {}).get("languages") == ["en"]
+            and compatibility.get("text_encoder_contract", {}).get("siglip2", {}).get("languages")
+            == ["vi", "en"]
+            and compatibility.get("text_encoder_contract", {}).get("metaclip2", {}).get("languages")
+            == ["vi", "en"]
+            and compatibility.get("text_encoder_contract", {}).get("beit3", {}).get("languages")
+            == ["en"]
         )
     except (OSError, ValueError, TypeError, AttributeError):
         compatibility, compatibility_ready = None, False
@@ -383,9 +402,7 @@ def branch1_health(
     frame_artifacts = (
         data_root / "visual_embeddings" / "metaclip2" / "keyframes_visual_vectors.f16.npy",
         data_root / "visual_embeddings" / "metaclip2" / "keyframes_metadata.jsonl",
-        *tuple(
-            sorted((data_root / "scene_embeddings").glob("*.safetensors"))
-        ),
+        *tuple(sorted((data_root / "scene_embeddings").glob("*.safetensors"))),
     )
     beit_artifacts = (
         data_root / "visual_embeddings" / "beit3" / "keyframes_visual_vectors.f16.npy",
@@ -410,12 +427,14 @@ def branch1_health(
         },
         "metaclip2": {
             "data": {
-                "ready": metaclip_gate.get("ready") is True and _manifest_status(
+                "ready": metaclip_gate.get("ready") is True
+                and _manifest_status(
                     metaclip_dir / "run_manifest.json",
                     "metaclip2",
                     1024,
                     "facebook/metaclip-2-worldwide-huge-quickgelu",
-                ).get("ready") is True,
+                ).get("ready")
+                is True,
                 "data_gate": metaclip_gate,
                 "manifest": _manifest_status(
                     metaclip_dir / "run_manifest.json",
@@ -438,12 +457,14 @@ def branch1_health(
         },
         "beit3": {
             "data": {
-                "ready": beit_gate.get("ready") is True and _manifest_status(
+                "ready": beit_gate.get("ready") is True
+                and _manifest_status(
                     beit3_dir / "run_manifest.json",
                     "beit3",
                     768,
                     "https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth",
-                ).get("ready") is True,
+                ).get("ready")
+                is True,
                 "data_gate": beit_gate,
                 "manifest": _manifest_status(
                     beit3_dir / "run_manifest.json",
@@ -475,8 +496,7 @@ def branch1_health(
     peak_worker_rss = 0 if manager is None else int(manager.peak_worker_rss_bytes)
     estimated_peak_total_rss = 0 if manager is None else int(manager.estimated_peak_total_rss_bytes)
     provenance_verified = all(
-        model["offline_identity"].get("revision_verified") is True
-        for model in models.values()
+        model["offline_identity"].get("revision_verified") is True for model in models.values()
     )
     return {
         "status": "ready" if ready else "not_ready",

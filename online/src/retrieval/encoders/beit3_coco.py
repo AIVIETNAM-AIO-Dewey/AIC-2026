@@ -3,8 +3,8 @@
 from .sequential_manager import (
     BEIT3_CHECKPOINT_NAME,
     BEIT3_CHECKPOINT_SHA256,
-    SequentialBranch1Encoders,
     UNILM_REVISION,
+    SequentialBranch1Encoders,
 )
 
 MODEL_ID = BEIT3_CHECKPOINT_NAME

@@ -243,13 +243,9 @@ class IndependentModalitySearch:
         if top_k_per_event < 1 or top_k_sequences < 1:
             raise ValueError("Temporal search limits must be positive")
         if top_k_per_event > MAX_TEMPORAL_EVENT_CANDIDATES:
-            raise ValueError(
-                f"top_k_per_event cannot exceed {MAX_TEMPORAL_EVENT_CANDIDATES}"
-            )
+            raise ValueError(f"top_k_per_event cannot exceed {MAX_TEMPORAL_EVENT_CANDIDATES}")
         if top_k_sequences > MAX_TEMPORAL_RETURNED_SEQUENCES:
-            raise ValueError(
-                f"top_k_sequences cannot exceed {MAX_TEMPORAL_RETURNED_SEQUENCES}"
-            )
+            raise ValueError(f"top_k_sequences cannot exceed {MAX_TEMPORAL_RETURNED_SEQUENCES}")
         if max_gap_seconds is not None and max_gap_seconds <= 0:
             raise ValueError("max_gap_seconds must be positive or null")
         if not 1 <= paths_per_video <= MAX_TEMPORAL_PATHS_PER_VIDEO:
@@ -257,27 +253,20 @@ class IndependentModalitySearch:
                 f"paths_per_video must be between 1 and {MAX_TEMPORAL_PATHS_PER_VIDEO}"
             )
         if not 1 <= path_diversity_min_events <= len(events):
-            raise ValueError(
-                "path_diversity_min_events must be between 1 and the event count"
-            )
+            raise ValueError("path_diversity_min_events must be between 1 and the event count")
 
         effective_reservoir_size = (
-            top_k_sequences
-            if sequence_reservoir_size is None
-            else int(sequence_reservoir_size)
+            top_k_sequences if sequence_reservoir_size is None else int(sequence_reservoir_size)
         )
         if effective_reservoir_size < top_k_sequences:
             raise ValueError("sequence_reservoir_size cannot be smaller than top_k_sequences")
         if effective_reservoir_size > MAX_TEMPORAL_SEQUENCE_RESERVOIR:
             raise ValueError(
-                "sequence_reservoir_size cannot exceed "
-                f"{MAX_TEMPORAL_SEQUENCE_RESERVOIR}"
+                f"sequence_reservoir_size cannot exceed {MAX_TEMPORAL_SEQUENCE_RESERVOIR}"
             )
 
         effective_beam_width = (
-            max(64, paths_per_video * 32)
-            if path_beam_width is None
-            else int(path_beam_width)
+            max(64, paths_per_video * 32) if path_beam_width is None else int(path_beam_width)
         )
         if not 1 <= effective_beam_width <= MAX_TEMPORAL_PATH_BEAM_WIDTH:
             raise ValueError(
@@ -286,9 +275,7 @@ class IndependentModalitySearch:
         if effective_beam_width < paths_per_video:
             raise ValueError("path_beam_width cannot be smaller than paths_per_video")
         bounded_path_search = (
-            paths_per_video > 1
-            or top_k_per_event > 300
-            or path_beam_width is not None
+            paths_per_video > 1 or top_k_per_event > 300 or path_beam_width is not None
         )
 
         ordered_events: list[dict[str, Any]] = []
@@ -404,9 +391,7 @@ class IndependentModalitySearch:
         if anchor_query_clean:
             anchor_started = time.perf_counter()
             diagnostics_fn = getattr(self.registry, "siglip_text_diagnostics", None)
-            anchor_diagnostics = (
-                diagnostics_fn(anchor_query_clean) if diagnostics_fn else None
-            )
+            anchor_diagnostics = diagnostics_fn(anchor_query_clean) if diagnostics_fn else None
             anchor_results = self.searcher.search_visual(
                 self.registry.embed_siglip_text(anchor_query_clean),
                 top_k=top_k_per_event,
@@ -468,10 +453,8 @@ class IndependentModalitySearch:
                     float(previous_state["minimum_score"]),
                     float(candidate["score"]),
                 ),
-                "score_sum": float(previous_state["score_sum"])
-                + float(candidate["score"]),
-                "global_rank_sum": int(previous_state["global_rank_sum"])
-                + int(candidate["rank"]),
+                "score_sum": float(previous_state["score_sum"]) + float(candidate["score"]),
+                "global_rank_sum": int(previous_state["global_rank_sum"]) + int(candidate["rank"]),
                 "path": [*previous_state["path"], candidate],
             }
 
@@ -635,9 +618,7 @@ class IndependentModalitySearch:
                 "ranking_values": {
                     "sequence_score": sequence_score,
                     "context_anchor_score": (
-                        float(context_anchor_frame["score"])
-                        if context_anchor_frame
-                        else None
+                        float(context_anchor_frame["score"]) if context_anchor_frame else None
                     ),
                     "minimum_event_score": minimum_event_score,
                     "mean_event_score": mean_event_score,
@@ -710,9 +691,7 @@ class IndependentModalitySearch:
             "path_beam_width": effective_beam_width,
             "path_beam_applied": bounded_path_search,
             "path_search_mode": (
-                "bounded_diverse_beam"
-                if bounded_path_search
-                else "legacy_exact_single_path"
+                "bounded_diverse_beam" if bounded_path_search else "legacy_exact_single_path"
             ),
             "path_diversity_min_events": path_diversity_min_events,
             "max_gap_seconds": max_gap_seconds,

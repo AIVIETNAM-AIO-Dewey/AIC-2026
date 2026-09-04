@@ -11,8 +11,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from typing import Iterable
-
+from collections.abc import Iterable
 
 # Keep both correctly decoded Vietnamese and the spellings that occur in older
 # UTF-8-as-Latin-1 exports.  ``fold_text`` canonicalizes both forms before
@@ -68,8 +67,7 @@ def repair_mojibake(text: str) -> str:
     # in the exported OCR/ASR text.  Detect them by code point so ordinary
     # readable text is left untouched when the UTF-8 round-trip is invalid.
     if value and any(
-        ord(character) in {0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xD0, 0xD1}
-        for character in value
+        ord(character) in {0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xD0, 0xD1} for character in value
     ):
         try:
             repaired = value.encode("latin-1").decode("utf-8")
@@ -90,19 +88,14 @@ def repair_mojibake(text: str) -> str:
 
 
 def normalize_text(value: str) -> str:
-    return unicodedata.normalize(
-        "NFC", repair_mojibake(str(value or ""))
-    ).casefold().strip()
+    return unicodedata.normalize("NFC", repair_mojibake(str(value or ""))).casefold().strip()
 
 
 def fold_text(value: str) -> str:
     normalized = unicodedata.normalize("NFD", normalize_text(value))
-    without_marks = "".join(
-        char for char in normalized if unicodedata.category(char) != "Mn"
-    )
+    without_marks = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
     return (
-        without_marks
-        .replace("\u0111", "d")
+        without_marks.replace("\u0111", "d")
         .replace("\u0110", "D")
         # Vietnamese "đ" is a letter with a stroke, not a combining mark;
         # strip it explicitly so diacritic-insensitive matching treats both
@@ -136,9 +129,7 @@ def query_tokens(query: str, limit: int | None = None) -> list[str]:
 
     stopwords = _folded_stopwords()
     useful = [
-        token
-        for token in _folded_tokens(query)
-        if len(token) >= 2 and token not in stopwords
+        token for token in _folded_tokens(query) if len(token) >= 2 and token not in stopwords
     ]
     values = list(dict.fromkeys(useful))
     return values if limit is None else values[:limit]
@@ -161,14 +152,14 @@ def _ordered_lexical_bigrams(query: str) -> list[tuple[str, str]]:
 
     return [
         (left, right)
-        for left, right in zip(values, values[1:])
+        for left, right in zip(values, values[1:], strict=False)
         if useful(left) and useful(right)
     ]
 
 
 def _token_bigrams(tokens: Iterable[str]) -> list[tuple[str, str]]:
     values = [str(token) for token in tokens if str(token)]
-    return list(zip(values, values[1:]))
+    return list(zip(values, values[1:], strict=False))
 
 
 def _stream_identity(stream: str) -> tuple[str, str | None]:

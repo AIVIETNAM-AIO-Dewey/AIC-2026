@@ -137,7 +137,9 @@ class CpuQdrantSearch:
         candidate_ids = set().union(*(set(items) for items in subject_hits))
         scored: list[tuple[float, int]] = []
         for parent in candidate_ids:
-            scores = [float(items[parent]["score"]) if parent in items else -1.0 for items in subject_hits]
+            scores = [
+                float(items[parent]["score"]) if parent in items else -1.0 for items in subject_hits
+            ]
             scored.append((sum(scores) / len(scores), parent))
         scored.sort(key=lambda item: (-item[0], item[1]))
         selected = scored[:top_k]
@@ -145,7 +147,9 @@ class CpuQdrantSearch:
         results: list[dict[str, Any]] = []
         for rank, (score, parent) in enumerate(selected, 1):
             payload = frame_payloads[parent]
-            frame = base_frame(payload, score=score, rank=rank, score_type="mean_best_region_cosine")
+            frame = base_frame(
+                payload, score=score, rank=rank, score_type="mean_best_region_cosine"
+            )
             subject_scores = []
             matched_boxes = []
             descriptions = []
