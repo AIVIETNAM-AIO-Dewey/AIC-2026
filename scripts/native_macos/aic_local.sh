@@ -8,9 +8,10 @@ VENV_ROOT="${AIC_LOCAL_VENV_ROOT:-${REPO_ROOT}/.venv}"
 MODEL_ROOT="${AIC_MODEL_ROOT:-${REPO_ROOT}/models}"
 BRANCH1_MODEL_ROOT="${AIC_BRANCH1_MODEL_ROOT:-${MODEL_ROOT}/branch1}"
 HF_CACHE_ROOT="${HF_HOME:-${HOME}/.cache/huggingface}"
-DATA_ROOT="${AIC_DATA_ROOT:-/Users/macbookpro/Downloads/AIC-HCM-BATCH-1/AIC_HCM_BATCH_1/artifacts}"
-METACLIP2_SOURCE="${AIC_METACLIP2_SOURCE:-/Users/macbookpro/Downloads/metaclip2}"
-BEIT3_SOURCE="${AIC_BEIT3_SOURCE:-/Users/macbookpro/Downloads/beit3}"
+DATA_ROOT="${AIC_DATA_ROOT:-${REPO_ROOT}/data}"
+METACLIP2_SOURCE="${AIC_METACLIP2_SOURCE:-${DATA_ROOT}/visual_embeddings/metaclip2}"
+BEIT3_SOURCE="${AIC_BEIT3_SOURCE:-${DATA_ROOT}/visual_embeddings/beit3}"
+PYTHON312_BIN="${AIC_PYTHON312_BIN:-}"
 STATE_ROOT="${AIC_STATE_ROOT:-${RUNTIME_ROOT}/state}"
 QDRANT_ROOT="${RUNTIME_ROOT}/qdrant"
 QDRANT_BIN="${QDRANT_ROOT}/bin/qdrant"
@@ -83,7 +84,7 @@ require_data_access() {
   for probe in "${probes[@]}"; do
     [[ -f "${probe}" ]] || fail "Required data file does not exist: ${probe}"
     head -c 1 "${probe}" >/dev/null 2>&1 || fail \
-      "macOS blocked access to ${DATA_ROOT}. Allow your terminal app to access Downloads in System Settings > Privacy & Security > Files and Folders, then retry."
+      "macOS blocked access to ${DATA_ROOT}. If ${DATA_ROOT} is under Downloads/Desktop/Documents, allow your terminal app access in System Settings > Privacy & Security > Files and Folders, then retry."
   done
 }
 
@@ -100,11 +101,37 @@ ensure_directories() {
     "${BRANCH1_MODEL_ROOT}"
 }
 
+resolve_python312() {
+  local candidates=()
+  if [[ -n "${PYTHON312_BIN}" ]]; then
+    candidates+=("${PYTHON312_BIN}")
+  fi
+  candidates+=(
+    "/opt/homebrew/bin/python3.12"
+    "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+  )
+  local cmd_py312 cmd_py3
+  if cmd_py312="$(command -v python3.12 2>/dev/null || true)" && [[ -n "${cmd_py312}" ]]; then
+    candidates+=("${cmd_py312}")
+  fi
+  if cmd_py3="$(command -v python3 2>/dev/null || true)" && [[ -n "${cmd_py3}" ]]; then
+    candidates+=("${cmd_py3}")
+  fi
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}" ]] && "${candidate}" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 require_native_mac() {
   [[ "$(uname -s)" == "Darwin" ]] || fail "This launcher supports macOS only."
   [[ "$(uname -m)" == "arm64" ]] || fail "Apple Silicon (arm64) is required."
-  command -v /opt/homebrew/bin/python3.12 >/dev/null 2>&1 \
-    || fail "Python 3.12 is required at /opt/homebrew/bin/python3.12."
+  PYTHON312_BIN="$(resolve_python312)" \
+    || fail "Python 3.12 is required (set AIC_PYTHON312_BIN or install python3.12)."
   command -v curl >/dev/null 2>&1 || fail "curl is required."
   command -v npm >/dev/null 2>&1 || fail "Node.js/npm is required."
   command -v screen >/dev/null 2>&1 || fail "The macOS screen utility is required."
@@ -123,16 +150,29 @@ verify_sha256() {
     || fail "SHA-256 mismatch for ${path}: ${actual}"
 }
 
+canonical_dir() {
+  (cd "$1" && pwd -P)
+}
+
+sync_embedding_dir() {
+  local label="$1"
+  local source_dir="$2"
+  local target_dir="$3"
+  mkdir -p "${target_dir}"
+  if [[ "$(canonical_dir "${source_dir}")" != "$(canonical_dir "${target_dir}")" ]]; then
+    log "Synchronizing ${label} artifacts into the main data root"
+    ditto "${source_dir}" "${target_dir}"
+  fi
+}
+
 sync_embedding_data() {
   local visual_root="${DATA_ROOT}/visual_embeddings"
   [[ -d "${DATA_ROOT}" ]] || fail "Data root does not exist: ${DATA_ROOT}"
   [[ -d "${METACLIP2_SOURCE}" ]] || fail "MetaCLIP2 source does not exist: ${METACLIP2_SOURCE}"
   [[ -d "${BEIT3_SOURCE}" ]] || fail "BEIT3 source does not exist: ${BEIT3_SOURCE}"
   mkdir -p "${visual_root}"
-  log "Synchronizing MetaCLIP2 artifacts into the main data root"
-  ditto "${METACLIP2_SOURCE}" "${visual_root}/metaclip2"
-  log "Synchronizing BEIT3 artifacts into the main data root"
-  ditto "${BEIT3_SOURCE}" "${visual_root}/beit3"
+  sync_embedding_dir "MetaCLIP2" "${METACLIP2_SOURCE}" "${visual_root}/metaclip2"
+  sync_embedding_dir "BEIT3" "${BEIT3_SOURCE}" "${visual_root}/beit3"
   verify_sha256 \
     "${visual_root}/metaclip2/keyframes_visual_vectors.f16.npy" \
     "${METACLIP2_VECTOR_SHA256}"
@@ -157,8 +197,11 @@ setup_python() {
     if [[ -e "${VENV_ROOT}" ]]; then
       mv "${VENV_ROOT}" "${VENV_ROOT}.incompatible.$(date +%Y%m%d%H%M%S)"
     fi
-    log "Creating the Python 3.12 environment"
-    /opt/homebrew/bin/python3.12 -m venv "${VENV_ROOT}"
+    local py312="${PYTHON312_BIN:-$(resolve_python312 || true)}"
+    [[ -n "${py312}" ]] \
+      || fail "Python 3.12 is required (set AIC_PYTHON312_BIN or install python3.12)."
+    log "Creating the Python 3.12 environment with ${py312}"
+    "${py312}" -m venv "${VENV_ROOT}"
   fi
   log "Installing pinned native macOS dependencies"
   "${PYTHON_BIN}" -m pip install --upgrade 'pip==25.2' 'setuptools>=75,<76' wheel

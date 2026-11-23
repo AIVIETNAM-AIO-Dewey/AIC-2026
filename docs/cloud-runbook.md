@@ -33,7 +33,7 @@ Không cache model trong Git working tree.
    Không clone Git hoặc tải lại từ `main`.
 3. Đặt artifact/cache dưới `/kaggle/working`, rồi tạo Dataset version riêng tư khi
    cần lưu qua session.
-4. Dùng `notebooks/kaggle_object_description.ipynb` làm thin launcher.
+4. Dùng `notebooks/kaggle_object_description.ipynb` (single-video smoke) hoặc `notebooks/kaggle_dam_worker.ipynb` (distributed worker shard) làm thin launcher.
 
 `/kaggle/input` không ghi được. `AIC_ARTIFACT_ROOT` và `AIC_CACHE_ROOT` không được
 trỏ vào đó trừ cache snapshot đã tồn tại và chỉ đọc.

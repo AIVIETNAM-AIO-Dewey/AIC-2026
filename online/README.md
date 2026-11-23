@@ -20,12 +20,17 @@ builds all indexes and collections, runs the frontend build gate, and starts
 the compiled UI at <http://127.0.0.1:8890>. It deliberately performs no model
 inference or retrieval query; the first inference is initiated from the UI.
 
-Paths can be overridden with `AIC_DATA_ROOT`, `AIC_METACLIP2_SOURCE`,
-`AIC_BEIT3_SOURCE`, `AIC_LOCAL_RUNTIME_ROOT`, and `AIC_LOCAL_VENV_ROOT`.
-Because the main dataset is under `Downloads`, macOS may ask once for file
-access. If the launcher reports that access is blocked, enable Downloads for
-your terminal app under **System Settings → Privacy & Security → Files and
-Folders**, then run `start` again.
+Paths default to the repository tree (`./data`, `./models`, `./.local/macos/state`)
+and can be overridden with `AIC_DATA_ROOT`, `AIC_METACLIP2_SOURCE`,
+`AIC_BEIT3_SOURCE`, `AIC_LOCAL_RUNTIME_ROOT`, `AIC_LOCAL_VENV_ROOT`, and
+`AIC_PYTHON312_BIN`. If your `AIC_DATA_ROOT` is placed inside `Downloads`,
+`Desktop`, or `Documents`, macOS may ask once for file access; if blocked, grant
+permission for your terminal app under **System Settings → Privacy & Security →
+Files and Folders**, then run `start` again.
+
+Runtime dependency pins are maintained in `scripts/qdrant/requirements.cpu.txt`
+(Docker CPU runtime) and `scripts/native_macos/requirements.txt` (native Apple
+Silicon MPS).
 
 The workbench runs locally through `online.cpu_server:app`, Qdrant, persistent
 SQLite indexes, and isolated encoder workers. Gemini, Qwen, the former BGE

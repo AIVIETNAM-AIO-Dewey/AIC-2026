@@ -57,7 +57,7 @@ const state = {
     video: "video:empty",
   },
   sessionId: null,
-  keyframesRoot: "/Users/macbookpro/Downloads/AIC-HCM-BATCH-1/AIC_HCM_BATCH_1/artifacts/keyframes",
+  keyframesRoot: "",
   parsedQuery: null,
   modalityResults: {},
   drilldown: null,
@@ -3631,7 +3631,7 @@ function getImageUrl(item) {
   const vid = item.video_id;
   const relpath = String(item.image_relpath || item.preview_image_relpath || "").replace(/^\/+/, "");
   const filename = relpath ? relpath.split("/").pop() : `${String(item.frame_idx || 0).padStart(8, "0")}.jpg`;
-  if (window.location.protocol === "file:") {
+  if (window.location.protocol === "file:" && state.keyframesRoot) {
     return `file://${state.keyframesRoot}/${vid}/${filename}`;
   }
   return `/keyframes/${encodeURIComponent(vid)}/${encodeURIComponent(filename)}`;

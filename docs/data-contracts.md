@@ -68,8 +68,6 @@ Mỗi event có `label`, scene/object/modal fields và `temporal_operator` trong
 `state|onset|offset|extremum`. `ocr_vi`/`audio_vi` chỉ chứa literal strings được
 query nêu rõ và không dịch.
 
-## Planned modality contracts
+## Online Retrieval & Index Contracts
 
-OCR, ASR, scene embeddings và online scores chưa được freeze trong v1. Owner phải
-thêm versioned schema, timestamp/coordinate convention, validator và migration
-note trước khi component khác tiêu thụ; không trao đổi ad-hoc dict giữa notebooks.
+Online vector collections, FTS5 SQLite databases, canonical frame alignment (`247,956` frames, `681,355` DAM regions, `55,168` ASR segments), and branch manifest gates are documented in [`online/DATA_STRUCTURE.md`](../online/DATA_STRUCTURE.md) and [`online/src/retrieval/README.md`](../online/src/retrieval/README.md).

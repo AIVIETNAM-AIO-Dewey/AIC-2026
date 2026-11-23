@@ -1,5 +1,5 @@
 schema_version: "1.0"
-last_verified_utc: "2026-08-09"
+last_verified_utc: "2026-09-04"
 
 policy:
   immutable_revision_required: true
@@ -32,18 +32,49 @@ models:
     status: locked
     approval_note: Confirm competition eligibility before a production run.
 
-planned_models:
-  scene_embedding:
-    family: SigLIP2
+  siglip2:
+    role: Branch-1 bilingual (VI/EN) full-frame scene embedding (768d, L2, max 64 tokens)
+    provider: huggingface
     model_id: google/siglip2-base-patch16-224
     revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
     license: Apache-2.0
-    status: architecture_locked_not_implemented
-  vietnamese_ocr:
-    family: owner_selected
-    status: owner_must_lock_id_revision_and_license
+    license_url: https://huggingface.co/google/siglip2-base-patch16-224/tree/75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
+    trust_remote_code: false
+    status: locked
+
+  metaclip2:
+    role: Branch-1 bilingual (VI/EN) full-frame visual-text embedding (1024d, L2, max 77 tokens)
+    provider: huggingface
+    model_id: facebook/metaclip-2-worldwide-huge-quickgelu
+    revision: 2431b607fc8e05dd43b73797ba1a7a042514bcf4
+    license: CC-BY-NC-4.0
+    license_url: https://huggingface.co/facebook/metaclip-2-worldwide-huge-quickgelu/tree/2431b607fc8e05dd43b73797ba1a7a042514bcf4
+    trust_remote_code: false
+    status: locked
+
+  beit3_coco:
+    role: Branch-1 English visual retrieval and Branch-2/KIS top-100 dual-encoder cosine reranker (768d language_head, max 64 tokens)
+    provider: github_release
+    model_id: beit3_base_patch16_384_coco_retrieval.pth
+    checkpoint_sha256: df39666a88508ccd356567616582bc62cd56fa86ad6a8f8e50471b35217c8629
+    code_repository: https://github.com/microsoft/unilm
+    code_revision: ca43e4cd19445a536f133bf2bc25b573b2f0c7c5
+    license: MIT
+    license_url: https://github.com/microsoft/unilm/blob/ca43e4cd19445a536f133bf2bc25b573b2f0c7c5/LICENSE
+    trust_remote_code: false
+    status: locked
+
+  bge_m3:
+    role: Branch-2 English DAM object-description dense text encoder (1024d CLS pooling, L2, max 512 tokens)
+    provider: huggingface
+    model_id: BAAI/bge-m3
+    license: MIT
+    license_url: https://huggingface.co/BAAI/bge-m3
+    trust_remote_code: false
+    status: active_pin_pending_revision
+    notes: Snapshot inventory SHA-256 hashes are recorded during setup in query_models.json.
+
   vietnamese_asr:
-    family: PhoWhisper
     role: Vietnamese automatic speech recognition with English code-switch support
     provider: huggingface
     model_id: vinai/PhoWhisper-large
@@ -52,6 +83,15 @@ planned_models:
     license_url: https://huggingface.co/vinai/PhoWhisper-large
     trust_remote_code: false
     status: locked
-  query_parser_and_qa:
-    family: owner_selected
-    status: owner_must_lock_model_or_api_version_and_terms
+
+runtime_notes:
+  vietnamese_ocr:
+    index_schema: branch3.ocr-index.v3
+    engine: SQLite FTS5 with Vietnamese diacritic folding and mojibake repair
+    status: active_offline_artifacts_imported
+    notes: Offline OCR JSONL artifacts are verified against canonical keyframes; checkpoint provenance remains tracked in branch3_ocr_manifest.json.
+
+  query_parser:
+    engine: LocalQueryParser + build_kis_query_plan (deterministic 6-role VI/EN bundle)
+    status: active_local_deterministic
+    notes: Online workbench executes zero external LLM API calls (no Gemini/Qwen dependency).
