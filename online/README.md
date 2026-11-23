@@ -36,6 +36,26 @@ The workbench runs locally through `online.cpu_server:app`, Qdrant, persistent
 SQLite indexes, and isolated encoder workers. Gemini, Qwen, the former BGE
 cross-encoder, and the legacy server/CLI are not part of this runtime.
 
+### Lightweight Apple Silicon MPS subset demo
+
+If you have extracted a local keyframe subset into `data/artifacts/keyframes/`
+without ingesting the full Qdrant corpus, launch the standalone MPS subset
+workbench instead:
+
+```bash
+AIC_DEVICE=mps PYTORCH_ENABLE_MPS_FALLBACK=1 \
+  HF_HOME="$(pwd)/models/huggingface" PYTHONPATH="$(pwd)" \
+  .venv/bin/uvicorn online.mps_demo_server:app --host 127.0.0.1 --port 8890
+```
+
+`online.mps_demo_server:app` indexes only frames with extracted `.jpg` files on
+disk, serves them directly from `/keyframes/{video_id}/{filename}`, keeps
+`SigLIP2`, `MetaCLIP 2`, and `BEiT-3 COCO` text/image inference plus cosine
+scoring on PyTorch MPS, and runs SQLite FTS5 lexical search for DAM BM25 and
+OCR. When optional BGE-M3 DAM vectors (`dam_vectors.f16.npy`) or ASR segments
+are not present locally, Branch 2 uses DAM BM25 + BEiT-3 COCO MPS reranking
+and ASR returns an empty pool.
+
 ### Source-frame indexing contract
 
 Video submission uses the original zero-based `frame_idx`, not the sparse
