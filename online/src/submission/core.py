@@ -109,9 +109,7 @@ def _verified_frame(
     frame_idx = _strict_non_negative_int(value.get("frame_idx"), "frame_idx")
     keyframe_value = value.get("keyframe_n")
     keyframe_n = (
-        None
-        if keyframe_value is None
-        else _strict_non_negative_int(keyframe_value, "keyframe_n")
+        None if keyframe_value is None else _strict_non_negative_int(keyframe_value, "keyframe_n")
     )
     pts_time_s = _strict_non_negative_float(value.get("pts_time_s"), "pts_time_s")
 
@@ -234,9 +232,7 @@ def _load_video_frames(
         frames.append(frame)
     frames.sort(
         key=lambda frame: (
-            int(frame["keyframe_n"])
-            if frame.get("keyframe_n") is not None
-            else math.inf,
+            int(frame["keyframe_n"]) if frame.get("keyframe_n") is not None else math.inf,
             float(frame["pts_time_s"]),
             int(frame["frame_idx"]),
         )

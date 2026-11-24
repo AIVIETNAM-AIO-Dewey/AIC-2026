@@ -112,7 +112,9 @@ class SubmissionCoreTests(unittest.TestCase):
                 frame_lookup=self.store.frame,
             )
 
-    def test_verified_non_keyframe_keeps_exact_source_index_and_uses_anchors_only_for_fill(self) -> None:
+    def test_verified_non_keyframe_keeps_exact_source_index_and_uses_anchors_only_for_fill(
+        self,
+    ) -> None:
         def source_frame(video_id: str, frame_idx: int) -> dict | None:
             canonical = self.store.frame(video_id, frame_idx)
             if canonical is not None:

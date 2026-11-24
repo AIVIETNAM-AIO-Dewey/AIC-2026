@@ -133,9 +133,7 @@ class SourceFrameIndex:
         media_duration = self._media_duration(canonical)
         final_anchor = frames[-1]
         duration_bound = (
-            max(0, math.ceil(media_duration * fps) - 1)
-            if media_duration is not None
-            else 0
+            max(0, math.ceil(media_duration * fps) - 1) if media_duration is not None else 0
         )
         max_frame_idx = max(int(final_anchor["frame_idx"]), duration_bound)
         resolved_end_time = self._interpolate_time(max_frame_idx, frames, fps)
