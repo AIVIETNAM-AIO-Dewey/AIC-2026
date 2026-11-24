@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Responsive UI harness</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+      }
+
+      iframe {
+        display: block;
+        width: 390px;
+        height: 844px;
+        border: 0;
+      }
+
+      pre {
+        position: fixed;
+        top: 0;
+        left: 410px;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe id="app-frame" src="/" title="AIC UI at 390 by 844 pixels"></iframe>
+    <pre id="metrics" aria-live="polite">Loading…</pre>
+    <script>
+      const frame = document.querySelector("#app-frame");
+      const output = document.querySelector("#metrics");
+
+      frame.addEventListener("load", () => {
+        requestAnimationFrame(() => {
+          const doc = frame.contentDocument;
+          const win = frame.contentWindow;
+          const queryBoxes = [...doc.querySelectorAll(".query-box-col")].map((node) => {
+            const rect = node.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, right: rect.right };
+          });
+          const visibleButtonHeights = [...doc.querySelectorAll("button")]
+            .map((button) => button.getBoundingClientRect().height)
+            .filter((height) => height > 0);
+          output.textContent = JSON.stringify({
+            viewportWidth: win.innerWidth,
+            htmlScrollWidth: doc.documentElement.scrollWidth,
+            bodyScrollWidth: doc.body.scrollWidth,
+            queryBoxes,
+            minVisibleButtonHeight: Math.min(...visibleButtonHeights),
+          }, null, 2);
+        });
+      });
+    </script>
+  </body>
+</html>

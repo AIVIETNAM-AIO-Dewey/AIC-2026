@@ -11,9 +11,7 @@ build/
 dist/
 .venv/
 venv/
-frontend/node_modules/
-frontend/.npm-cache/
-frontend/tsconfig.tsbuildinfo
+/.local/
 
 # Notebook/editor state
 .ipynb_checkpoints/
@@ -31,12 +29,17 @@ Thumbs.db
 *service-account*.json
 *credentials*.json
 
-# Competition data and generated artifacts
+# Competition data: keep only the policy files
 data/**
+!data/README.md
 artifacts/**
+!artifacts/README.md
 runs/**
+!runs/README.md
 
 # Model and framework caches
+node_modules/
+.tools/
 .cache/
 cache/
 models/
@@ -75,4 +78,4 @@ submissions/
 outputs/
 
 # Tiny, licensed test fixtures are explicitly allowed.
-!offline/tests/fixtures/**
+!tests/fixtures/**

@@ -1,0 +1,44 @@
+FROM node:22.20.0-bookworm-slim AS frontend
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY vite.config.ts tsconfig.json tsconfig.frontend-js.json ./
+COPY scripts/check_frontend.mjs ./scripts/check_frontend.mjs
+COPY online/frontend ./online/frontend
+RUN npm test && npm run build
+
+FROM python:3.12.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/models/huggingface \
+    TOKENIZERS_PARALLELISM=false \
+    AIC_DATA_ROOT=/data \
+    AIC_STATE_ROOT=/state \
+    QDRANT_URL=http://qdrant:6333 \
+    AIC_CPU_THREADS=8 \
+    AIC_BRANCH1_MODEL_ROOT=/models/branch1 \
+    AIC_QUERY_MODEL_MANIFEST=/models/query_models.json \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir torch==2.7.1+cpu torchvision==0.22.1+cpu --index-url https://download.pytorch.org/whl/cpu
+COPY scripts/qdrant/requirements.cpu.txt ./requirements.cpu.txt
+RUN pip install --no-cache-dir -r requirements.cpu.txt
+
+COPY online ./online
+COPY scripts/qdrant/prepare_branch2.py ./scripts/qdrant/prepare_branch2.py
+COPY scripts/qdrant/prepare_branch1.py ./scripts/qdrant/prepare_branch1.py
+COPY scripts/qdrant/prepare_text_indexes.py ./scripts/qdrant/prepare_text_indexes.py
+COPY scripts/qdrant/prepare_asr_index.py ./scripts/qdrant/prepare_asr_index.py
+COPY scripts/qdrant/qualify_resources.py ./scripts/qdrant/qualify_resources.py
+COPY scripts/qdrant/validate_branch1_data.py ./scripts/qdrant/validate_branch1_data.py
+COPY scripts/qdrant/ingest.py ./scripts/qdrant/ingest.py
+COPY --from=frontend /app/online/frontend/dist ./online/frontend/dist
+RUN python -m compileall -q ./online ./scripts
+
+EXPOSE 8890
+
+CMD ["uvicorn", "online.cpu_server:app", "--host", "0.0.0.0", "--port", "8890"]

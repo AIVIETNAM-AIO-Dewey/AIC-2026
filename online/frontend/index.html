@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIC-2026 KIS Fusion Studio</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- TOP APP HEADER -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-badge">
+        <span class="logo-icon">⚡</span>
+        <div class="logo-text">
+          <span class="logo-title">AIC-2026 KIS FUSION STUDIO</span>
+          <span class="logo-sub">Local multimodal retrieval and verified submission</span>
+        </div>
+      </div>
+      
+      <div class="task-selector">
+        <span id="task-selector-label">TASK:</span>
+        <div class="task-btn-group" role="group" aria-labelledby="task-selector-label">
+          <button class="task-btn active" type="button" data-task="KIS" aria-pressed="true">KIS</button>
+          <button class="task-btn" type="button" data-task="VQA" aria-pressed="false">Q&amp;A</button>
+          <button class="task-btn" type="button" data-task="TRAKE" aria-pressed="false">TRAKE</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="parser-selector" aria-label="Query parser settings">
+        <label for="select-parser-engine">Parser</label>
+        <select id="select-parser-engine">
+          <option value="local" selected>Local deterministic</option>
+          <option value="direct">Direct · no LLM</option>
+        </select>
+        <label class="parser-fallback-control" title="All query processing stays on this machine">
+          <input id="chk-external-fallback" type="checkbox" disabled>
+          <span>No external LLM</span>
+        </label>
+      </div>
+
+      <div class="status-pill ready" role="status" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="server-status-text">Checking local KIS Fusion</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="workspace-tabs" aria-label="Retrieval workspaces">
+    <button class="workspace-tab active" type="button" data-workspace="kis_fusion" aria-selected="true" aria-controls="workspace-kis-fusion">KIS Fusion</button>
+    <button class="workspace-tab" type="button" data-workspace="branch2" aria-selected="false" aria-controls="workspace-branch2">Branch 2 - DAM Hybrid</button>
+    <button class="workspace-tab" type="button" data-workspace="branch3_asr" aria-selected="false" aria-controls="workspace-branch3-asr">Branch 3 · ASR</button>
+    <button class="workspace-tab" type="button" data-workspace="branch3_ocr" aria-selected="false" aria-controls="workspace-branch3-ocr">Branch 3 · OCR</button>
+    <button class="workspace-tab" type="button" data-workspace="text" aria-selected="false" aria-controls="workspace-text">⌨ Diagnostics</button>
+    <button class="workspace-tab" type="button" data-workspace="branch1" aria-selected="false" aria-controls="workspace-branch1">Branch 1 · 3 Models</button>
+    <button class="workspace-tab" type="button" data-workspace="image" aria-selected="false" aria-controls="workspace-image">🖼 Image Search</button>
+    <button class="workspace-tab" type="button" data-workspace="video" aria-selected="false" aria-controls="workspace-video">▶ Watch Video</button>
+    <button id="btn-toggle-submission-rail" class="btn-toggle-submission-rail" type="button" aria-expanded="true" aria-controls="submission-rail">Submission <span id="submission-tab-count">0</span></button>
+  </nav>
+
+  <div class="workbench-shell">
+    <aside id="submission-rail" class="submission-rail" aria-label="Submission workspace">
+      <div class="submission-rail-header">
+        <div>
+          <div class="submission-rail-title">SUBMISSION DRAFT</div>
+          <div id="submission-schema-note" class="submission-schema-note">KIS · video_id, frame_idx · no header · up to 100 rows</div>
+        </div>
+        <div class="submission-header-actions">
+          <span id="submission-count" class="submission-count">0</span>
+          <button id="btn-close-submission-rail" class="submission-rail-close" type="button" aria-label="Close submission panel" title="Close submission panel">×</button>
+        </div>
+      </div>
+      <label class="submission-query-id-label" for="submission-query-id">Query/file ID (filename only)</label>
+      <input id="submission-query-id" class="submission-query-id" type="text" value="1" maxlength="64">
+      <div id="vqa-answer-panel" class="submission-mode-panel hidden">
+        <label for="vqa-answer-input">Human Q&amp;A answer (maximum 100 characters)</label>
+        <textarea id="vqa-answer-input" rows="2" maxlength="100" placeholder="Enter your final answer; the UI never invents one."></textarea>
+      </div>
+      <div id="trake-event-panel" class="submission-mode-panel hidden">
+        <div class="submission-mode-label">Active TRAKE event</div>
+        <div id="trake-event-tabs" class="trake-event-tabs"></div>
+        <div class="submission-mode-hint">Results are assigned to the highlighted event. Ordered sequence cards can add every event together.</div>
+      </div>
+      <div id="submission-list" class="submission-list" aria-live="polite">
+        <div class="submission-empty">Add a frame from any result, inspector, or video player.</div>
+      </div>
+      <div id="submission-related-note" class="submission-related-note hidden" role="status" aria-live="polite"></div>
+      <div class="submission-summary">
+        <label for="submission-input">Top row / active selection</label>
+        <input type="text" id="submission-input" readonly value="No keyframe selected">
+      </div>
+      <div class="submission-rail-actions">
+        <button id="btn-copy-submission" class="btn-copy" type="button">📋 Copy active row</button>
+        <button id="btn-export-csv" class="btn-export" type="button">📥 Review CSV</button>
+        <button id="btn-clear-submission" class="btn-text" type="button">Clear draft</button>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTAINER -->
+    <main class="main-container">
+    <div id="workspace-text" class="workspace-panel hidden" data-workspace-panel="text">
+    <!-- QUERY CONTROL DECK -->
+    <section class="control-deck">
+      <div class="deck-header">
+        <div class="mode-tabs">
+          <span class="section-label">QUERY MODE:</span>
+          <button class="mode-tab active" type="button" data-mode="auto">1. Auto-Run</button>
+          <button class="mode-tab" type="button" data-mode="edit">2. Edit-then-Send</button>
+          <button class="mode-tab" type="button" data-mode="direct">3. Direct JSON</button>
+        </div>
+        <div class="deck-meta">
+          <span id="timing-badge" class="meta-badge" role="status" aria-live="polite">Ready</span>
+          <span id="session-badge" class="meta-badge hidden" role="status" aria-live="polite">Session: -</span>
+        </div>
+      </div>
+
+      <div class="deck-body">
+        <!-- Original Query Box -->
+        <div class="query-box-col" id="col-original-query">
+          <div class="col-header">
+            <label for="input-query">ORIGINAL QUERY (VIETNAMESE / ENGLISH)</label>
+            <span class="shortcut-tip">Press Ctrl+Enter or Cmd+Enter to Run</span>
+          </div>
+          <textarea id="input-query" placeholder="Nhập câu truy vấn video... (Ví dụ: Đoạn video về cuộc đua xe đạp nhìn từ flycam trên cao...)"></textarea>
+          <div class="col-actions">
+            <button id="btn-run-query" class="btn-primary" type="button">
+              <span class="btn-icon">🚀</span>
+              <span id="btn-run-label">Parse &amp; Search</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Structured Parsed JSON Editor -->
+        <div class="query-box-col" id="col-parsed-json">
+          <div class="col-header">
+            <label for="json-editor">STRUCTURED QUERY CONTRACT (JSON)</label>
+            <button id="btn-format-json" class="btn-text" type="button">Format</button>
+          </div>
+          <textarea id="json-editor" spellcheck="false" placeholder="Parsed JSON schema will appear here or paste directly..."></textarea>
+          <div class="col-actions json-actions">
+            <button id="btn-execute-json" class="btn-secondary" type="button">
+              <span class="btn-icon">▶️</span> Execute JSON
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- INDEPENDENT MODALITY VIEW PANEL -->
+      <div class="weights-panel modality-view-panel">
+        <div class="weights-header">
+          <div class="weights-title">
+            <span>🔬 INDEPENDENT MODALITY VIEW</span>
+            <span class="weights-hint">— Rankings and scores are never combined across pools</span>
+          </div>
+          <span class="nofusion-badge">FUSION OFF · STAGE 2 OFF</span>
+        </div>
+        <div class="modality-tabs" role="tablist" aria-label="Retrieval modality">
+          <button class="modality-tab active" type="button" data-modality="all" role="tab" aria-selected="true" aria-controls="results-grid">All Pools</button>
+          <button class="modality-tab" type="button" data-modality="siglip" role="tab" aria-selected="false" aria-controls="results-grid">👁️ SigLIP</button>
+          <button class="modality-tab" type="button" data-modality="dam" role="tab" aria-selected="false" aria-controls="results-grid">📦 DAM</button>
+          <button class="modality-tab" type="button" data-modality="ocr" role="tab" aria-selected="false" aria-controls="results-grid">🔤 OCR</button>
+          <button class="modality-tab" type="button" data-modality="asr" role="tab" aria-selected="false" aria-controls="results-grid">🎙️ ASR</button>
+        </div>
+        <div id="modality-query-summary" class="modality-query-summary">
+          Run a search to inspect the exact query and score definition for every pool.
+        </div>
+        <div class="temporal-event-builder">
+          <div class="temporal-event-builder-header">
+            <label for="temporal-events-editor">⛓ ORDERED SIGLIP EVENTS</label>
+            <span id="temporal-event-count">0 usable events</span>
+          </div>
+          <textarea
+            id="temporal-events-editor"
+            rows="3"
+            spellcheck="false"
+            placeholder="One independently searchable English visual event per line (E1 → E2 → E3). Auto-filled from trake_events when available."
+          ></textarea>
+          <div class="temporal-event-builder-hint">This editor is an explicit fallback when the cloud/local parser cannot create trake_events. Lines are searched independently with SigLIP; their scores are not mixed with DAM, OCR, or ASR.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RESULTS SECTION -->
+    <section class="results-section">
+      <div class="results-header">
+        <div class="results-title-group">
+          <span id="results-heading" class="results-heading">🎯 RAW MODALITY RESULTS</span>
+          <span id="results-count-badge" class="count-badge" role="status" aria-live="polite">0 independent results</span>
+        </div>
+        <div class="results-view-controls">
+          <button
+            id="btn-temporal-intersection"
+            class="btn-temporal-intersection"
+            type="button"
+            disabled
+            title="Intersect ordered SigLIP event searches by video ID and enforce increasing timestamps"
+          >⛓ Find ordered sequence</button>
+          <label class="temporal-gap-control" for="select-temporal-gap">
+            Max event gap:
+            <select id="select-temporal-gap" disabled>
+              <option value="10">10s</option>
+              <option value="30" selected>30s</option>
+              <option value="60">60s</option>
+              <option value="120">120s</option>
+              <option value="300">300s</option>
+            </select>
+          </label>
+          <details class="ordered-advanced-controls">
+            <summary>Advanced</summary>
+            <div class="ordered-advanced-popover">
+              <label for="select-temporal-candidates">Candidates / event
+                <select id="select-temporal-candidates">
+                  <option value="300" selected>300 · current default</option>
+                  <option value="500">500</option>
+                  <option value="1000">1,000</option>
+                </select>
+              </label>
+              <label for="select-temporal-sequences">Sequences requested
+                <select id="select-temporal-sequences">
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100" selected>100 · current default</option>
+                </select>
+              </label>
+              <label for="select-temporal-paths-per-video">Paths per video
+                <select id="select-temporal-paths-per-video">
+                  <option value="1" selected>1 · current default</option>
+                  <option value="3">3</option>
+                  <option value="5">5</option>
+                </select>
+              </label>
+              <label for="select-temporal-reservoir">Sequence reservoir
+                <select id="select-temporal-reservoir">
+                  <option value="same" selected>Same as returned</option>
+                  <option value="100">100</option>
+                  <option value="250">250</option>
+                  <option value="500">500</option>
+                </select>
+              </label>
+              <div class="ordered-advanced-hint">Higher values increase recall and latency. Ranking and no-fusion scoring remain unchanged.</div>
+            </div>
+          </details>
+          <button
+            id="btn-discovery-cascade"
+            class="btn-discovery-cascade"
+            type="button"
+            disabled
+            title="Use each DAM object independently to discover videos, then rank frames with raw SigLIP cosine"
+          >🧭 Discover videos → frames</button>
+          <label for="select-top-k">Top Results:</label>
+          <select id="select-top-k">
+            <option value="10">Top 10</option>
+            <option value="20" selected>Top 20</option>
+            <option value="50">Top 50</option>
+            <option value="100">Top 100</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- RESULTS GRID -->
+      <div id="results-grid" class="results-grid">
+        <!-- Candidate Cards will be rendered dynamically -->
+        <div class="empty-placeholder">
+          <div class="empty-icon">🔍</div>
+          <div class="empty-title">Ready for Search</div>
+          <div class="empty-desc">Enter your query above or paste structured JSON to retrieve video keyframes.</div>
+        </div>
+      </div>
+    </section>
+    </div>
+
+    <section id="workspace-branch1" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch1" aria-labelledby="branch1-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">30 COSINE STREAMS · MAX PER MODEL · Z-SIGMOID FUSION</div>
+          <h1 id="branch1-workspace-title">Three-model visual retrieval</h1>
+          <p>Paste exactly six bilingual query variants. SigLIP2 and MetaCLIP2 read both VI and EN; BEiT-3 reads EN. No LLM API and no reranker are called.</p>
+        </div>
+        <span id="branch1-health-badge" class="nofusion-badge">CHECKING DATA GATE</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header">
+            <label for="branch1-json-editor">BRANCH-1 QUERY BUNDLE</label>
+            <button id="btn-format-branch1-json" class="btn-text" type="button">Format</button>
+          </div>
+          <textarea id="branch1-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch1-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Model-level fusion</h2>
+          <label for="branch1-weight-siglip">SigLIP2 <output id="branch1-weight-siglip-value">0.45</output></label>
+          <input id="branch1-weight-siglip" type="range" min="0" max="1" step="0.05" value="0.45">
+          <label for="branch1-weight-metaclip">MetaCLIP2 <output id="branch1-weight-metaclip-value">0.30</output></label>
+          <input id="branch1-weight-metaclip" type="range" min="0" max="1" step="0.05" value="0.30">
+          <label for="branch1-weight-beit">BEiT-3 <output id="branch1-weight-beit-value">0.25</output></label>
+          <input id="branch1-weight-beit" type="range" min="0" max="1" step="0.05" value="0.25">
+          <div id="branch1-normalized-weights" class="branch1-normalized-weights">Normalized: 45% / 30% / 25%</div>
+          <div class="branch1-fixed-setting">API pool: 1,500 · per stream: 2,000 · one heavy search at a time</div>
+          <button id="btn-run-branch1" class="btn-primary" type="button" disabled>Run Branch 1</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group">
+          <span class="results-heading">BRANCH-1 FUSED RESULTS</span>
+          <span id="branch1-results-count" class="count-badge">Not run</span>
+        </div>
+        <span id="branch1-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch1-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">3×6</div><div class="empty-title">Strict three-model search</div><div class="empty-desc">Search remains disabled until every data, collection, and encoder gate is ready.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-branch2" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch2" aria-labelledby="branch2-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">DAM DENSE + BM25 SPARSE - BEiT-3 COCO COSINE RERANK</div>
+          <h1 id="branch2-workspace-title">DAM hybrid + BEiT-3 COCO cosine rerank</h1>
+          <p>Six English query variants search DAM regions with BGE-M3 and local BM25. Only the top 100 of 500 hybrid frames are reranked by BEiT-3 cosine.</p>
+        </div>
+        <span id="branch2-health-badge" class="nofusion-badge">CHECKING DATA GATE</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch2-json-editor">BRANCH-2 QUERY BUNDLE</label><button id="btn-format-branch2-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch2-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch2-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Hybrid and rerank weights</h2>
+          <label for="branch2-weight-dense">Dense <output id="branch2-weight-dense-value">0.70</output></label>
+          <input id="branch2-weight-dense" type="range" min="0" max="1" step="0.05" value="0.70">
+          <label for="branch2-weight-sparse">Sparse <output id="branch2-weight-sparse-value">0.30</output></label>
+          <input id="branch2-weight-sparse" type="range" min="0" max="1" step="0.05" value="0.30">
+          <label for="branch2-weight-beit">BEiT-3 COCO cosine <output id="branch2-weight-beit-value">0.40</output></label>
+          <input id="branch2-weight-beit" type="range" min="0" max="1" step="0.05" value="0.40">
+          <label for="branch2-weight-previous">Hybrid <output id="branch2-weight-previous-value">0.60</output></label>
+          <input id="branch2-weight-previous" type="range" min="0" max="1" step="0.05" value="0.60">
+          <div id="branch2-normalized-weights" class="branch1-normalized-weights">Hybrid 70% / 30% - Rerank 40% BEiT-3 / 60% Hybrid</div>
+          <div class="branch1-fixed-setting">API pool: 500 · per stream: 2,000 · BEiT-3 COCO cosine rerank top 100</div>
+          <button id="btn-run-branch2" class="btn-primary" type="button" disabled>Run Branch 2</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header"><div class="results-title-group"><span class="results-heading">BRANCH-2 HYBRID RESULTS</span><span id="branch2-results-count" class="count-badge">Not run</span></div><span id="branch2-timing" class="meta-badge">Ready</span></div>
+      <div id="branch2-results-grid" class="results-grid feature-results-grid"><div class="empty-placeholder"><div class="empty-icon">DAM</div><div class="empty-title">Dense + sparse search</div><div class="empty-desc">Search remains disabled until DAM, BM25, BGE-M3, and BEiT-3 COCO cosine gates are ready.</div></div></div>
+    </section>
+
+    <section id="workspace-branch3-asr" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch3_asr" aria-labelledby="branch3-asr-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">12 VI/EN FTS5 STREAMS · BM25 + TOKEN/NGRAM COVERAGE · TOP 500</div>
+          <h1 id="branch3-asr-workspace-title">ASR speech retrieval</h1>
+          <p>Six bilingual query variants search the prepared ASR transcript index. Each segment maps to its nearest canonical keyframe; OCR and final RRF remain independent for now.</p>
+        </div>
+        <span id="branch3-asr-health-badge" class="nofusion-badge">CHECKING ASR INDEX</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch3-asr-json-editor">BRANCH-3 ASR QUERY BUNDLE</label><button id="btn-format-branch3-asr-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch3-asr-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch3-asr-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>ASR retrieval</h2>
+          <div class="branch1-fixed-setting">BM25 55% · token 30% · adjacent n-gram 15%</div>
+          <div class="branch1-fixed-setting">12 streams × 2,000 · max bilingual segment/frame score · API pool: 500</div>
+          <button id="btn-run-branch3-asr" class="btn-primary" type="button" disabled>Run ASR</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span class="results-heading">BRANCH-3 ASR RESULTS</span><span id="branch3-asr-results-count" class="count-badge">Not run</span></div>
+        <span id="branch3-asr-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch3-asr-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">ASR</div><div class="empty-title">Speech retrieval ready</div><div class="empty-desc">Search remains disabled until the ASR SQLite index and canonical frame mapping are prepared.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-branch3-ocr" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="branch3_ocr" aria-labelledby="branch3-ocr-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">12 VI/EN FTS5 STREAMS · BM25 + TOKEN/NGRAM COVERAGE · TOP 500</div>
+          <h1 id="branch3-ocr-workspace-title">OCR text retrieval</h1>
+          <p>Six bilingual query variants search the prepared OCR frame index independently from ASR. OCR results are capped at 500 for future fusion; only the first 150 are displayed here.</p>
+        </div>
+        <span id="branch3-ocr-health-badge" class="nofusion-badge">CHECKING OCR INDEX</span>
+      </div>
+      <div class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="branch3-ocr-json-editor">BRANCH-3 OCR QUERY BUNDLE</label><button id="btn-format-branch3-ocr-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="branch3-ocr-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="branch3-ocr-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>OCR retrieval</h2>
+          <div class="branch1-fixed-setting">BM25 55% · token 30% · adjacent n-gram 15%</div>
+          <div class="branch1-fixed-setting">12 streams × 2,000 · max bilingual frame score · API pool: 500</div>
+          <button id="btn-run-branch3-ocr" class="btn-primary" type="button" disabled>Run OCR</button>
+        </div>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span class="results-heading">BRANCH-3 OCR RESULTS</span><span id="branch3-ocr-results-count" class="count-badge">Not run</span></div>
+        <span id="branch3-ocr-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="branch3-ocr-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">OCR</div><div class="empty-title">OCR retrieval ready</div><div class="empty-desc">Search remains disabled until the OCR SQLite index is prepared.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-kis-fusion" class="workspace-panel workspace-feature-panel" data-workspace-panel="kis_fusion" aria-labelledby="kis-fusion-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">WEIGHTED RRF k=60 · FOUR BRANCH POOLS · FINAL TOP 150</div>
+          <h1 id="kis-fusion-workspace-title">KIS Fusion main workspace</h1>
+          <p>Branch 1 (1,500), Branch 2 (500), ASR (500) and OCR (500) are fused by rank. BEiT-3 COCO cosine reranks only the first 100; frames 101-150 keep their RRF order.</p>
+        </div>
+        <span id="kis-fusion-health-badge" class="nofusion-badge">CHECKING FUSION HEALTH</span>
+      </div>
+      <div id="kis-sticky-query" class="kis-sticky-query">
+        <div class="kis-sticky-query-main">
+          <span id="kis-task-badge" class="kis-task-badge">KIS</span>
+          <div class="kis-sticky-query-content">
+            <label class="kis-sticky-label" for="kis-pinned-query-text">OVERALL QUERY · SINGLE SOURCE</label>
+            <textarea id="kis-pinned-query-text" class="kis-pinned-query-text" rows="2" maxlength="4096" spellcheck="false" placeholder="Enter the complete KIS, Q&amp;A, or TRAKE query. Use E1:, E2:, … or temporal words for ordered events."></textarea>
+            <div id="kis-query-plan-status" class="kis-query-plan-status" role="status" aria-live="polite">Enter one overall query, then prepare its linked bundle and events.</div>
+          </div>
+        </div>
+        <div class="kis-sticky-query-actions">
+          <button id="btn-prepare-kis-query" class="btn-secondary" type="button" disabled>Prepare bundle &amp; events</button>
+          <span class="kis-sticky-hint">Preparation is local and does not run retrieval.</span>
+        </div>
+      </div>
+      <div id="kis-task-guidance" class="kis-task-guidance">KIS uses the full four-branch fusion pipeline. Selecting the first frame can fill the remaining draft with visually related indexed frames.</div>
+      <div id="kis-fusion-control-grid" class="branch1-control-grid">
+        <div class="branch1-editor-column">
+          <div class="col-header"><label for="kis-fusion-json-editor">KIS QUERY BUNDLE</label><button id="btn-format-kis-fusion-json" class="btn-text" type="button">Format</button></div>
+          <textarea id="kis-fusion-json-editor" class="branch1-json-editor" spellcheck="false" rows="18">{
+  "schema_version": "branch1.query.v1",
+  "queries": [
+    {"role": "original", "vi": "", "en": ""},
+    {"role": "entity", "vi": "", "en": ""},
+    {"role": "action", "vi": "", "en": ""},
+    {"role": "context", "vi": "", "en": ""},
+    {"role": "synonym", "vi": "", "en": ""},
+    {"role": "keyword", "vi": "", "en": ""}
+  ]
+}</textarea>
+          <div id="kis-fusion-validation" class="branch1-validation" role="status" aria-live="polite">Both VI and EN are required for all six roles.</div>
+        </div>
+        <div class="branch1-settings">
+          <h2>Fusion weights</h2>
+          <label for="kis-fusion-weight-branch1">Branch 1 <output id="kis-fusion-weight-branch1-value">0.40</output></label>
+          <input id="kis-fusion-weight-branch1" type="range" min="0.01" max="1" step="0.01" value="0.40">
+          <label for="kis-fusion-weight-branch2">Branch 2 <output id="kis-fusion-weight-branch2-value">0.30</output></label>
+          <input id="kis-fusion-weight-branch2" type="range" min="0.01" max="1" step="0.01" value="0.30">
+          <label for="kis-fusion-weight-ocr">OCR <output id="kis-fusion-weight-ocr-value">0.15</output></label>
+          <input id="kis-fusion-weight-ocr" type="range" min="0.01" max="1" step="0.01" value="0.15">
+          <label for="kis-fusion-weight-asr">ASR <output id="kis-fusion-weight-asr-value">0.15</output></label>
+          <input id="kis-fusion-weight-asr" type="range" min="0.01" max="1" step="0.01" value="0.15">
+          <div id="kis-fusion-normalized-weights" class="branch1-normalized-weights">Normalized: 40% / 30% / 15% / 15%</div>
+          <div class="branch1-fixed-setting">RRF k=60 · final pool: 150 · BEiT-3 COCO cosine rerank top 100</div>
+          <div class="branch1-fixed-setting">Final score: 25% BEiT-3 + 75% RRF</div>
+          <button id="btn-run-kis-fusion" class="btn-primary" type="button" disabled>Run KIS fusion</button>
+        </div>
+      </div>
+      <details id="kis-trake-sequence-panel" class="kis-trake-sequence-panel">
+        <summary>
+          <span>ORDERED KIS EVENTS (E1 → E2 → …)</span>
+          <span id="kis-trake-event-count">0 events</span>
+        </summary>
+        <div class="kis-trake-sequence-body">
+          <label class="sr-only" for="kis-trake-sequence-editor">Ordered KIS event prompts</label>
+          <textarea id="kis-trake-sequence-editor" rows="6" spellcheck="false" placeholder="E1: First event in English&#10;E2: Next event in English&#10;&#10;Optional bilingual form: sự kiện tiếng Việt || event in English"></textarea>
+          <div class="kis-trake-actions">
+            <label for="kis-trake-gap">Maximum gap
+              <select id="kis-trake-gap"><option value="15">15s</option><option value="30" selected>30s</option><option value="60">60s</option><option value="120">120s</option></select>
+            </label>
+            <label for="kis-trake-sequences">Sequences
+              <select id="kis-trake-sequences"><option value="20">20</option><option value="50">50</option><option value="100" selected>100</option></select>
+            </label>
+            <button id="btn-run-kis-trake" class="btn-primary" type="button" disabled>Run ordered KIS fusion</button>
+          </div>
+          <div class="branch1-fixed-setting">Every event runs through Branch 1, Branch 2, OCR and ASR, followed by KIS fusion and strict same-video source-frame ordering. Each event inherits only the shared context from the overall query.</div>
+          <div class="branch1-fixed-setting">Ordered matches are complete sequences, but “first appearance” and camera motion must be confirmed in the video player because retrieval operates on indexed frames.</div>
+        </div>
+      </details>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group"><span id="kis-fusion-results-heading" class="results-heading">KIS FINAL RESULTS</span><span id="kis-fusion-results-count" class="count-badge">Not run</span></div>
+        <span id="kis-fusion-timing" class="meta-badge">Ready</span>
+      </div>
+      <div id="kis-fusion-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">RRF</div><div class="empty-title">KIS fusion ready</div><div class="empty-desc">Search is enabled when Branch 1, Branch 2, ASR and OCR health gates are all ready.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-image" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="image" aria-labelledby="image-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">SIGLIP IMAGE → IMAGE COSINE</div>
+          <h1 id="image-workspace-title">Search with an image</h1>
+          <p>The uploaded image is embedded with the same SigLIP model as the dataset. DAM, OCR, and ASR are not fused into this ranking.</p>
+        </div>
+        <span class="nofusion-badge">SIGLIP ONLY</span>
+      </div>
+      <div id="image-drop-zone" class="image-drop-zone" tabindex="0" role="button" aria-label="Choose or paste a query image">
+        <input id="image-query-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+        <img id="image-query-preview" class="image-query-preview hidden" alt="Selected query image preview">
+        <div id="image-drop-prompt">
+          <div class="image-drop-icon">🖼</div>
+          <strong>Drop, paste, or choose an image</strong>
+          <span>JPEG, PNG, or WebP</span>
+        </div>
+      </div>
+      <div class="feature-actions">
+        <button id="btn-choose-image" class="btn-secondary" type="button">Choose image</button>
+        <label for="select-image-top-k">Results
+          <select id="select-image-top-k">
+            <option value="20">20</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <button id="btn-run-image-search" class="btn-primary" type="button" disabled>Search image</button>
+        <button id="btn-clear-image" class="btn-text" type="button">Clear</button>
+      </div>
+      <div class="results-header feature-results-header">
+        <div class="results-title-group">
+          <span class="results-heading">🖼 IMAGE QUERY RESULTS</span>
+          <span id="image-results-count" class="count-badge">No image selected</span>
+        </div>
+      </div>
+      <div id="image-results-grid" class="results-grid feature-results-grid">
+        <div class="empty-placeholder"><div class="empty-icon">🖼</div><div class="empty-title">Image Search Ready</div><div class="empty-desc">Choose an unknown visual example to find similar indexed frames.</div></div>
+      </div>
+    </section>
+
+    <section id="workspace-video" class="workspace-panel workspace-feature-panel hidden" data-workspace-panel="video" aria-labelledby="video-workspace-title">
+      <div class="feature-panel-header">
+        <div>
+          <div class="feature-eyebrow">INDEPENDENT DATASET BROWSER</div>
+          <h1 id="video-workspace-title">Watch a video by dataset ID</h1>
+          <p>Choose any zero-based source-frame index. The exact index is verified for submission, the video seeks to its calculated timestamp, and the nearest indexed keyframe is shown only as a preview.</p>
+        </div>
+      </div>
+      <form id="video-id-form" class="video-id-form">
+        <label for="video-id-input">Dataset video ID</label>
+        <input id="video-id-input" type="text" placeholder="L25_V060" autocomplete="off" spellcheck="false">
+        <button id="btn-load-video-id" class="btn-primary" type="submit">Load video</button>
+      </form>
+      <div id="standalone-video-area" class="standalone-video-area hidden">
+        <div class="standalone-player-column">
+          <div id="standalone-video-mock" class="video-mock standalone-video-mock" aria-label="Dataset video player">
+            <iframe id="standalone-youtube-player" class="youtube-player" title="Dataset YouTube video player" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+            <img id="standalone-video-poster" class="video-poster" alt="Playback-adjacent indexed keyframe preview">
+            <div class="video-vignette"></div>
+            <button id="standalone-btn-video-center-play" class="video-center-play" type="button" aria-label="Play video"><i data-lucide="play"></i></button>
+            <div class="video-controls-shell">
+              <input id="standalone-video-progress" class="video-progress" type="range" min="0" max="1" step="0.1" value="0" aria-label="Video position">
+              <div class="video-control-row">
+                <div class="video-control-group">
+                  <button id="standalone-btn-video-play" class="video-icon-btn" type="button" aria-label="Play"><i data-lucide="play"></i></button>
+                  <button id="standalone-btn-video-back" class="video-icon-btn" type="button" aria-label="Back 5 seconds"><i data-lucide="rotate-ccw"></i></button>
+                  <button id="standalone-btn-video-forward" class="video-icon-btn" type="button" aria-label="Forward 5 seconds"><i data-lucide="rotate-cw"></i></button>
+                  <span id="standalone-video-time" class="video-time">00:00 / --:--</span>
+                </div>
+                <div class="video-control-group">
+                  <button id="standalone-btn-open-youtube" class="video-icon-btn" type="button" aria-label="Open on YouTube" disabled><i data-lucide="external-link"></i></button>
+                  <button id="standalone-btn-video-fullscreen" class="video-icon-btn" type="button" aria-label="Fullscreen"><i data-lucide="maximize"></i></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="video-local-search-bar">
+            <input id="standalone-video-query" type="text" placeholder="Search only inside this video…">
+            <button id="btn-standalone-video-search" class="btn-secondary" type="button">Visual trio search</button>
+          </div>
+        </div>
+        <aside class="playback-map-card">
+          <div id="standalone-video-source" class="mapping-status">Loading metadata</div>
+          <div class="playback-map-row"><span>Playback</span><strong id="watch-playback-time">0.0s</strong></div>
+          <div class="playback-map-row"><span>Current source frame (0-based)</span><strong id="watch-estimated-frame">—</strong></div>
+          <div class="playback-map-row"><span>Nearest indexed preview</span><strong id="watch-keyframe-n">—</strong></div>
+          <div class="playback-map-row"><span>Preview frame index</span><strong id="watch-frame-idx">—</strong></div>
+          <div class="playback-map-row"><span>Preview timestamp</span><strong id="watch-keyframe-time">—</strong></div>
+          <div class="playback-map-row"><span>Preview time offset</span><strong id="watch-mapping-delta">—</strong></div>
+          <div class="watch-exact-selector">
+            <label for="watch-exact-frame-input">Exact source frame to submit (0-based)</label>
+            <div>
+              <input id="watch-exact-frame-input" type="number" min="0" step="1" placeholder="frame_idx">
+              <button id="btn-select-watch-frame" type="button">Verify &amp; seek</button>
+            </div>
+            <span id="watch-selected-frame-status">No source frame selected</span>
+          </div>
+          <div class="playback-neighbor-actions">
+            <button id="btn-watch-prev-keyframe" type="button">← 1 frame</button>
+            <button id="btn-watch-next-keyframe" type="button">+1 frame →</button>
+          </div>
+          <button id="btn-submit-watch-frame" class="btn-submit-toggle" type="button" disabled>+ Add selected source frame</button>
+        </aside>
+      </div>
+      <div id="standalone-video-search-results" class="results-grid feature-results-grid hidden"></div>
+    </section>
+    </main>
+  </div>
+
+  <!-- OFFICIAL BTC CSV EXPORT MODAL -->
+  <div id="export-modal" class="modal-backdrop hidden">
+    <div class="export-modal-card" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" aria-describedby="export-modal-desc" tabindex="-1">
+      <div class="export-modal-header">
+        <div class="export-modal-title" id="export-modal-title">📥 Export Official Submission CSV</div>
+        <button id="btn-close-export-modal" class="btn-icon-close" type="button" aria-label="Close export dialog" title="Close">✕</button>
+      </div>
+      <div class="export-modal-body">
+        <p class="export-modal-desc" id="export-modal-desc">
+          The CSV follows the BTC format: UTF-8, comma-delimited, no header, no query ID column, and 1–100 data rows. Human selections stay first; TRAKE rows each contain one complete same-video event sequence. Only server-generated official CSV bytes can be downloaded.
+        </p>
+        <div class="export-field-group">
+          <label for="export-query-id">Query/file ID (used only as the downloaded filename):</label>
+          <input type="text" id="export-query-id" class="export-input" value="1" placeholder="e.g. query-4-trake">
+        </div>
+        <div class="export-preview-box">
+          <div class="export-preview-lbl">CSV Preview:</div>
+          <code id="export-row1-preview" aria-live="polite">No submission rows yet</code>
+          <textarea id="export-csv-preview" rows="10" spellcheck="false" aria-label="Editable CSV rows"></textarea>
+          <div id="export-schema-warning" class="export-schema-warning"></div>
+        </div>
+      </div>
+      <div class="export-modal-footer">
+        <button id="btn-revalidate-csv" class="btn-secondary" type="button" disabled>
+          <span>✓ Revalidate edited rows</span>
+        </button>
+        <button id="btn-download-csv-action" class="btn-action-download" type="button">
+          <span>⚡ Download CSV (100 Rows)</span>
+        </button>
+        <button id="btn-cancel-export-modal" class="btn-text" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FRAME INSPECTOR MODAL (Matching User's UI Design) -->
+  <div id="inspector-modal" class="modal-backdrop hidden">
+    <div class="inspector-card" role="dialog" aria-modal="true" aria-label="Frame inspector" tabindex="-1">
+      <div class="inspector-main">
+        <!-- Left: Large Keyframe Canvas & Image -->
+        <div class="inspector-visual-pane">
+          <div class="visual-mode-bar">
+            <div class="visual-mode-tabs" role="tablist" aria-label="Inspector media mode">
+              <button id="btn-view-keyframe" class="visual-mode-btn active" type="button" role="tab" aria-selected="true" aria-controls="keyframe-view">Keyframe</button>
+              <button id="btn-view-video" class="visual-mode-btn" type="button" role="tab" aria-selected="false" aria-controls="video-view">Video</button>
+            </div>
+            <span id="mapping-status" class="mapping-status" role="status" aria-live="polite">Mapping pending</span>
+          </div>
+          <div class="image-wrapper" id="inspector-image-wrapper">
+            <div id="keyframe-view" class="inspector-media-view keyframe-view">
+              <img id="inspector-img" alt="Keyframe Preview">
+              <canvas id="inspector-canvas"></canvas>
+              <div id="inspector-img-placeholder" class="missing-img-overlay hidden">
+                <div class="placeholder-icon">🖼️</div>
+                <div id="placeholder-text" class="placeholder-lbl">L21_V001 / 001.jpg</div>
+              </div>
+            </div>
+            <div id="video-view" class="inspector-media-view video-view hidden">
+              <div id="video-mock" class="video-mock" aria-label="Video player preview">
+                <iframe id="youtube-player" class="youtube-player" title="YouTube video player" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+                <img id="video-poster" class="video-poster" alt="Video preview poster">
+                <div class="video-vignette"></div>
+                <button id="btn-video-center-play" class="video-center-play" type="button" title="Play preview" aria-label="Play preview">
+                  <i data-lucide="play"></i>
+                </button>
+                <div class="video-controls-shell">
+                  <input id="video-progress" class="video-progress" type="range" min="0" max="1262" step="0.1" value="0" aria-label="Video position">
+                  <div class="video-control-row">
+                    <div class="video-control-group">
+                      <button id="btn-video-play" class="video-icon-btn" type="button" title="Play" aria-label="Play">
+                        <i data-lucide="play"></i>
+                      </button>
+                      <button id="btn-video-back" class="video-icon-btn" type="button" title="Back 5 seconds" aria-label="Back 5 seconds">
+                        <i data-lucide="rotate-ccw"></i>
+                      </button>
+                      <button id="btn-video-forward" class="video-icon-btn" type="button" title="Forward 5 seconds" aria-label="Forward 5 seconds">
+                        <i data-lucide="rotate-cw"></i>
+                      </button>
+                      <span id="video-time" class="video-time">00:00 / 21:02</span>
+                    </div>
+                    <div class="video-control-group">
+                      <button id="btn-open-youtube" class="video-icon-btn" type="button" title="Open at timestamp on YouTube" aria-label="Open at timestamp on YouTube" disabled>
+                        <i data-lucide="external-link"></i>
+                      </button>
+                      <button id="btn-video-fullscreen" class="video-icon-btn" type="button" title="Fullscreen" aria-label="Fullscreen">
+                        <i data-lucide="maximize"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="keyframe-visual-controls" class="visual-controls">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-bboxes" checked>
+              <span>Show DAM Bounding Boxes</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Right: Metadata & Explainability Panel -->
+        <div class="inspector-meta-pane">
+          <div class="meta-section">
+            <div class="inspector-local-search">
+              <label for="inspector-video-query">SEARCH INSIDE THIS VIDEO</label>
+              <div class="inspector-local-search-row">
+                <input id="inspector-video-query" type="text" placeholder="Describe another moment in this video…">
+                <select id="inspector-parser-engine" aria-label="Inside-video parser">
+                  <option value="direct" selected>Direct visual trio</option>
+                  <option value="local">Local parse + visual trio</option>
+                </select>
+                <button id="btn-inspector-video-search" type="button">Search</button>
+              </div>
+              <div id="inspector-local-results" class="inspector-local-results hidden"></div>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">VIDEO</span>
+              <span class="meta-val highlight" id="insp-video-id">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">FRAME NUMBER</span>
+              <span class="meta-val" id="insp-keyframe-n">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">FRAME INDEX (PTS TIME)</span>
+              <span class="meta-val" id="insp-frame-idx">-</span>
+            </div>
+            <div class="meta-field">
+              <span class="meta-lbl">SCORE / RANK</span>
+              <span class="meta-val" id="insp-score-rank">-</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">MATCHED TIMESTAMP</span>
+              <span class="meta-val highlight" id="insp-matched-time">-</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">VIDEO SOURCE</span>
+              <span class="meta-val" id="insp-video-source">Not configured</span>
+            </div>
+            <div class="meta-field mapping-meta-field">
+              <span class="meta-lbl">MAPPING OFFSET</span>
+              <span class="meta-val" id="insp-mapping-offset">0.0s</span>
+            </div>
+          </div>
+
+          <!-- ASR Speech Transcript -->
+          <div class="meta-detail-box">
+            <div class="detail-box-title">🎙️ SPOKEN SPEECH (ASR)</div>
+            <div class="detail-box-content" id="insp-asr-text">(No dialogue recorded in this keyframe)</div>
+          </div>
+
+          <div class="meta-detail-box">
+            <div class="detail-box-title">ASR RETRIEVAL EVIDENCE</div>
+            <div class="detail-box-content" id="insp-asr-evidence">(No ASR ranking evidence)</div>
+            <div class="detail-box-content" id="insp-asr-context">(No macro audio context)</div>
+          </div>
+
+          <!-- DAM Visual Description -->
+          <div class="meta-detail-box">
+            <div class="detail-box-title">🖼️ DAM VISUAL DESCRIPTION</div>
+            <div class="detail-box-content" id="insp-dam-text">(No visual description)</div>
+          </div>
+
+          <!-- OCR Screen Text -->
+          <div class="meta-detail-box" id="insp-ocr-box">
+            <div class="detail-box-title">🔤 SCREEN TEXT (OCR)</div>
+            <div class="detail-box-content" id="insp-ocr-text">(No text detected on screen)</div>
+          </div>
+
+          <!-- Matched DAM Objects List -->
+          <div class="meta-detail-box" id="insp-objects-box">
+            <div class="detail-box-title">📦 DETECTED OBJECTS</div>
+            <div class="objects-list" id="insp-objects-list"></div>
+          </div>
+
+          <!-- Inspector Action Buttons -->
+          <div class="inspector-actions">
+            <button id="btn-toggle-in-submission" class="btn-submit-toggle" type="button">
+              <span>✓ In submission</span>
+            </button>
+            <button id="btn-close-inspector" class="btn-close" type="button">
+              <span>Close</span>
+            </button>
+          </div>
+
+          <div class="keyboard-hints">
+            <span><kbd>←</kbd> <kbd>→</kbd> browse video</span>
+            <span><kbd>↵</kbd> add to submit</span>
+            <span><kbd>Esc</kbd> close</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom: Filmstrip Slider -->
+      <div class="inspector-filmstrip-pane">
+        <div class="filmstrip-header">
+          <span>VIDEO KEYFRAMES TIMELINE</span>
+          <div class="filmstrip-bulk-actions">
+            <span id="filmstrip-count" role="status" aria-live="polite">0 frames</span>
+            <button id="btn-clear-filmstrip-selection" type="button" disabled>Clear</button>
+            <button id="btn-add-filmstrip-selection" type="button" disabled>Add selected (0)</button>
+          </div>
+        </div>
+        <div class="filmstrip-carousel-wrap">
+          <button id="btn-filmstrip-prev" class="carousel-arrow" type="button" aria-label="Scroll filmstrip backward" title="Previous keyframes">◀</button>
+          <div class="filmstrip-scroll" id="filmstrip-scroll">
+            <!-- Filmstrip thumbnails injected here -->
+          </div>
+          <button id="btn-filmstrip-next" class="carousel-arrow" type="button" aria-label="Scroll filmstrip forward" title="Next keyframes">▶</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true">Copied to clipboard!</div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

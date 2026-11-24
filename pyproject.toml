@@ -11,9 +11,11 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
   "jsonschema==4.23.0",
   "numpy==1.26.4",
+  "pandas==2.2.3",
   "pillow==11.1.0",
   "pydantic==2.10.6",
   "pyyaml==6.0.2",
+  "safetensors==0.5.2",
   "tqdm==4.67.1",
 ]
 
@@ -23,28 +25,23 @@ dev = [
   "pytest==8.3.4",
   "pytest-cov==6.0.0",
   "ruff==0.9.7",
-  "tomli==2.2.1; python_version < '3.11'",
 ]
 
 [tool.setuptools.packages.find]
-where = ["offline/src"]
+where = ["src"]
 
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-extend-exclude = ["offline/notebooks"]
+extend-exclude = ["notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.ruff.lint.per-file-ignores]
-"offline/scripts/inspect_dam_results.py" = ["E501"]
-"offline/scripts/run_phowhisper_asr.py" = ["E501"]
-"offline/scripts/sample_dense_frames.py" = ["E501"]
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
-testpaths = ["offline/tests"]
+testpaths = ["tests"]
 markers = [
   "gpu: requires a CUDA-capable GPU and model weights",
   "integration: exercises more than one pipeline component",

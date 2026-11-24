@@ -3,7 +3,7 @@ name: cpu-ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
 
 permissions:
   contents: read
@@ -13,45 +13,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
+  python-quality:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install CPU test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" -e "./backend[dev]"
+          python -m pip install -e ".[dev]"
       - name: Validate repository files
         run: |
-          python -m json.tool offline/notebooks/colab_object_description.ipynb > /dev/null
-          python -m json.tool offline/notebooks/kaggle_object_description.ipynb > /dev/null
-          python -c "import yaml; yaml.safe_load(open('offline/configs/models.yaml', encoding='utf-8')); yaml.safe_load(open('offline/configs/offline/object_description.yaml', encoding='utf-8'))"
+          for nb in notebooks/*.ipynb; do
+            python -m json.tool "$nb" > /dev/null
+          done
+          python -c "import pathlib, yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('configs').rglob('*.yaml')]"
       - name: Ruff
         run: |
-          ruff check offline/src offline/tests offline/scripts backend/src backend/tests
-          ruff format --check offline/src offline/tests offline/scripts backend/src backend/tests
+          ruff check .
+          ruff format --check .
       - name: CPU tests
-        run: pytest offline/tests backend/tests -m "not gpu and not slow"
+        run: pytest -m "not gpu and not slow"
 
-  frontend:
+  online-tests:
+    name: Online retrieval tests (Python 3.12)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/qdrant/requirements.cpu.txt
+      - name: Install online CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir torch==2.7.1+cpu torchvision==0.22.1+cpu --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-cache-dir -r scripts/qdrant/requirements.cpu.txt
+      - name: Compile online and scripts
+        run: python -m compileall -q online scripts
+      - name: Run online test suite
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s online/tests -p 'test_*.py' -v
+
+  frontend-quality:
+    name: Frontend quality and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Build and test web client
-        working-directory: frontend
-        run: |
-          npm ci
-          npm audit --audit-level=high
-          npm run build
-          npm test
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Frontend syntax and DOM contract
+        run: npm run lint
+      - name: Frontend typecheck
+        run: npm run typecheck
+      - name: Frontend tests
+        run: npm test
+      - name: Build compiled frontend
+        run: npm run build
+      - name: Verify compiled frontend assets
+        run: npm run verify:dist
+      - name: Store compiled frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: aic-frontend-dist
+          path: online/frontend/dist
+          if-no-files-found: error
+          retention-days: 7

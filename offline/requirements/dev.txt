@@ -1,2 +1,0 @@
--e .[dev]
--e ./backend[dev]

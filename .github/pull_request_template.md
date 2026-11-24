@@ -6,7 +6,7 @@
 
 ```bash
 # Exact command; dùng path qua env/CLI, không dùng path máy cá nhân.
-python offline/scripts/<runner>.py --config offline/configs/<config>.yaml
+python scripts/<runner>.py --config configs/<config>.yaml
 ```
 
 - Dataset/split + checksum/version:

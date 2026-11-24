@@ -1,0 +1,4 @@
+-r runtime.txt
+
+# Kaggle supplies the CUDA-matched PyTorch wheel. Enable Internet for the initial
+# model snapshot, or attach an approved private model Dataset for offline runs.

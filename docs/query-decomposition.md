@@ -1,4 +1,6 @@
-# Fixed query-decomposition prompt
+# Query Decomposition Contracts
+
+> **Runtime Note:** The online retrieval workbench (`online/cpu_server.py`) uses the deterministic local planner (`LocalQueryParser` + `build_kis_query_plan`) to build the bilingual six-role **`branch1.query.v1`** bundle (`original`, `entity`, `action`, `context`, `synonym`, `keyword` in VI/EN) and ordered KIS event plans with zero external LLM API calls. The `aic26.query.v1` LLM prompt below documents the offline/optional structured decomposition schema in `src/aic2026/contracts/query.py`.
 
 Prompt này là contract, không sửa trực tiếp trong notebook. Mọi thay đổi cần bump
 `prompt_version`, chạy eval KIS/Q&A/TRAKE và cập nhật `QuerySpec` nếu schema đổi.
